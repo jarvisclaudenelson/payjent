@@ -64,8 +64,8 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
         <section>
           <h2>Dev mock payment</h2>
           <p>The browser page is intentionally read-only. To complete this local development payment, call the authenticated API with an operator credential:</p>
-          <pre><code>curl -X POST http://localhost:8000/api/v1/payment-sessions/{_html_escape(ps.id)}/mock-pay \
-  -H 'Authorization: Bearer $PAYJENT_OPERATOR_KEY'</code></pre>
+          <pre><code>curl -X POST http://localhost:8000/api/v1/payment-sessions/{_html_escape(ps.id)}/mock-pay \\
+  -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;'</code></pre>
         </section>
         """
     grant_line = f"<p>Grant: <code>{_html_escape(grant.id)}</code></p>" if grant else "<p>Grant: not issued</p>"

@@ -66,7 +66,7 @@ Create a quote:
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/quotes \
   -H 'content-type: application/json' \
-  -H "Authorization: Bearer $PAYJENT_BOT_KEY" \
+  -H "X-Payjent-Bot-Key: <bot-key>" \
   -d '{
     "bot_id":"discord-bot-1",
     "external_user_id":"user-123",
@@ -83,7 +83,7 @@ Create checkout:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/quotes/{quote_id}/checkout \
-  -H "Authorization: Bearer $PAYJENT_BOT_KEY" \
+  -H "X-Payjent-Bot-Key: <bot-key>" \
   -H 'Idempotency-Key: demo-request-1'
 ```
 
@@ -91,7 +91,7 @@ Mock-pay the session (operator credential required):
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/payment-sessions/{session_id}/mock-pay \
-  -H "X-Payjent-Bot-Key: $PAYJENT_OPERATOR_KEY"
+  -H "X-Payjent-Bot-Key: <operator-key>"
 ```
 
 Scaffold rails for local/dev testing only:
@@ -104,12 +104,12 @@ Verify and consume grant:
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/grants/{grant_id}/verify \
   -H 'content-type: application/json' \
-  -H "Authorization: Bearer $PAYJENT_BOT_KEY" \
+  -H "X-Payjent-Bot-Key: <bot-key>" \
   -d '{"bot_id":"discord-bot-1","external_user_id":"user-123","request_hash":"reqhash123"}'
 
 curl -s -X POST http://127.0.0.1:8000/api/v1/grants/{grant_id}/consume \
   -H 'content-type: application/json' \
-  -H "Authorization: Bearer $PAYJENT_BOT_KEY" \
+  -H "X-Payjent-Bot-Key: <bot-key>" \
   -d '{"bot_id":"discord-bot-1","external_user_id":"user-123","request_hash":"reqhash123"}'
 ```
 
@@ -118,7 +118,7 @@ Record fulfillment:
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/quotes/{quote_id}/fulfillment \
   -H 'content-type: application/json' \
-  -H "Authorization: Bearer $PAYJENT_BOT_KEY" \
+  -H "X-Payjent-Bot-Key: <bot-key>" \
   -d '{"status":"fulfilled","metadata":{"message_id":"abc"}}'
 ```
 
