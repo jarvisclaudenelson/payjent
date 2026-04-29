@@ -2,6 +2,9 @@ import hashlib
 import hmac
 import json
 
+from sqlmodel import Session
+
+from payjent.auth import create_bot_credential
 from payjent.config import Settings, get_settings
 from payjent.models import PaymentSession, Quote
 from payjent.providers.stripe import create_stripe_checkout_session
@@ -144,6 +147,44 @@ def test_stripe_checkout_fails_closed_when_config_missing(client, quote_payload,
     response = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers)
     assert response.status_code == 503
     assert response.json()["detail"] == "PAYJENT_PUBLIC_BASE_URL is required for Stripe checkout"
+
+
+def test_production_per_request_stripe_requires_webhook_secret_before_provider_call(
+    client, engine, quote_payload, monkeypatch
+):
+    settings = Settings(
+        env="production",
+        dev_mode=False,
+        signing_secret="prod-signing-secret-for-test",
+        checkout_provider="mock",
+        public_base_url="https://payjent.example",
+        stripe_secret_key="sk_test_fake",
+        stripe_webhook_secret=None,
+    )
+    api_key = "prod-test-bot-key"
+    with Session(engine) as session:
+        create_bot_credential(session, "bot-1", api_key, settings.signing_secret)
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    provider_called = False
+
+    def fail_if_called(*_args, **_kwargs):
+        nonlocal provider_called
+        provider_called = True
+        raise AssertionError("Stripe provider should not be called without a production webhook secret")
+
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", fail_if_called)
+    headers = {"Authorization": f"Bearer {api_key}"}
+    quote = client.post("/api/v1/quotes", json=quote_payload, headers=headers).json()
+
+    response = client.post(
+        f"/api/v1/quotes/{quote['id']}/checkout",
+        headers={**headers, "X-Payjent-Provider": "stripe"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "PAYJENT_STRIPE_WEBHOOK_SECRET is required for Stripe checkout in production"
+    assert provider_called is False
 
 
 def test_stripe_webhook_can_map_provider_session_id(client, quote_payload, bot_headers, monkeypatch):

@@ -127,6 +127,16 @@ def session_to_read(s: PaymentSession) -> PaymentSessionRead:
     return PaymentSessionRead.model_validate(s, from_attributes=True)
 
 
+def _enforce_stripe_checkout_guardrails(settings: Settings) -> None:
+    if not settings.stripe_secret_key:
+        raise HTTPException(status_code=503, detail="PAYJENT_STRIPE_SECRET_KEY is required for Stripe checkout")
+    if settings.is_production and not settings.stripe_webhook_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="PAYJENT_STRIPE_WEBHOOK_SECRET is required for Stripe checkout in production",
+        )
+
+
 @app.post("/api/v1/quotes", response_model=QuoteRead)
 def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
     _enforce_bot_scope(credential, payload.bot_id)
@@ -198,6 +208,7 @@ def checkout(
         idempotency_key=idempotency_key,
     )
     if requested_provider == "stripe":
+        _enforce_stripe_checkout_guardrails(settings)
         provider_session_id, hosted_url = create_stripe_checkout_session(q, ps, settings)
         ps.provider_session_id = provider_session_id
         ps.checkout_url = hosted_url
