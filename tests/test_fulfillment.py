@@ -1,6 +1,6 @@
-def test_fulfillment_state_transition(client, paid_grant):
+def test_fulfillment_state_transition(client, paid_grant, bot_headers):
     q, _ps, _grant = paid_grant
-    r = client.post(f"/api/v1/quotes/{q['id']}/fulfillment", json={"status":"executing", "metadata":{"worker":"w1"}})
+    r = client.post(f"/api/v1/quotes/{q['id']}/fulfillment", json={"status":"executing", "metadata":{"worker":"w1"}}, headers=bot_headers)
     assert r.status_code == 200
     data = r.json()
     assert data["quote_id"] == q["id"]
@@ -8,11 +8,11 @@ def test_fulfillment_state_transition(client, paid_grant):
     assert data["metadata"] == {"worker":"w1"}
     assert client.get(f"/api/v1/quotes/{q['id']}").json()["status"] == "executing"
 
-    r2 = client.post(f"/api/v1/quotes/{q['id']}/fulfillment", json={"status":"fulfilled", "metadata":{"message_id":"m1"}})
+    r2 = client.post(f"/api/v1/quotes/{q['id']}/fulfillment", json={"status":"fulfilled", "metadata":{"message_id":"m1"}}, headers=bot_headers)
     assert r2.status_code == 200
     assert client.get(f"/api/v1/quotes/{q['id']}").json()["status"] == "fulfilled"
 
 
-def test_fulfillment_unknown_quote_rejected(client):
-    r = client.post("/api/v1/quotes/quote_missing/fulfillment", json={"status":"fulfilled"})
+def test_fulfillment_unknown_quote_rejected(client, bot_headers):
+    r = client.post("/api/v1/quotes/quote_missing/fulfillment", json={"status":"fulfilled"}, headers=bot_headers)
     assert r.status_code == 404

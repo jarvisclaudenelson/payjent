@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 from uuid import uuid4
-from fastapi import Depends, FastAPI, HTTPException
-from sqlmodel import Session, update
+from fastapi import Depends, FastAPI, Header, HTTPException
+from sqlmodel import Session, select, update
 from .config import Settings, get_settings
 from .db import get_session, init_db
-from .models import Quote, PaymentSession, Grant, FulfillmentEvent
+from .auth import require_bot_credential, require_operator_credential
+from .models import BotCredential, Quote, PaymentSession, Grant, FulfillmentEvent
 from .money import validate_breakdown, quote_hash
 from .schemas import (
     FulfillmentCreate, FulfillmentRead, GrantPresentation, GrantVerifyResponse,
@@ -12,6 +13,7 @@ from .schemas import (
 )
 from .signing import verify_signature
 from .providers.mock import complete_mock_payment
+from .risk import assess_checkout_risk
 
 app = FastAPI(title="Payjent")
 
@@ -29,7 +31,7 @@ def session_to_read(s: PaymentSession) -> PaymentSessionRead:
 
 
 @app.post("/api/v1/quotes", response_model=QuoteRead)
-def create_quote(payload: QuoteCreate, session: Session = Depends(get_session)):
+def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), _credential: BotCredential = Depends(require_bot_credential)):
     try:
         validate_breakdown(payload.amount_minor, payload.cost_breakdown)
     except ValueError as exc:
@@ -63,10 +65,27 @@ def get_quote(quote_id: str, session: Session = Depends(get_session)):
 
 
 @app.post("/api/v1/quotes/{quote_id}/checkout", response_model=PaymentSessionRead)
-def checkout(quote_id: str, session: Session = Depends(get_session)):
+def checkout(
+    quote_id: str,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    session: Session = Depends(get_session),
+    _credential: BotCredential = Depends(require_bot_credential),
+):
     q = session.get(Quote, quote_id)
     if not q: raise HTTPException(404, "quote not found")
-    ps = PaymentSession(id=f"ps_{uuid4().hex}", quote_id=q.id, checkout_url=f"mock://checkout/{q.id}")
+    risk = assess_checkout_risk(q.request_summary, q.execution_envelope)
+    if not risk.allowed:
+        raise HTTPException(status_code=403, detail=f"checkout blocked by risk policy: {risk.reason}")
+    if idempotency_key:
+        existing = session.exec(
+            select(PaymentSession).where(
+                PaymentSession.quote_id == q.id,
+                PaymentSession.idempotency_key == idempotency_key,
+            )
+        ).first()
+        if existing:
+            return session_to_read(existing)
+    ps = PaymentSession(id=f"ps_{uuid4().hex}", quote_id=q.id, checkout_url=f"mock://checkout/{q.id}", idempotency_key=idempotency_key)
     session.add(ps); session.commit(); session.refresh(ps)
     return session_to_read(ps)
 
@@ -79,7 +98,7 @@ def get_payment_session(session_id: str, session: Session = Depends(get_session)
 
 
 @app.post("/api/v1/payment-sessions/{session_id}/mock-pay", response_model=MockPayResponse)
-def mock_pay(session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+def mock_pay(session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_operator_credential)):
     if not (settings.dev_mode and settings.mock_provider_enabled):
         raise HTTPException(403, "mock provider disabled")
     ps = session.get(PaymentSession, session_id)
@@ -107,7 +126,7 @@ def _load_valid_grant(grant_id: str, presentation: GrantPresentation, session: S
 
 
 @app.post("/api/v1/grants/{grant_id}/verify", response_model=GrantVerifyResponse)
-def verify_grant(grant_id: str, presentation: GrantPresentation, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+def verify_grant(grant_id: str, presentation: GrantPresentation, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_bot_credential)):
     grant = _load_valid_grant(grant_id, presentation, session, settings)
     return GrantVerifyResponse(valid=True, grant_id=grant.id, consumed=grant.consumed_at is not None, payload=grant.payload)
 
@@ -126,7 +145,7 @@ def _mark_grant_consumed(grant_id: str, session: Session) -> bool:
 
 
 @app.post("/api/v1/grants/{grant_id}/consume", response_model=GrantVerifyResponse)
-def consume_grant(grant_id: str, presentation: GrantPresentation, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+def consume_grant(grant_id: str, presentation: GrantPresentation, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_bot_credential)):
     grant = _load_valid_grant(grant_id, presentation, session, settings)
     if not _mark_grant_consumed(grant.id, session):
         raise HTTPException(409, "grant already consumed")
@@ -134,7 +153,7 @@ def consume_grant(grant_id: str, presentation: GrantPresentation, session: Sessi
 
 
 @app.post("/api/v1/quotes/{quote_id}/fulfillment", response_model=FulfillmentRead)
-def record_fulfillment(quote_id: str, payload: FulfillmentCreate, session: Session = Depends(get_session)):
+def record_fulfillment(quote_id: str, payload: FulfillmentCreate, session: Session = Depends(get_session), _credential: BotCredential = Depends(require_bot_credential)):
     q = session.get(Quote, quote_id)
     if not q: raise HTTPException(404, "quote not found")
     ev = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=quote_id, status=payload.status, metadata_json=payload.metadata)

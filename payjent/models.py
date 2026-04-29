@@ -22,12 +22,21 @@ class Quote(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class BotCredential(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    bot_id: str = Field(index=True)
+    key_hash: str = Field(index=True, unique=True)
+    role: str = "bot"
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class PaymentSession(SQLModel, table=True):
     id: str = Field(primary_key=True)
     quote_id: str = Field(index=True)
     provider: str = "mock"
     status: str = "checkout_created"
     checkout_url: str | None = None
+    idempotency_key: str | None = Field(default=None, index=True)
     receipt_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
     paid_at: datetime | None = None

@@ -38,6 +38,7 @@ class PaymentSessionRead(BaseModel):
     provider: str
     status: str
     checkout_url: str | None = None
+    idempotency_key: str | None = None
     receipt_id: str | None = None
 
 
