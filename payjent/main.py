@@ -16,7 +16,7 @@ from .schemas import (
 from .signing import verify_signature
 from .providers.mock import complete_mock_payment
 from .providers.base import issue_receipt_and_grant
-from .providers.stripe import parse_stripe_event, verify_stripe_signature
+from .providers.stripe import create_stripe_checkout_session, parse_stripe_event, verify_stripe_signature
 from .risk import assess_checkout_risk
 
 @asynccontextmanager
@@ -165,7 +165,9 @@ def get_quote(quote_id: str, session: Session = Depends(get_session)):
 def checkout(
     quote_id: str,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
     session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
     credential: BotCredential = Depends(require_bot_credential),
 ):
     q = session.get(Quote, quote_id)
@@ -183,8 +185,21 @@ def checkout(
         ).first()
         if existing:
             return session_to_read(existing)
+    requested_provider = (provider or settings.checkout_provider or "mock").lower()
+    if requested_provider not in {"mock", "local", "stripe"}:
+        raise HTTPException(status_code=422, detail="unsupported checkout provider")
     session_id = f"ps_{uuid4().hex}"
-    ps = PaymentSession(id=session_id, quote_id=q.id, checkout_url=f"/pay/{session_id}", idempotency_key=idempotency_key)
+    ps = PaymentSession(
+        id=session_id,
+        quote_id=q.id,
+        provider="mock" if requested_provider in {"mock", "local"} else requested_provider,
+        checkout_url=f"/pay/{session_id}",
+        idempotency_key=idempotency_key,
+    )
+    if requested_provider == "stripe":
+        provider_session_id, hosted_url = create_stripe_checkout_session(q, ps, settings)
+        ps.provider_session_id = provider_session_id
+        ps.checkout_url = hosted_url
     session.add(ps); session.commit(); session.refresh(ps)
     return session_to_read(ps)
 
@@ -242,13 +257,17 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
     data_object = event.get("data", {}).get("object", {}) if isinstance(event.get("data"), dict) else {}
     metadata = data_object.get("metadata", {}) if isinstance(data_object, dict) else {}
     session_id = data_object.get("payment_session_id") or metadata.get("payment_session_id")
+    provider_session_id = data_object.get("id")
 
     if event_type not in {"checkout.session.completed", "payment_intent.succeeded"}:
         return {"received": True, "processed": False, "reason": "event ignored"}
-    if not session_id:
-        raise HTTPException(400, "missing payment_session_id")
-    ps = session.get(PaymentSession, session_id)
-    if not ps: raise HTTPException(404, "payment session not found")
+    if event_type == "checkout.session.completed" and data_object.get("payment_status") not in {None, "paid"}:
+        return {"received": True, "processed": False, "reason": "checkout session not paid"}
+    ps = session.get(PaymentSession, session_id) if session_id else None
+    if not ps and provider_session_id:
+        ps = session.exec(select(PaymentSession).where(PaymentSession.provider_session_id == provider_session_id)).first()
+    if not ps:
+        raise HTTPException(404 if (session_id or provider_session_id) else 400, "payment session not found" if (session_id or provider_session_id) else "missing payment_session_id")
     if ps.status == "paid":
         return {"received": True, "processed": False, "reason": "payment session already paid", "payment_session": session_to_read(ps)}
     receipt, grant = _issue_paid_session(session, ps, settings, provider="stripe")

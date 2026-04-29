@@ -2,7 +2,7 @@
 
 Payjent v0 is a small FastAPI gateway skeleton for paid, bounded bot requests: quote -> checkout -> mock payment -> signed receipt/grant -> consume -> fulfillment.
 
-**v0 uses mock/scaffold payment rails only.** Stripe webhook handling verifies deterministic test signatures only when `PAYJENT_STRIPE_WEBHOOK_SECRET` is configured; unconfigured Stripe webhooks are rejected and do not mark sessions paid. Payjent does not create Stripe Checkout sessions or call live Stripe APIs. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
+**v0 defaults to mock/local payment rails.** Stripe Checkout is available only when explicitly configured (`PAYJENT_CHECKOUT_PROVIDER=stripe` or `X-Payjent-Provider: stripe`) and the optional Stripe SDK extra is installed for live calls. Checkout creation never marks a session paid; Stripe receipt/grant issuance happens only after a verified webhook. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
 
 ## Local setup
 
@@ -97,9 +97,12 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/payment-sessions/{session_id}/mock-
   -H "X-Payjent-Bot-Key: <operator-key>"
 ```
 
-Scaffold rails for local/dev testing only:
+Payment rails:
 
-- `POST /api/v1/webhooks/stripe` accepts Stripe-shaped webhook events only when `PAYJENT_STRIPE_WEBHOOK_SECRET` is configured. Requests must include a valid `Stripe-Signature` HMAC header; if the secret is unset, Payjent returns `503` and does not mark anything paid. No live Stripe API calls are made.
+- Mock/local remains the default. `POST /api/v1/quotes/{quote_id}/checkout` returns a local `/pay/{payment_session_id}` URL unless Stripe is requested.
+- Stripe Checkout: install `pip install -e '.[stripe]'`, set `PAYJENT_CHECKOUT_PROVIDER=stripe` (or send `X-Payjent-Provider: stripe` per request), `PAYJENT_STRIPE_SECRET_KEY`, `PAYJENT_PUBLIC_BASE_URL`, and `PAYJENT_STRIPE_WEBHOOK_SECRET`. Checkout sessions are created with quote amount/currency/summary metadata and an idempotency key; Payjent stores Stripe's Checkout Session id and hosted URL.
+- Test/live caveat: automated tests monkeypatch/fake the Stripe adapter and never call live Stripe. Use `sk_test_...` and `whsec_...` while testing; do not point production traffic at test keys, and do not expose live keys in source control.
+- `POST /api/v1/webhooks/stripe` verifies `Stripe-Signature` with `PAYJENT_STRIPE_WEBHOOK_SECRET`, maps Stripe Checkout Session ids or metadata back to Payjent payment sessions, and only then issues receipts/grants. If the secret is unset, Payjent returns `503` and does not mark anything paid.
 - `POST /api/v1/payment-sessions/{session_id}/crypto/mark-paid` is an operator-only dev placeholder that marks a session paid through the same receipt/grant issuance path; it is not crypto settlement.
 
 Verify and consume grant:

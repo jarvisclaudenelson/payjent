@@ -3,6 +3,9 @@ import hmac
 import json
 
 from payjent.config import Settings, get_settings
+from payjent.models import PaymentSession, Quote
+from payjent.providers.stripe import create_stripe_checkout_session
+import payjent.main as main_module
 from payjent.main import app
 
 
@@ -52,6 +55,116 @@ def test_stripe_webhook_marks_paid_and_duplicate_is_idempotent(client, quote_pay
     assert duplicate.status_code == 200
     assert duplicate.json()["processed"] is False
     assert duplicate.json()["reason"] == "payment session already paid"
+
+
+def test_stripe_adapter_builds_checkout_payload_idempotency_and_metadata():
+    quote = Quote(
+        id="quote_1",
+        bot_id="bot-1",
+        external_user_id="user-1",
+        request_summary="do a thing",
+        request_hash="hash-1",
+        amount_minor=250,
+        currency="USD",
+        cost_breakdown=[{"label": "work", "amount_minor": 250}],
+        quote_hash="qh",
+    )
+    payment_session = PaymentSession(id="ps_1", quote_id="quote_1", provider="stripe", idempotency_key="idem-1")
+    calls = {}
+
+    class FakeStripeClient:
+        def create_checkout_session(self, payload, idempotency_key):
+            calls["payload"] = payload
+            calls["idempotency_key"] = idempotency_key
+            return {"id": "cs_test_123", "url": "https://checkout.stripe.test/session"}
+
+    provider_session_id, url = create_stripe_checkout_session(
+        quote,
+        payment_session,
+        Settings(stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example"),
+        client=FakeStripeClient(),
+    )
+
+    assert provider_session_id == "cs_test_123"
+    assert url == "https://checkout.stripe.test/session"
+    assert calls["idempotency_key"] == "idem-1"
+    assert calls["payload"]["line_items"][0]["price_data"]["unit_amount"] == 250
+    assert calls["payload"]["line_items"][0]["price_data"]["currency"] == "usd"
+    assert calls["payload"]["success_url"] == "https://payjent.example/status/ps_1?checkout=success"
+    assert calls["payload"]["cancel_url"] == "https://payjent.example/pay/ps_1?checkout=cancelled"
+    assert calls["payload"]["metadata"] == {
+        "quote_id": "quote_1",
+        "payment_session_id": "ps_1",
+        "bot_id": "bot-1",
+        "request_hash": "hash-1",
+    }
+    assert calls["payload"]["payment_intent_data"]["metadata"] == calls["payload"]["metadata"]
+
+
+def test_stripe_checkout_uses_adapter_payload_and_does_not_mark_paid(client, quote_payload, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        checkout_provider="stripe",
+        stripe_secret_key="sk_test_fake",
+        public_base_url="https://payjent.example",
+    )
+    captured = {}
+
+    def fake_create(quote, payment_session, settings):
+        captured["quote_id"] = quote.id
+        captured["payment_session_idempotency_key"] = payment_session.idempotency_key
+        captured["settings"] = settings
+        return "cs_test_123", "https://checkout.stripe.test/session"
+
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", fake_create)
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+    response = client.post(
+        f"/api/v1/quotes/{q['id']}/checkout",
+        headers={**bot_headers, "Idempotency-Key": "idem-1"},
+    )
+
+    assert response.status_code == 200
+    ps = response.json()
+    assert ps["provider"] == "stripe"
+    assert ps["status"] == "checkout_created"
+    assert ps["provider_session_id"] == "cs_test_123"
+    assert ps["checkout_url"] == "https://checkout.stripe.test/session"
+    assert ps["receipt_id"] is None
+    assert captured["quote_id"] == q["id"]
+    assert captured["payment_session_idempotency_key"] == "idem-1"
+
+
+def test_stripe_checkout_fails_closed_when_config_missing(client, quote_payload, bot_headers):
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key=None, public_base_url="https://payjent.example")
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+    response = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "PAYJENT_STRIPE_SECRET_KEY is required for Stripe checkout"
+
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url=None)
+    response = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "PAYJENT_PUBLIC_BASE_URL is required for Stripe checkout"
+
+
+def test_stripe_webhook_can_map_provider_session_id(client, quote_payload, bot_headers, monkeypatch):
+    secret = "whsec_test"
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        checkout_provider="stripe",
+        stripe_secret_key="sk_test_fake",
+        public_base_url="https://payjent.example",
+        stripe_webhook_secret=secret,
+    )
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_map", "https://checkout.stripe.test/session"))
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+    ps = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers).json()
+    body = json.dumps({"type": "checkout.session.completed", "data": {"object": {"id": "cs_test_map", "payment_status": "paid"}}}, separators=(",", ":")).encode()
+    headers = {"content-type": "application/json", "Stripe-Signature": _stripe_signature(body, secret)}
+
+    paid = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
+    assert paid.status_code == 200
+    assert paid.json()["processed"] is True
+    assert paid.json()["payment_session"]["id"] == ps["id"]
+    assert paid.json()["payment_session"]["status"] == "paid"
 
 
 def test_stripe_webhook_rejects_unconfigured_secret_without_marking_paid(client, quote_payload, bot_headers):

@@ -36,6 +36,7 @@ class PaymentSession(SQLModel, table=True):
     provider: str = "mock"
     status: str = "checkout_created"
     checkout_url: str | None = None
+    provider_session_id: str | None = Field(default=None, index=True)
     idempotency_key: str | None = Field(default=None, index=True)
     receipt_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)

@@ -9,7 +9,12 @@ class Settings(BaseSettings):
     signing_secret: str = "dev-only-change-me"
     dev_mode: bool = True
     mock_provider_enabled: bool = True
+    checkout_provider: str = "mock"
+    public_base_url: str | None = None
+    stripe_secret_key: str | None = None
     stripe_webhook_secret: str | None = None
+    stripe_success_url_template: str | None = None
+    stripe_cancel_url_template: str | None = None
     grant_ttl_seconds: int = 900
 
 
