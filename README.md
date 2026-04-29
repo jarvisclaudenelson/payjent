@@ -154,3 +154,53 @@ presentation = {"bot_id": quote["bot_id"], "external_user_id": quote["external_u
 ```
 
 See `examples/discord_bot_flow.py` for a Discord-style dry flow that requires no Discord credentials.
+
+## Bot gate / pending request resume
+
+`payjent.bot_adapter.PayjentBotGate` is a small integration adapter for Discord, Hermes, C3PO, or similar bots. It wraps the SDK and keeps a local pending-request record keyed to the Payjent `quote_id` and `payment_session_id`:
+
+- bot/user context: `bot_id`, `external_user_id`, optional channel/thread/message ids
+- immutable request context: `request_hash`, human summary, execution envelope
+- lifecycle context: status, expiry, grant id, fulfillment id
+
+The important safety rule is: **do not trust fresh prompt text after payment**. Quote and store the execution envelope before payment, then resume only that stored envelope after Payjent verifies and consumes the paid grant.
+
+```python
+from payjent.bot_adapter import PayjentBotGate, MemoryPendingRequestStore
+from payjent.sdk import PayjentClient
+
+client = PayjentClient("http://127.0.0.1:8000", api_key="test-bot-key")
+gate = PayjentBotGate(client, MemoryPendingRequestStore())
+
+pending = gate.quote_pending_request(
+    bot_id="bot-1",
+    external_user_id="discord-user-123",
+    summary="Generate a research brief",
+    execution_envelope={"command": "/brief", "topic": "payments"},
+    amount_minor=750,
+    currency="USD",
+    cost_breakdown=[{"label": "brief", "amount_minor": 750}],
+)
+print(pending.checkout_url)
+
+# Later, after the payment rail/webhook/operator flow gives the bot a grant id:
+resume = gate.resume_paid_request(
+    pending.id,
+    grant_id="grant_...",
+    bot_id=pending.bot_id,
+    external_user_id=pending.external_user_id,
+    request_hash=pending.request_hash,
+)
+# Execute resume["execution_envelope"], never fresh user text.
+gate.record_fulfillment(pending.id, "fulfilled", {"discord_message_id": "reply-1"})
+```
+
+Run the end-to-end local resume demo (no Discord token needed):
+
+```bash
+python -m payjent.demo seed
+export PAYJENT_BOT_KEY='test-bot-key'
+export PAYJENT_OPERATOR_KEY='test-operator-key'
+uvicorn payjent.main:app --reload
+python examples/discord_resume_flow.py
+```

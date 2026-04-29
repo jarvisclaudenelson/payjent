@@ -60,6 +60,9 @@ class PayjentClient:
     def create_checkout(self, quote_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
         return self._request("POST", f"/api/v1/quotes/{quote_id}/checkout", headers=self._headers(idempotency_key))
 
+    def get_payment_session(self, session_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/v1/payment-sessions/{session_id}")
+
     def verify_grant(self, grant_id: str, **presentation: Any) -> dict[str, Any]:
         return self._request("POST", f"/api/v1/grants/{grant_id}/verify", headers=self._headers(), json=presentation)
 
@@ -85,6 +88,10 @@ def create_checkout(client: PayjentClient, quote_id: str, idempotency_key: str |
 
 def get_quote(client: PayjentClient, quote_id: str) -> dict[str, Any]:
     return client.get_quote(quote_id)
+
+
+def get_payment_session(client: PayjentClient, session_id: str) -> dict[str, Any]:
+    return client.get_payment_session(session_id)
 
 
 def verify_grant(client: PayjentClient, grant_id: str, **presentation: Any) -> dict[str, Any]:
