@@ -14,7 +14,7 @@ def verify_stripe_signature(raw_body: bytes, signature_header: str | None, secre
     for deterministic local tests.
     """
     if not secret:
-        return
+        raise HTTPException(status_code=503, detail="Stripe webhook secret not configured")
     if not signature_header:
         raise HTTPException(status_code=400, detail="missing Stripe signature")
 

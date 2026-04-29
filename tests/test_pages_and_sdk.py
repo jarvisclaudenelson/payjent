@@ -10,7 +10,7 @@ def _create_checkout(client, quote_payload, bot_headers):
     return quote, session
 
 
-def test_pay_page_shows_quote_and_dev_mock_button(client, quote_payload, bot_headers):
+def test_pay_page_shows_quote_and_authenticated_dev_mock_instructions(client, quote_payload, bot_headers):
     _quote, payment_session = _create_checkout(client, quote_payload, bot_headers)
 
     response = client.get(f"/pay/{payment_session['id']}")
@@ -20,23 +20,25 @@ def test_pay_page_shows_quote_and_dev_mock_button(client, quote_payload, bot_hea
     assert "do a thing" in response.text
     assert "2.50 USD" in response.text
     assert "Dev mock payment" in response.text
+    assert "curl -X POST" in response.text
+    assert "/api/v1/payment-sessions/" in response.text
     assert payment_session["id"] in response.text
 
 
-def test_dev_mock_pay_form_completes_payment(client, quote_payload, bot_headers):
+def test_browser_mock_pay_post_action_is_not_available(client, quote_payload, bot_headers):
     _quote, payment_session = _create_checkout(client, quote_payload, bot_headers)
 
     response = client.post(f"/pay/{payment_session['id']}/mock-pay")
     status = client.get(f"/status/{payment_session['id']}")
 
-    assert response.status_code == 200
-    assert "Mock payment complete" in response.text
-    assert "paid" in status.text
+    assert response.status_code == 404
+    assert "checkout_created" in status.text
 
 
 def test_status_pages_show_payment_grant_and_fulfillment(client, quote_payload, bot_headers, operator_headers):
     quote, payment_session = _create_checkout(client, quote_payload, bot_headers)
     paid = client.post(f"/api/v1/payment-sessions/{payment_session['id']}/mock-pay", headers=operator_headers).json()
+    client.post(f"/api/v1/grants/{paid['grant']['id']}/consume", headers=bot_headers, json={"bot_id": quote_payload["bot_id"]})
     client.post(f"/api/v1/quotes/{quote['id']}/fulfillment", headers=bot_headers, json={"status": "fulfilled", "metadata": {"message_id": "m1"}})
 
     index = client.get("/status")

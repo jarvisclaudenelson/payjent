@@ -4,7 +4,8 @@ from datetime import timedelta
 from typing import Protocol
 from uuid import uuid4
 
-from sqlmodel import Session
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, update
 
 from payjent.models import Grant, PaymentSession, Quote, Receipt, now_utc
 from payjent.signing import sign_payload
@@ -26,10 +27,24 @@ def issue_receipt_and_grant(
 ) -> tuple[Receipt, Grant]:
     """Shared paid-session issuance path for all provider stubs.
 
-    Callers must ensure the session has not already been paid. This function marks
-    the quote/session paid and creates the signed receipt and grant atomically in a
-    single database commit.
+    Atomically claims a checkout_created session before issuing artifacts. If the
+    session is already paid, callers get the existing receipt/grant idempotently.
     """
+    existing_claim = session.exec(
+        update(PaymentSession)
+        .where(PaymentSession.id == payment_session.id, PaymentSession.status == "checkout_created")
+        .values(status="payment_claimed", provider=provider)
+    )
+    if existing_claim.rowcount != 1:
+        session.rollback()
+        session.refresh(payment_session)
+        from sqlmodel import select
+        receipt = session.exec(select(Receipt).where(Receipt.payment_session_id == payment_session.id)).first()
+        grant = session.exec(select(Grant).where(Grant.payment_session_id == payment_session.id)).first()
+        if payment_session.status == "paid" and receipt and grant:
+            return receipt, grant
+        raise ValueError("payment session already claimed or not payable")
+    session.refresh(payment_session)
     paid_at = now_utc()
     payment_session.status = "paid"
     payment_session.paid_at = paid_at
@@ -71,6 +86,7 @@ def issue_receipt_and_grant(
     grant = Grant(
         id=grant_id,
         quote_id=quote.id,
+        payment_session_id=payment_session.id,
         payload=grant_payload,
         signature=sign_payload(grant_payload, secret),
         expires_at=expires_at,
@@ -79,7 +95,16 @@ def issue_receipt_and_grant(
     session.add(grant)
     session.add(quote)
     session.add(payment_session)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        from sqlmodel import select
+        receipt = session.exec(select(Receipt).where(Receipt.payment_session_id == payment_session.id)).first()
+        grant = session.exec(select(Grant).where(Grant.payment_session_id == payment_session.id)).first()
+        if receipt and grant:
+            return receipt, grant
+        raise
     session.refresh(payment_session)
     session.refresh(receipt)
     session.refresh(grant)

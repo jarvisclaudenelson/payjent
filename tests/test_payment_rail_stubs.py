@@ -54,13 +54,16 @@ def test_stripe_webhook_marks_paid_and_duplicate_is_idempotent(client, quote_pay
     assert duplicate.json()["reason"] == "payment session already paid"
 
 
-def test_stripe_webhook_secret_optional_for_local_scaffold(client, quote_payload, bot_headers):
+def test_stripe_webhook_rejects_unconfigured_secret_without_marking_paid(client, quote_payload, bot_headers):
     app.dependency_overrides[get_settings] = lambda: Settings(stripe_webhook_secret=None)
     _, ps = _checkout(client, quote_payload, bot_headers)
     body = {"type": "payment_intent.succeeded", "data": {"object": {"metadata": {"payment_session_id": ps["id"]}}}}
     response = client.post("/api/v1/webhooks/stripe", json=body)
-    assert response.status_code == 200
-    assert response.json()["payment_session"]["provider"] == "stripe"
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Stripe webhook secret not configured"
+
+    unchanged = client.get(f"/api/v1/payment-sessions/{ps['id']}")
+    assert unchanged.json()["status"] == "checkout_created"
 
 
 def test_crypto_mark_paid_requires_operator_and_uses_shared_issuance(client, quote_payload, bot_headers, operator_headers):

@@ -1,5 +1,7 @@
 def test_fulfillment_state_transition(client, paid_grant, bot_headers):
-    q, _ps, _grant = paid_grant
+    q, _ps, grant = paid_grant
+    consumed = client.post(f"/api/v1/grants/{grant['id']}/consume", json={"bot_id": q["bot_id"]}, headers=bot_headers)
+    assert consumed.status_code == 200
     r = client.post(f"/api/v1/quotes/{q['id']}/fulfillment", json={"status":"executing", "metadata":{"worker":"w1"}}, headers=bot_headers)
     assert r.status_code == 200
     data = r.json()

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any
-from sqlmodel import Field, SQLModel, Column, JSON
+from sqlmodel import Field, SQLModel, Column, JSON, UniqueConstraint
 
 
 def now_utc() -> datetime:
@@ -43,6 +43,7 @@ class PaymentSession(SQLModel, table=True):
 
 
 class Receipt(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("payment_session_id", name="uq_receipt_payment_session_id"),)
     id: str = Field(primary_key=True)
     quote_id: str = Field(index=True)
     payment_session_id: str = Field(index=True)
@@ -52,8 +53,11 @@ class Receipt(SQLModel, table=True):
 
 
 class Grant(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("payment_session_id", name="uq_grant_payment_session_id"),)
+
     id: str = Field(primary_key=True)
     quote_id: str = Field(index=True)
+    payment_session_id: str = Field(index=True)
     payload: dict[str, Any] = Field(sa_column=Column(JSON))
     signature: str
     expires_at: datetime

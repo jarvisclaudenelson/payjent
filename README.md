@@ -2,7 +2,7 @@
 
 Payjent v0 is a small FastAPI gateway skeleton for paid, bounded bot requests: quote -> checkout -> mock payment -> signed receipt/grant -> consume -> fulfillment.
 
-**v0 uses mock/scaffold payment rails only.** Stripe webhook handling verifies deterministic test signatures and can mark sessions paid in local tests, but it does not create Stripe Checkout sessions or call live Stripe APIs. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
+**v0 uses mock/scaffold payment rails only.** Stripe webhook handling verifies deterministic test signatures only when `PAYJENT_STRIPE_WEBHOOK_SECRET` is configured; unconfigured Stripe webhooks are rejected and do not mark sessions paid. Payjent does not create Stripe Checkout sessions or call live Stripe APIs. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
 
 ## Local setup
 
@@ -26,11 +26,35 @@ http://127.0.0.1:8000/pay/{payment_session_id}
 http://127.0.0.1:8000/status/{payment_session_id}
 ```
 
-The `/pay/...` page shows quote amount, breakdown, request summary, and current payment state. In dev mode only, it also displays a mock payment form/button that posts to `/pay/{payment_session_id}/mock-pay`. This is a local demo affordance, not live payment settlement.
+The `/pay/...` page shows quote amount, breakdown, request summary, and current payment state. In dev mode only, it also displays an authenticated `curl` example for the operator-only mock payment API. The public browser page is read-only and does not issue grants to unauthenticated users.
 
 ## Mock flow
 
-Set an API key header for protected bot/operator API calls:
+Set an API key header for protected bot/operator API calls. Bot credentials are scoped to their `bot_id`; only operator/admin credentials can act across bots.
+
+Create local credentials with this Python snippet (prints plaintext keys once; store them in your shell):
+
+```bash
+python - <<'PY'
+from sqlmodel import Session, SQLModel, create_engine
+from payjent.auth import create_bot_credential, generate_api_key
+from payjent.config import get_settings
+from payjent.models import *  # ensure metadata includes all tables
+
+settings = get_settings()
+engine = create_engine(settings.database_url)
+SQLModel.metadata.create_all(engine)
+with Session(engine) as session:
+    bot_key = generate_api_key()
+    operator_key = generate_api_key()
+    create_bot_credential(session, "discord-bot-1", bot_key, settings.signing_secret, role="bot")
+    create_bot_credential(session, "operator-1", operator_key, settings.signing_secret, role="operator")
+print(f"export PAYJENT_BOT_KEY={bot_key!r}")
+print(f"export PAYJENT_OPERATOR_KEY={operator_key!r}")
+PY
+```
+
+Then export the printed values:
 
 ```bash
 export PAYJENT_BOT_KEY='test-bot-key'
@@ -72,7 +96,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/payment-sessions/{session_id}/mock-
 
 Scaffold rails for local/dev testing only:
 
-- `POST /api/v1/webhooks/stripe` accepts Stripe-shaped webhook events. If `PAYJENT_STRIPE_WEBHOOK_SECRET` is set, requests must include a valid `Stripe-Signature` HMAC header; no live Stripe API calls are made.
+- `POST /api/v1/webhooks/stripe` accepts Stripe-shaped webhook events only when `PAYJENT_STRIPE_WEBHOOK_SECRET` is configured. Requests must include a valid `Stripe-Signature` HMAC header; if the secret is unset, Payjent returns `503` and does not mark anything paid. No live Stripe API calls are made.
 - `POST /api/v1/payment-sessions/{session_id}/crypto/mark-paid` is an operator-only dev placeholder that marks a session paid through the same receipt/grant issuance path; it is not crypto settlement.
 
 Verify and consume grant:
