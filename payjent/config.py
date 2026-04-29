@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     signing_secret: str = "dev-only-change-me"
     dev_mode: bool = True
     mock_provider_enabled: bool = True
+    stripe_webhook_secret: str | None = None
     grant_ttl_seconds: int = 900
 
 

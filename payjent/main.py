@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from uuid import uuid4
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from sqlmodel import Session, select, update
 from .config import Settings, get_settings
 from .db import get_session, init_db
@@ -13,6 +13,8 @@ from .schemas import (
 )
 from .signing import verify_signature
 from .providers.mock import complete_mock_payment
+from .providers.base import issue_receipt_and_grant
+from .providers.stripe import parse_stripe_event, verify_stripe_signature
 from .risk import assess_checkout_risk
 
 app = FastAPI(title="Payjent")
@@ -97,6 +99,17 @@ def get_payment_session(session_id: str, session: Session = Depends(get_session)
     return session_to_read(ps)
 
 
+def _issued_response(ps: PaymentSession, receipt, grant):
+    return {"payment_session": session_to_read(ps), "receipt": {"payload": receipt.payload, "signature": receipt.signature}, "grant": {"id": grant.id, "payload": grant.payload, "signature": grant.signature}}
+
+
+def _issue_paid_session(session: Session, ps: PaymentSession, settings: Settings, provider: str):
+    q = session.get(Quote, ps.quote_id)
+    if not q: raise HTTPException(404, "quote not found")
+    if ps.status == "paid": raise HTTPException(409, "payment session already paid")
+    return issue_receipt_and_grant(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds, provider=provider)
+
+
 @app.post("/api/v1/payment-sessions/{session_id}/mock-pay", response_model=MockPayResponse)
 def mock_pay(session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_operator_credential)):
     if not (settings.dev_mode and settings.mock_provider_enabled):
@@ -107,7 +120,39 @@ def mock_pay(session_id: str, session: Session = Depends(get_session), settings:
     if not q: raise HTTPException(404, "quote not found")
     if ps.status == "paid": raise HTTPException(409, "payment session already paid")
     receipt, grant = complete_mock_payment(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds)
-    return {"payment_session": session_to_read(ps), "receipt": {"payload": receipt.payload, "signature": receipt.signature}, "grant": {"id": grant.id, "payload": grant.payload, "signature": grant.signature}}
+    return _issued_response(ps, receipt, grant)
+
+
+@app.post("/api/v1/payment-sessions/{session_id}/crypto/mark-paid", response_model=MockPayResponse)
+def crypto_mark_paid(session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_operator_credential)):
+    if not settings.dev_mode:
+        raise HTTPException(403, "crypto mark-paid is dev/admin only")
+    ps = session.get(PaymentSession, session_id)
+    if not ps: raise HTTPException(404, "payment session not found")
+    receipt, grant = _issue_paid_session(session, ps, settings, provider="crypto-manual")
+    return _issued_response(ps, receipt, grant)
+
+
+@app.post("/api/v1/webhooks/stripe")
+async def stripe_webhook(request: Request, stripe_signature: str | None = Header(default=None, alias="Stripe-Signature"), session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    raw_body = await request.body()
+    verify_stripe_signature(raw_body, stripe_signature, settings.stripe_webhook_secret)
+    event = parse_stripe_event(raw_body)
+    event_type = event.get("type")
+    data_object = event.get("data", {}).get("object", {}) if isinstance(event.get("data"), dict) else {}
+    metadata = data_object.get("metadata", {}) if isinstance(data_object, dict) else {}
+    session_id = data_object.get("payment_session_id") or metadata.get("payment_session_id")
+
+    if event_type not in {"checkout.session.completed", "payment_intent.succeeded"}:
+        return {"received": True, "processed": False, "reason": "event ignored"}
+    if not session_id:
+        raise HTTPException(400, "missing payment_session_id")
+    ps = session.get(PaymentSession, session_id)
+    if not ps: raise HTTPException(404, "payment session not found")
+    if ps.status == "paid":
+        return {"received": True, "processed": False, "reason": "payment session already paid", "payment_session": session_to_read(ps)}
+    receipt, grant = _issue_paid_session(session, ps, settings, provider="stripe")
+    return {"received": True, "processed": True, **_issued_response(ps, receipt, grant)}
 
 
 def _load_valid_grant(grant_id: str, presentation: GrantPresentation, session: Session, settings: Settings) -> Grant:

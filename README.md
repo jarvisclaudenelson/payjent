@@ -2,7 +2,7 @@
 
 Payjent v0 is a small FastAPI gateway skeleton for paid, bounded bot requests: quote -> checkout -> mock payment -> signed receipt/grant -> consume -> fulfillment.
 
-**v0 uses a mock payment provider only.** Stripe and crypto are future adapter rails/placeholders and are not live settlement in this version.
+**v0 uses mock/scaffold payment rails only.** Stripe webhook handling verifies deterministic test signatures and can mark sessions paid in local tests, but it does not create Stripe Checkout sessions or call live Stripe APIs. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
 
 ## Local setup
 
@@ -42,11 +42,16 @@ Create checkout:
 curl -s -X POST http://127.0.0.1:8000/api/v1/quotes/{quote_id}/checkout
 ```
 
-Mock-pay the session:
+Mock-pay the session (operator credential required):
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/v1/payment-sessions/{session_id}/mock-pay
 ```
+
+Scaffold rails for local/dev testing only:
+
+- `POST /api/v1/webhooks/stripe` accepts Stripe-shaped webhook events. If `PAYJENT_STRIPE_WEBHOOK_SECRET` is set, requests must include a valid `Stripe-Signature` HMAC header; no live Stripe API calls are made.
+- `POST /api/v1/payment-sessions/{session_id}/crypto/mark-paid` is an operator-only dev placeholder that marks a session paid through the same receipt/grant issuance path; it is not crypto settlement.
 
 Verify and consume grant:
 
