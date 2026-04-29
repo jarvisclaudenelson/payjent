@@ -12,14 +12,27 @@ python -m venv .venv
 pip install -e '.[test]'
 cp .env.example .env
 python -m pytest -q
+python -m payjent.demo seed
 uvicorn payjent.main:app --reload
 ```
 
 By default the service uses SQLite at `sqlite:///./payjent.db`, dev mode enabled, and a development signing secret from `.env.example`. Do not use the example secret in production.
 
+For a one-command local API exercise after seeding, export the keys printed by `python -m payjent.demo seed` and run:
+
+```bash
+python -m payjent.demo run-flow
+```
+
+If you already have a server running, target it explicitly:
+
+```bash
+PAYJENT_BASE_URL=http://127.0.0.1:8000 python -m payjent.demo run-flow
+```
+
 ## Browser demo
 
-Run the server, create a bot/operator credential in your local database as your test setup requires, then create a quote and checkout via the API. The checkout response includes `checkout_url` like `/pay/{payment_session_id}`. Open it in a browser:
+Run the server, seed demo credentials, then create a quote and checkout via the API (or let `run-flow` do that for you). The checkout response includes `checkout_url` like `/pay/{payment_session_id}`. Open it in a browser:
 
 ```text
 http://127.0.0.1:8000/pay/{payment_session_id}
@@ -32,26 +45,10 @@ The `/pay/...` page shows quote amount, breakdown, request summary, and current 
 
 Set an API key header for protected bot/operator API calls. Bot credentials are scoped to their `bot_id`; only operator/admin credentials can act across bots.
 
-Create local credentials with this Python snippet (prints plaintext keys once; store them in your shell):
+Create local credentials with the demo seeder (prints plaintext keys once; store them in your shell):
 
 ```bash
-python - <<'PY'
-from sqlmodel import Session, SQLModel, create_engine
-from payjent.auth import create_bot_credential, generate_api_key
-from payjent.config import get_settings
-from payjent.models import *  # ensure metadata includes all tables
-
-settings = get_settings()
-engine = create_engine(settings.database_url)
-SQLModel.metadata.create_all(engine)
-with Session(engine) as session:
-    bot_key = generate_api_key()
-    operator_key = generate_api_key()
-    create_bot_credential(session, "discord-bot-1", bot_key, settings.signing_secret, role="bot")
-    create_bot_credential(session, "operator-1", operator_key, settings.signing_secret, role="operator")
-print(f"export PAYJENT_BOT_KEY={bot_key!r}")
-print(f"export PAYJENT_OPERATOR_KEY={operator_key!r}")
-PY
+python -m payjent.demo seed
 ```
 
 Then export the printed values:
@@ -59,6 +56,12 @@ Then export the printed values:
 ```bash
 export PAYJENT_BOT_KEY='test-bot-key'
 export PAYJENT_OPERATOR_KEY='test-operator-key'
+```
+
+To run the full local flow without copying each curl command below:
+
+```bash
+python -m payjent.demo run-flow
 ```
 
 Create a quote:

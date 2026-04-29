@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -18,7 +19,13 @@ from .providers.base import issue_receipt_and_grant
 from .providers.stripe import parse_stripe_event, verify_stripe_signature
 from .risk import assess_checkout_risk
 
-app = FastAPI(title="Payjent")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="Payjent", lifespan=lifespan)
 
 
 def _html_escape(value) -> str:
@@ -109,11 +116,6 @@ def status_page(payment_session_id: str, session: Session = Depends(get_session)
       <p><a href="/pay/{_html_escape(ps.id)}">Back to checkout</a></p>
     </body></html>
     """
-
-
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
 
 def quote_to_read(q: Quote) -> QuoteRead:
