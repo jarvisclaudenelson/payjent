@@ -21,6 +21,7 @@ from .risk import assess_checkout_risk
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    get_settings().validate_runtime_guardrails()
     init_db()
     yield
 
@@ -66,7 +67,7 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
         for item in q.cost_breakdown
     )
     mock_form = ""
-    if settings.dev_mode and settings.mock_provider_enabled and ps.status != "paid":
+    if settings.effective_mock_provider_enabled and ps.status != "paid":
         mock_form = f"""
         <section>
           <h2>Dev mock payment</h2>
@@ -226,7 +227,7 @@ def _issue_paid_session(session: Session, ps: PaymentSession, settings: Settings
 
 @app.post("/api/v1/payment-sessions/{session_id}/mock-pay", response_model=MockPayResponse)
 def mock_pay(session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_operator_credential)):
-    if not (settings.dev_mode and settings.mock_provider_enabled):
+    if not settings.effective_mock_provider_enabled:
         raise HTTPException(403, "mock provider disabled")
     ps = session.get(PaymentSession, session_id)
     if not ps: raise HTTPException(404, "payment session not found")
@@ -239,7 +240,7 @@ def mock_pay(session_id: str, session: Session = Depends(get_session), settings:
 
 @app.post("/api/v1/payment-sessions/{session_id}/crypto/mark-paid", response_model=MockPayResponse)
 def crypto_mark_paid(session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_operator_credential)):
-    if not settings.dev_mode:
+    if settings.is_production or not settings.dev_mode:
         raise HTTPException(403, "crypto mark-paid is dev/admin only")
     ps = session.get(PaymentSession, session_id)
     if not ps: raise HTTPException(404, "payment session not found")

@@ -16,7 +16,15 @@ python -m payjent.demo seed
 uvicorn payjent.main:app --reload
 ```
 
-By default the service uses SQLite at `sqlite:///./payjent.db`, dev mode enabled, and a development signing secret from `.env.example`. Do not use the example secret in production.
+By default the service uses SQLite at `sqlite:///./payjent.db`, `PAYJENT_ENV=local`, dev mode enabled, mock payment rails enabled, and a development signing secret from `.env.example`. Do not use the example secret in production.
+
+Payjent is pre-live/disposable-DB today: there is intentionally no Alembic/migration layer yet. For local/dev only, reset all SQLModel tables with:
+
+```bash
+python -m payjent.demo reset-db
+```
+
+That command drops and recreates the configured database schema. It refuses to run when `PAYJENT_ENV=production` unless `PAYJENT_ALLOW_UNSAFE_DB_RESET=true` is also set for an intentional pre-live reset.
 
 For a one-command local API exercise after seeding, export the keys printed by `python -m payjent.demo seed` and run:
 
@@ -99,11 +107,22 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/payment-sessions/{session_id}/mock-
 
 Payment rails:
 
-- Mock/local remains the default. `POST /api/v1/quotes/{quote_id}/checkout` returns a local `/pay/{payment_session_id}` URL unless Stripe is requested.
+- Mock/local remains the default in local/dev. `POST /api/v1/quotes/{quote_id}/checkout` returns a local `/pay/{payment_session_id}` URL unless Stripe is requested. Mock completion endpoints are disabled in production even if dev flags are accidentally left enabled.
 - Stripe Checkout: install `pip install -e '.[stripe]'`, set `PAYJENT_CHECKOUT_PROVIDER=stripe` (or send `X-Payjent-Provider: stripe` per request), `PAYJENT_STRIPE_SECRET_KEY`, `PAYJENT_PUBLIC_BASE_URL`, and `PAYJENT_STRIPE_WEBHOOK_SECRET`. Checkout sessions are created with quote amount/currency/summary metadata and an idempotency key; Payjent stores Stripe's Checkout Session id and hosted URL.
-- Test/live caveat: automated tests monkeypatch/fake the Stripe adapter and never call live Stripe. Use `sk_test_...` and `whsec_...` while testing; do not point production traffic at test keys, and do not expose live keys in source control.
+- Stripe webhook URL: configure Stripe to send Checkout events to `https://<your-payjent-host>/api/v1/webhooks/stripe`.
+- Test/live caveat: automated tests monkeypatch/fake the Stripe adapter and never call live Stripe. Use Stripe test-mode credentials while testing and keep all keys out of source control.
 - `POST /api/v1/webhooks/stripe` verifies `Stripe-Signature` with `PAYJENT_STRIPE_WEBHOOK_SECRET`, maps Stripe Checkout Session ids or metadata back to Payjent payment sessions, and only then issues receipts/grants. If the secret is unset, Payjent returns `503` and does not mark anything paid.
-- `POST /api/v1/payment-sessions/{session_id}/crypto/mark-paid` is an operator-only dev placeholder that marks a session paid through the same receipt/grant issuance path; it is not crypto settlement.
+- `POST /api/v1/payment-sessions/{session_id}/crypto/mark-paid` is an operator-only dev placeholder that marks a session paid through the same receipt/grant issuance path; it is disabled in production and is not crypto settlement.
+
+## Direct-host production/test-mode guidance
+
+Set `PAYJENT_ENV=production` before serving real traffic. At startup, production mode fails closed unless:
+
+- `PAYJENT_SIGNING_SECRET` is changed from the dev default.
+- `PAYJENT_PUBLIC_BASE_URL` is an `https://` URL.
+- If `PAYJENT_CHECKOUT_PROVIDER=stripe`, both `PAYJENT_STRIPE_SECRET_KEY` and `PAYJENT_STRIPE_WEBHOOK_SECRET` are present.
+
+Direct-host deployments can run with your process manager of choice, for example `uvicorn payjent.main:app --host 127.0.0.1 --port 8000` behind an HTTPS reverse proxy. Do not claim a production deployment is complete until TLS, secret management, database backups, and webhook delivery are verified for your host.
 
 Verify and consume grant:
 

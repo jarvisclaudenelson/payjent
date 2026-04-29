@@ -3,6 +3,7 @@
 Commands:
   python -m payjent.demo seed
   python -m payjent.demo run-flow
+  python -m payjent.demo reset-db
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Any
 
 import httpx
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import SQLModel, Session
 
 from .auth import create_bot_credential, generate_api_key
 from .config import get_settings
@@ -158,6 +159,14 @@ def print_flow_summary(result: dict[str, Any]) -> None:
     print(f"final_status={result['fulfillment']['status']}")
 
 
+def reset_dev_database() -> None:
+    """Drop and recreate all SQLModel tables for a disposable pre-live database."""
+    settings = get_settings()
+    settings.ensure_db_reset_allowed()
+    SQLModel.metadata.drop_all(engine)
+    SQLModel.metadata.create_all(engine)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Payjent local demo utilities")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -171,6 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
     flow.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     flow.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
     flow.add_argument("--base-url", default=os.getenv("PAYJENT_BASE_URL"), help="optional running Payjent API base URL")
+
+    sub.add_parser(
+        "reset-db",
+        help="drop/recreate all Payjent tables for a disposable local/dev database (pre-live only)",
+    )
     return parser
 
 
@@ -190,6 +204,10 @@ def main(argv: list[str] | None = None) -> int:
             base_url=args.base_url,
         )
         print_flow_summary(result)
+        return 0
+    if args.command == "reset-db":
+        reset_dev_database()
+        print("Payjent disposable dev database reset complete. This command is pre-live/local only.")
         return 0
     raise SystemExit(f"unknown command: {args.command}")
 
