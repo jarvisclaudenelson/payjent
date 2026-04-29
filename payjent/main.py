@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from sqlmodel import Session, select, update
 from .config import Settings, get_settings
 from .db import get_session, init_db
@@ -18,6 +19,103 @@ from .providers.stripe import parse_stripe_event, verify_stripe_signature
 from .risk import assess_checkout_risk
 
 app = FastAPI(title="Payjent")
+
+
+def _html_escape(value) -> str:
+    import html
+    return html.escape(str(value), quote=True)
+
+
+def _format_money(amount_minor: int, currency: str) -> str:
+    return f"{amount_minor / 100:.2f} {currency.upper()}"
+
+
+def _find_session_bundle(session: Session, session_id: str):
+    ps = session.get(PaymentSession, session_id)
+    if not ps:
+        raise HTTPException(404, "payment session not found")
+    q = session.get(Quote, ps.quote_id)
+    if not q:
+        raise HTTPException(404, "quote not found")
+    grant = session.exec(select(Grant).where(Grant.quote_id == q.id)).first()
+    fulfillment = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id)).all()
+    return ps, q, grant, fulfillment
+
+
+@app.get("/pay/{payment_session_id}", response_class=HTMLResponse)
+def pay_page(payment_session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    ps, q, grant, _fulfillment = _find_session_bundle(session, payment_session_id)
+    breakdown = "".join(
+        f"<li>{_html_escape(item.get('label', 'item'))}: {_html_escape(_format_money(int(item.get('amount_minor', 0)), q.currency))}</li>"
+        for item in q.cost_breakdown
+    )
+    mock_form = ""
+    if settings.dev_mode and settings.mock_provider_enabled and ps.status != "paid":
+        mock_form = f"""
+        <section>
+          <h2>Dev mock payment</h2>
+          <p>This button calls the local mock provider. It is for development only and is not live settlement.</p>
+          <form method="post" action="/pay/{_html_escape(ps.id)}/mock-pay">
+            <button type="submit">Mock pay now</button>
+          </form>
+        </section>
+        """
+    grant_line = f"<p>Grant: <code>{_html_escape(grant.id)}</code></p>" if grant else "<p>Grant: not issued</p>"
+    return f"""
+    <!doctype html><html><head><title>Payjent checkout</title><style>body{{font-family:system-ui;margin:2rem;max-width:760px}}code{{background:#eee;padding:.1rem .25rem}}</style></head>
+    <body>
+      <h1>Payjent checkout</h1>
+      <p>Payment session: <code>{_html_escape(ps.id)}</code></p>
+      <p>Status: <strong>{_html_escape(ps.status)}</strong></p>
+      <p>Amount: <strong>{_html_escape(_format_money(q.amount_minor, q.currency))}</strong></p>
+      <h2>Request</h2><p>{_html_escape(q.request_summary)}</p>
+      <h2>Breakdown</h2><ul>{breakdown}</ul>
+      {grant_line}
+      <p><a href="/status/{_html_escape(ps.id)}">View status</a></p>
+      {mock_form}
+    </body></html>
+    """
+
+
+@app.post("/pay/{payment_session_id}/mock-pay", response_class=HTMLResponse)
+def pay_page_mock_pay(payment_session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    if not (settings.dev_mode and settings.mock_provider_enabled):
+        raise HTTPException(403, "mock provider disabled")
+    ps, q, _grant, _fulfillment = _find_session_bundle(session, payment_session_id)
+    if ps.status == "paid":
+        raise HTTPException(409, "payment session already paid")
+    _receipt, grant = complete_mock_payment(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds)
+    return f"""
+    <!doctype html><html><head><title>Payjent paid</title><style>body{{font-family:system-ui;margin:2rem;max-width:760px}}code{{background:#eee;padding:.1rem .25rem}}</style></head>
+    <body><h1>Mock payment complete</h1><p>Grant issued: <code>{_html_escape(grant.id)}</code></p><p><a href="/status/{_html_escape(ps.id)}">View status</a></p></body></html>
+    """
+
+
+@app.get("/status", response_class=HTMLResponse)
+def status_index():
+    return """<!doctype html><html><head><title>Payjent status</title></head><body><h1>Payjent status</h1><p>Open <code>/status/{payment_session_id}</code> to view a payment session.</p></body></html>"""
+
+
+@app.get("/status/{payment_session_id}", response_class=HTMLResponse)
+def status_page(payment_session_id: str, session: Session = Depends(get_session)):
+    ps, q, grant, fulfillment = _find_session_bundle(session, payment_session_id)
+    fulfillment_items = "".join(f"<li>{_html_escape(ev.status)} <code>{_html_escape(ev.id)}</code></li>" for ev in fulfillment) or "<li>none</li>"
+    grant_state = "not issued"
+    if grant:
+        grant_state = f"issued: <code>{_html_escape(grant.id)}</code>; consumed: {_html_escape(grant.consumed_at is not None)}"
+    return f"""
+    <!doctype html><html><head><title>Payjent status</title><style>body{{font-family:system-ui;margin:2rem;max-width:760px}}code{{background:#eee;padding:.1rem .25rem}}</style></head>
+    <body>
+      <h1>Payjent status</h1>
+      <p>Payment session: <code>{_html_escape(ps.id)}</code></p>
+      <p>Payment status: <strong>{_html_escape(ps.status)}</strong></p>
+      <p>Quote: <code>{_html_escape(q.id)}</code> ({_html_escape(q.status)})</p>
+      <p>Grant: {grant_state}</p>
+      <h2>Fulfillment</h2><ul>{fulfillment_items}</ul>
+      <p><a href="/pay/{_html_escape(ps.id)}">Back to checkout</a></p>
+    </body></html>
+    """
+
 
 @app.on_event("startup")
 def on_startup():
@@ -87,7 +185,8 @@ def checkout(
         ).first()
         if existing:
             return session_to_read(existing)
-    ps = PaymentSession(id=f"ps_{uuid4().hex}", quote_id=q.id, checkout_url=f"mock://checkout/{q.id}", idempotency_key=idempotency_key)
+    session_id = f"ps_{uuid4().hex}"
+    ps = PaymentSession(id=session_id, quote_id=q.id, checkout_url=f"/pay/{session_id}", idempotency_key=idempotency_key)
     session.add(ps); session.commit(); session.refresh(ps)
     return session_to_read(ps)
 
