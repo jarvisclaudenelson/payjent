@@ -7,9 +7,14 @@ from payjent.main import app
 
 
 @pytest.fixture
-def client():
+def engine():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(engine)
+    return engine
+
+
+@pytest.fixture
+def client(engine):
     def override_session():
         with Session(engine) as session:
             yield session

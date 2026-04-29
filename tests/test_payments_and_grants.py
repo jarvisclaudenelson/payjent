@@ -1,3 +1,9 @@
+from sqlmodel import Session
+
+from payjent.main import _mark_grant_consumed
+from payjent.models import Grant
+
+
 def test_checkout_creation(client, quote_payload):
     q = client.post("/api/v1/quotes", json=quote_payload).json()
     r = client.post(f"/api/v1/quotes/{q['id']}/checkout")
@@ -31,6 +37,17 @@ def test_grant_verify_rejects_wrong_presented_fields(client, paid_grant):
     for bad in ({"bot_id":"bad"}, {"external_user_id":"bad"}, {"request_hash":"bad"}):
         r = client.post(f"/api/v1/grants/{gid}/verify", json=bad)
         assert r.status_code == 403
+
+
+def test_atomic_mark_grant_consumed_allows_only_one_update(engine, paid_grant):
+    _q, _ps, grant = paid_grant
+    with Session(engine) as session:
+        assert _mark_grant_consumed(grant["id"], session) is True
+
+    with Session(engine) as session:
+        assert _mark_grant_consumed(grant["id"], session) is False
+        stored = session.get(Grant, grant["id"])
+        assert stored.consumed_at is not None
 
 
 def test_consume_replay_rejected(client, paid_grant):

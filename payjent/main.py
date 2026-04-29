@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import Depends, FastAPI, HTTPException
-from sqlmodel import Session
+from sqlmodel import Session, update
 from .config import Settings, get_settings
 from .db import get_session, init_db
 from .models import Quote, PaymentSession, Grant, FulfillmentEvent
@@ -112,12 +112,24 @@ def verify_grant(grant_id: str, presentation: GrantPresentation, session: Sessio
     return GrantVerifyResponse(valid=True, grant_id=grant.id, consumed=grant.consumed_at is not None, payload=grant.payload)
 
 
+def _mark_grant_consumed(grant_id: str, session: Session) -> bool:
+    result = session.exec(
+        update(Grant)
+        .where(Grant.id == grant_id, Grant.consumed_at.is_(None))
+        .values(consumed_at=datetime.now(timezone.utc))
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        return False
+    session.commit()
+    return True
+
+
 @app.post("/api/v1/grants/{grant_id}/consume", response_model=GrantVerifyResponse)
 def consume_grant(grant_id: str, presentation: GrantPresentation, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
     grant = _load_valid_grant(grant_id, presentation, session, settings)
-    if grant.consumed_at is not None: raise HTTPException(409, "grant already consumed")
-    grant.consumed_at = datetime.now(timezone.utc)
-    session.add(grant); session.commit(); session.refresh(grant)
+    if not _mark_grant_consumed(grant.id, session):
+        raise HTTPException(409, "grant already consumed")
     return GrantVerifyResponse(valid=True, grant_id=grant.id, consumed=True, payload=grant.payload)
 
 
