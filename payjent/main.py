@@ -7,12 +7,12 @@ from sqlmodel import Session, select, update
 from .config import Settings, get_settings
 from .db import get_session, init_db
 from .auth import require_bot_credential, require_operator_credential
-from .models import BotCredential, Quote, PaymentSession, Grant, FulfillmentEvent
+from .models import BotCredential, Quote, PaymentSession, Grant, FulfillmentEvent, SpendLedgerEntry
 from .money import validate_breakdown, quote_hash
 from .schemas import (
     FulfillmentCreate, FulfillmentRead, GrantPresentation, GrantVerifyResponse,
     LinkCredentialApproval, LinkCredentialRequest, LinkPollResponse, MockPayResponse, PaymentSessionRead,
-    QuoteCreate, QuoteRead,
+    QuoteCreate, QuoteRead, SpendAuthorizationCreate, SpendAuthorizationRead, SpendCaptureRequest,
 )
 from .signing import verify_signature
 from .providers.mock import complete_mock_payment
@@ -24,7 +24,8 @@ from .risk import assess_checkout_risk
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     get_settings().validate_runtime_guardrails()
-    init_db()
+    if get_session not in _app.dependency_overrides:
+        init_db()
     yield
 
 
@@ -406,6 +407,88 @@ def _mark_grant_consumed(grant_id: str, session: Session) -> bool:
         return False
     session.commit()
     return True
+
+
+def _spend_totals(session: Session, grant_id: str) -> tuple[int, int]:
+    entries = session.exec(select(SpendLedgerEntry).where(SpendLedgerEntry.grant_id == grant_id)).all()
+    total_authorized = sum(e.amount_minor for e in entries if e.status in {"authorized", "captured"})
+    total_captured = sum(e.amount_minor for e in entries if e.status == "captured")
+    return total_authorized, total_captured
+
+
+def _spend_to_read(entry: SpendLedgerEntry, session: Session, grant: Grant) -> SpendAuthorizationRead:
+    total_authorized, total_captured = _spend_totals(session, grant.id)
+    budget = int(grant.payload.get("amount_minor", 0))
+    return SpendAuthorizationRead(
+        id=entry.id,
+        grant_id=entry.grant_id,
+        quote_id=entry.quote_id,
+        tool=entry.tool,
+        vendor=entry.vendor,
+        rail=entry.rail,
+        amount_minor=entry.amount_minor,
+        currency=entry.currency,
+        reason=entry.reason,
+        status=entry.status,
+        provider_reference=entry.provider_reference,
+        metadata=entry.metadata_json,
+        total_authorized=total_authorized,
+        total_captured=total_captured,
+        remaining_budget=budget - total_authorized,
+    )
+
+
+@app.post("/api/v1/grants/{grant_id}/spend-authorizations", response_model=SpendAuthorizationRead)
+def create_spend_authorization(grant_id: str, payload: SpendAuthorizationCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    grant = _load_valid_grant(grant_id, payload.presentation, session, settings)
+    _enforce_bot_scope(credential, grant.payload.get("bot_id"))
+    if grant.consumed_at is not None:
+        raise HTTPException(409, "grant already consumed")
+    currency = payload.currency.upper()
+    if currency != str(grant.payload.get("currency", "")).upper():
+        raise HTTPException(status_code=422, detail="currency mismatch")
+    budget = int(grant.payload.get("amount_minor", 0))
+    total_authorized, _total_captured = _spend_totals(session, grant.id)
+    if total_authorized + payload.amount_minor > budget:
+        raise HTTPException(status_code=409, detail="spend exceeds remaining grant budget")
+    entry = SpendLedgerEntry(
+        id=f"spend_{uuid4().hex}",
+        grant_id=grant.id,
+        quote_id=grant.quote_id,
+        tool=payload.tool,
+        vendor=payload.vendor,
+        rail=payload.rail,
+        amount_minor=payload.amount_minor,
+        currency=currency,
+        reason=payload.reason,
+        status="captured" if payload.capture else "authorized",
+        provider_reference=payload.provider_reference,
+        metadata_json=payload.metadata,
+    )
+    session.add(entry); session.commit(); session.refresh(entry)
+    return _spend_to_read(entry, session, grant)
+
+
+@app.post("/api/v1/spend-authorizations/{spend_id}/capture", response_model=SpendAuthorizationRead)
+def capture_spend_authorization(spend_id: str, payload: SpendCaptureRequest, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    entry = session.get(SpendLedgerEntry, spend_id)
+    if not entry:
+        raise HTTPException(404, "spend authorization not found")
+    grant = _load_valid_grant(entry.grant_id, payload.presentation, session, settings)
+    _enforce_bot_scope(credential, grant.payload.get("bot_id"))
+    if grant.consumed_at is not None:
+        raise HTTPException(409, "grant already consumed")
+    if entry.status == "captured":
+        return _spend_to_read(entry, session, grant)
+    if entry.status != "authorized":
+        raise HTTPException(409, "spend authorization is not capturable")
+    entry.status = "captured"
+    if payload.provider_reference:
+        entry.provider_reference = payload.provider_reference
+    if payload.metadata:
+        entry.metadata_json = {**entry.metadata_json, **payload.metadata}
+    session.add(entry); session.commit(); session.refresh(entry)
+    return _spend_to_read(entry, session, grant)
 
 
 @app.post("/api/v1/grants/{grant_id}/consume", response_model=GrantVerifyResponse)

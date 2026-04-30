@@ -69,6 +69,22 @@ class PayjentClient:
     def consume_grant(self, grant_id: str, **presentation: Any) -> dict[str, Any]:
         return self._request("POST", f"/api/v1/grants/{grant_id}/consume", headers=self._headers(), json=presentation)
 
+    def authorize_spend(self, grant_id: str, **payload: Any) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/v1/grants/{grant_id}/spend-authorizations",
+            headers=self._headers(),
+            json=payload,
+        )
+
+    def capture_spend(self, spend_id: str, **payload: Any) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/v1/spend-authorizations/{spend_id}/capture",
+            headers=self._headers(),
+            json=payload,
+        )
+
     def record_fulfillment(self, quote_id: str, status: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -100,6 +116,14 @@ def verify_grant(client: PayjentClient, grant_id: str, **presentation: Any) -> d
 
 def consume_grant(client: PayjentClient, grant_id: str, **presentation: Any) -> dict[str, Any]:
     return client.consume_grant(grant_id, **presentation)
+
+
+def authorize_spend(client: PayjentClient, grant_id: str, **payload: Any) -> dict[str, Any]:
+    return client.authorize_spend(grant_id, **payload)
+
+
+def capture_spend(client: PayjentClient, spend_id: str, **payload: Any) -> dict[str, Any]:
+    return client.capture_spend(spend_id, **payload)
 
 
 def record_fulfillment(client: PayjentClient, quote_id: str, status: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:

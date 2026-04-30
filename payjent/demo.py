@@ -291,6 +291,79 @@ def run_agent_prompt_with_client(client: Any, *, bot_id: str, bot_key: str, oper
     }
 
 
+def _discord_aggregator_envelope(topic: str) -> dict[str, Any]:
+    return {
+        "command": "/research-with-paid-tools",
+        "topic": topic,
+        "downstream_tool": "premium-mcp-demo",
+        "downstream_rail": "x402",
+        "max_budget_minor": 900,
+    }
+
+
+def _fake_x402_premium_call(bot_client: PayjentClient, *, grant_id: str, presentation: dict[str, Any], topic: str) -> dict[str, Any]:
+    spend = bot_client.authorize_spend(
+        grant_id,
+        presentation=presentation,
+        tool="premium-research-tool",
+        vendor="premium-mcp-demo",
+        rail="x402",
+        amount_minor=250,
+        currency="USD",
+        reason=f"Fake x402 premium data lookup for {topic}",
+        provider_reference="x402_demo_capture_001",
+        metadata={"demo": True, "settlement": "local fake x402; no network/wallet"},
+        capture=True,
+    )
+    return {
+        "spend": spend,
+        "data": {
+            "headline": f"Premium demo signal for {topic}",
+            "source": "local fake x402 service",
+            "note": "No live x402 settlement was performed.",
+        },
+    }
+
+
+def run_discord_aggregator_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
+    """One Discord-style command -> one payment prompt -> Stripe-funded placeholder -> fake x402 spend."""
+    bot_client = PayjentClient("http://testserver", api_key=bot_key, client=client)
+    gate = PayjentBotGate(bot_client, MemoryPendingRequestStore(), checkout_base_url="http://testserver")
+    topic = "agent payment aggregation"
+    pending = gate.quote_pending_request(
+        bot_id=bot_id,
+        external_user_id=DEFAULT_EXTERNAL_USER_ID,
+        summary=f"Discord /research-with-paid-tools topic={topic}",
+        execution_envelope=_discord_aggregator_envelope(topic),
+        amount_minor=900,
+        currency="USD",
+        cost_breakdown=[
+            {"label": "Stripe funding rail placeholder / checkout budget", "amount_minor": 650},
+            {"label": "downstream x402 premium data call", "amount_minor": 250},
+        ],
+        channel_id="discord-demo-channel",
+    )
+    paid = _raise_for_demo_response(
+        client.post(f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay", headers={"X-Payjent-Bot-Key": operator_key}),
+        "operator mock pay",
+    )
+    grant = paid["grant"]
+    presentation = {"bot_id": pending.bot_id, "external_user_id": pending.external_user_id, "request_hash": pending.request_hash}
+    x402 = _fake_x402_premium_call(bot_client, grant_id=grant["id"], presentation=presentation, topic=pending.execution_envelope["topic"])
+    resume = gate.resume_paid_request(pending.id, grant_id=grant["id"], **presentation)
+    fulfilled = gate.record_fulfillment(
+        pending.id,
+        "fulfilled",
+        {
+            "demo": "discord-aggregator",
+            "stripe_funding_placeholder": True,
+            "x402_spend": x402["spend"],
+            "remaining_budget": x402["spend"]["remaining_budget"],
+        },
+    )
+    return {"pending": pending, "payment": paid, "grant": grant, "resume": resume, "x402": x402, "fulfilled": fulfilled}
+
+
 @contextmanager
 def _isolated_demo_session() -> Iterator[tuple[Any, Any]]:
     """Yield a TestClient and engine backed by a temporary SQLite database.
@@ -373,6 +446,29 @@ def print_agent_prompt_summary(result: dict[str, Any]) -> None:
     print(f"final_status={fulfilled.status}")
 
 
+def print_discord_aggregator_summary(result: dict[str, Any]) -> None:
+    pending = result["pending"]
+    spend = result["x402"]["spend"]
+    print("Payjent Discord spend aggregation demo completed.")
+    print("DISCORD_COMMAND: /research-with-paid-tools topic=agent payment aggregation")
+    print("PAYMENT_PROMPT:")
+    print(f"  task={pending.summary}")
+    print("  total_budget=USD 9.00")
+    print(f"  checkout_url={pending.checkout_url}")
+    print("  breakdown[0]=USD 6.50 Stripe funding rail placeholder / swap to Stripe test-mode hosted checkout when configured")
+    print("  breakdown[1]=USD 2.50 downstream x402 premium data call")
+    print("  one_payment_covers=Stripe-style user funding prompt plus downstream paid x402 action")
+    print("  dev_note=operator mock-pay is local/dev-only; no live Stripe charge, x402 settlement, network call, or wallet is used")
+    print(f"grant_id={result['grant']['id']}")
+    print(f"x402_spend_id={spend['id']}")
+    print(f"x402_spend_status={spend['status']}")
+    print(f"x402_spend_amount=USD {spend['amount_minor'] / 100:.2f}")
+    print(f"x402_vendor={spend['vendor']}")
+    print(f"remaining_budget=USD {spend['remaining_budget'] / 100:.2f}")
+    print(f"premium_data={result['x402']['data']['headline']}")
+    print(f"final_status={result['fulfilled'].status}")
+
+
 def reset_dev_database() -> None:
     """Drop and recreate all SQLModel tables for a disposable pre-live database."""
     settings = get_settings()
@@ -405,6 +501,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
     agent.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     agent.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
+    discord = sub.add_parser("discord-aggregator", help="run Discord-style one payment prompt covering mock Stripe funding and fake x402 spend")
+    discord.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
+    discord.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    discord.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
     sub.add_parser(
         "reset-db",
@@ -467,6 +568,25 @@ def main(argv: list[str] | None = None) -> int:
                 operator_key = args.operator_key or credentials.operator_key
                 result = run_agent_prompt_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_agent_prompt_summary(result)
+        return 0
+    if args.command == "discord-aggregator":
+        if "PAYJENT_DATABASE_URL" in os.environ:
+            init_db()
+            credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
+            bot_key = args.bot_key or credentials.bot_key
+            operator_key = args.operator_key or credentials.operator_key
+            with TestClient(app) as client:
+                result = run_discord_aggregator_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        else:
+            with _isolated_demo_session() as (client, temp_engine):
+                credentials = None
+                if not args.bot_key or not args.operator_key:
+                    with Session(temp_engine) as session:
+                        credentials = seed_credentials(session=session, bot_id=args.bot_id)
+                bot_key = args.bot_key or credentials.bot_key
+                operator_key = args.operator_key or credentials.operator_key
+                result = run_discord_aggregator_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        print_discord_aggregator_summary(result)
         return 0
     if args.command == "reset-db":
         reset_dev_database()

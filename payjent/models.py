@@ -66,6 +66,22 @@ class Grant(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class SpendLedgerEntry(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    grant_id: str = Field(index=True)
+    quote_id: str = Field(index=True)
+    tool: str
+    vendor: str
+    rail: str
+    amount_minor: int
+    currency: str
+    reason: str
+    status: str = Field(index=True)
+    provider_reference: str | None = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class FulfillmentEvent(SQLModel, table=True):
     id: str = Field(primary_key=True)
     quote_id: str = Field(index=True)

@@ -87,6 +87,43 @@ class GrantVerifyResponse(BaseModel):
     payload: dict[str, Any]
 
 
+class SpendAuthorizationCreate(BaseModel):
+    presentation: GrantPresentation
+    tool: str = Field(min_length=1)
+    vendor: str = Field(min_length=1)
+    rail: str = Field(min_length=1)
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    reason: str = Field(min_length=1)
+    provider_reference: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    capture: bool = False
+
+
+class SpendAuthorizationRead(BaseModel):
+    id: str
+    grant_id: str
+    quote_id: str
+    tool: str
+    vendor: str
+    rail: str
+    amount_minor: int
+    currency: str
+    reason: str
+    status: str
+    provider_reference: str | None = None
+    metadata: dict[str, Any]
+    total_authorized: int
+    total_captured: int
+    remaining_budget: int
+
+
+class SpendCaptureRequest(BaseModel):
+    presentation: GrantPresentation
+    provider_reference: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class FulfillmentCreate(BaseModel):
     status: Literal["executing", "fulfilled", "failed", "refunded"]
     metadata: dict[str, Any] = Field(default_factory=dict)

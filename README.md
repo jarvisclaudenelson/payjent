@@ -40,6 +40,14 @@ python -m payjent.demo agent-prompt
 
 The agent-prompt demo creates a PayjentBotGate pending request from a simulated user ask, prints a user-facing payment prompt with checkout URL, pending id, price, and paid work description, blocks unpaid execution, performs a dev/operator-only mock payment, verifies/consumes the issued grant, resumes only the stored execution envelope, records fulfillment, and prints the final fake agent result. By default it uses an isolated temporary SQLite database unless `PAYJENT_DATABASE_URL` is explicitly set, so stale local `payjent.db` files do not break the demo. This is the local UX slice; live Stripe settlement and hosted Discord/agent integration remain the next production slice.
 
+To demo the Discord-style spend aggregation slice with no env keys, running server, Discord token, Stripe keys, x402 network, or wallet, run:
+
+```bash
+python -m payjent.demo discord-aggregator
+```
+
+This proves the control-plane thesis: **one user payment/approval -> bounded Payjent grant -> downstream x402 paid call + Stripe funding rail in one agent command**. The demo simulates `/research-with-paid-tools topic=...`, prints one Discord-style `PAYMENT_PROMPT` with a total USD 9.00 budget and checkout URL, completes the user funding step with a dev/operator mock-pay, then authorizes and captures a USD 2.50 local fake x402 premium-tool spend against the same grant and records fulfillment with the ledger summary. The “Stripe” line is intentionally a **Stripe funding rail placeholder** for a future Stripe test-mode hosted checkout/webhook path; the default demo does not create a live Stripe charge. The x402 call is a deterministic local fake service/client; no live x402 settlement, external network call, or wallet is used. By default it uses an isolated temporary SQLite database unless `PAYJENT_DATABASE_URL` is explicitly set, so stale local `payjent.db` files do not break the demo.
+
 To demo the experimental Link purchase approval boundary locally without Link auth, npm, CLI, MCP, or network access, run:
 
 ```bash
