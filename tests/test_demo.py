@@ -151,6 +151,70 @@ def test_demo_link_purchase_cli_ignores_stale_default_sqlite_db(tmp_path):
     assert "provider_session_id" not in columns
 
 
+def test_demo_agent_prompt_with_testclient_uses_gate_and_stored_envelope(engine, capsys):
+    with Session(engine) as session:
+        credentials = demo.seed_credentials(session=session, bot_id="demo-agent-bot")
+
+    def override_session():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        with TestClient(app) as client:
+            result = demo.run_agent_prompt_with_client(
+                client,
+                bot_id=credentials.bot_id,
+                bot_key=credentials.bot_key,
+                operator_key=credentials.operator_key,
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert result["unpaid_execute_blocked"] is True
+    assert result["resume"]["execution_envelope"] == demo._agent_demo_envelope()
+    assert result["tampered_fresh_prompt"] not in result["result_text"]
+    assert "stored work only" in result["result_text"]
+    assert result["fulfilled"].status == "fulfilled"
+
+    demo.print_agent_prompt_summary(result)
+    output = capsys.readouterr().out
+    assert "PAYMENT_PROMPT:" in output
+    assert "checkout_url=http://testserver/pay/" in output
+    assert "pending_id=" in output
+    assert "price=USD 7.00" in output
+    assert "unpaid_execute_blocked=True" in output
+    assert "grant_verified_and_consumed_before_fulfillment=True" in output
+    assert "final_status=fulfilled" in output
+
+
+def test_demo_agent_prompt_cli_ignores_stale_default_sqlite_db(tmp_path):
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+
+    stale_db = tmp_path / "payjent.db"
+    with sqlite3.connect(stale_db) as conn:
+        conn.execute("CREATE TABLE paymentsession (id VARCHAR NOT NULL PRIMARY KEY)")
+
+    env = {k: v for k, v in os.environ.items() if k != "PAYJENT_DATABASE_URL"}
+    env["PYTHONPATH"] = os.getcwd()
+    completed = subprocess.run(
+        [sys.executable, "-m", "payjent.demo", "agent-prompt"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "PAYMENT_PROMPT:" in completed.stdout
+    assert "checkout_url=http://testserver/pay/" in completed.stdout
+    assert "unpaid_execute_blocked=True" in completed.stdout
+    assert "final_status=fulfilled" in completed.stdout
+
+
 def test_app_lifespan_has_no_fastapi_on_event_deprecation_warning(engine):
     def override_session():
         with Session(engine) as session:

@@ -32,6 +32,14 @@ For a one-command local API exercise after seeding, export the keys printed by `
 python -m payjent.demo run-flow
 ```
 
+To demo the first end-to-end local agent UX with no env keys, running server, Discord token, Stripe, Link, or network access, run:
+
+```bash
+python -m payjent.demo agent-prompt
+```
+
+The agent-prompt demo creates a PayjentBotGate pending request from a simulated user ask, prints a user-facing payment prompt with checkout URL, pending id, price, and paid work description, blocks unpaid execution, performs a dev/operator-only mock payment, verifies/consumes the issued grant, resumes only the stored execution envelope, records fulfillment, and prints the final fake agent result. By default it uses an isolated temporary SQLite database unless `PAYJENT_DATABASE_URL` is explicitly set, so stale local `payjent.db` files do not break the demo. This is the local UX slice; live Stripe settlement and hosted Discord/agent integration remain the next production slice.
+
 To demo the experimental Link purchase approval boundary locally without Link auth, npm, CLI, MCP, or network access, run:
 
 ```bash
@@ -226,12 +234,10 @@ resume = gate.resume_paid_request(
 gate.record_fulfillment(pending.id, "fulfilled", {"discord_message_id": "reply-1"})
 ```
 
-Run the end-to-end local resume demo (no Discord token needed):
+Run the one-command local agent prompt/resume demo (no credentials, server, Discord token, Stripe, Link, or network needed):
 
 ```bash
-python -m payjent.demo seed
-export PAYJENT_BOT_KEY='test-bot-key'
-export PAYJENT_OPERATOR_KEY='test-operator-key'
-uvicorn payjent.main:app --reload
-python examples/discord_resume_flow.py
+python -m payjent.demo agent-prompt
 ```
+
+This is the first end-to-end local UX: ask agent → pay prompt → mock pay → grant consume → resume stored envelope → fulfill. The older hosted-style resume example still exists in `examples/discord_resume_flow.py` for a running API plus seeded credentials.
