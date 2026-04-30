@@ -112,6 +112,45 @@ def test_demo_link_purchase_cli_command_returns_success_without_real_link(tmp_pa
     assert "no receipt or grant is issued" in completed.stdout
 
 
+def test_demo_link_purchase_cli_ignores_stale_default_sqlite_db(tmp_path):
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+
+    stale_db = tmp_path / "payjent.db"
+    with sqlite3.connect(stale_db) as conn:
+        conn.execute(
+            "CREATE TABLE paymentsession ("
+            "id VARCHAR NOT NULL PRIMARY KEY, "
+            "quote_id VARCHAR NOT NULL, "
+            "provider VARCHAR NOT NULL, "
+            "status VARCHAR NOT NULL, "
+            "checkout_url VARCHAR, "
+            "idempotency_key VARCHAR NOT NULL, "
+            "receipt_id VARCHAR, "
+            "created_at DATETIME NOT NULL)"
+        )
+
+    env = {k: v for k, v in os.environ.items() if k != "PAYJENT_DATABASE_URL"}
+    env["PYTHONPATH"] = os.getcwd()
+    completed = subprocess.run(
+        [sys.executable, "-m", "payjent.demo", "link-purchase"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "approval_url=https://link.example/approve/sr_payjent_demo_link_purchase" in completed.stdout
+    assert "checkout_created/unpaid" in completed.stdout
+
+    with sqlite3.connect(stale_db) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(paymentsession)")]
+    assert "provider_session_id" not in columns
+
+
 def test_app_lifespan_has_no_fastapi_on_event_deprecation_warning(engine):
     def override_session():
         with Session(engine) as session:

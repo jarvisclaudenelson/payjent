@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 from fastapi.testclient import TestClient
@@ -21,7 +23,7 @@ from sqlmodel import SQLModel, Session
 
 from .auth import create_bot_credential, generate_api_key
 from .config import get_settings
-from .db import engine, init_db
+from .db import engine, get_session, init_db, make_engine
 from .main import app
 from .providers.link import LinkApproval
 
@@ -213,6 +215,31 @@ def run_link_purchase_with_client(
     return {"quote": quote, "payment_session": current_session, "link_approval": approval}
 
 
+@contextmanager
+def _isolated_demo_session() -> Iterator[tuple[Any, Any]]:
+    """Yield a TestClient and engine backed by a temporary SQLite database.
+
+    The default Link purchase demo is meant to prove the in-process flow. It
+    should not be broken by, or unexpectedly mutate, an operator's stale local
+    ./payjent.db unless they explicitly opt in with PAYJENT_DATABASE_URL.
+    """
+    with tempfile.TemporaryDirectory(prefix="payjent-link-demo-") as tmpdir:
+        temp_engine = make_engine(f"sqlite:///{tmpdir}/payjent-demo.db")
+        SQLModel.metadata.create_all(temp_engine)
+
+        def override_session():
+            with Session(temp_engine) as session:
+                yield session
+
+        app.dependency_overrides[get_session] = override_session
+        try:
+            with TestClient(app) as client:
+                yield client, temp_engine
+        finally:
+            app.dependency_overrides.pop(get_session, None)
+            temp_engine.dispose()
+
+
 def run_local_flow(*, bot_id: str, bot_key: str, operator_key: str, base_url: str | None = None) -> dict[str, Any]:
     if base_url:
         with httpx.Client(base_url=base_url.rstrip("/"), timeout=10.0) as client:
@@ -301,12 +328,22 @@ def main(argv: list[str] | None = None) -> int:
         print_flow_summary(result)
         return 0
     if args.command == "link-purchase":
-        init_db()
-        credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
-        bot_key = args.bot_key or credentials.bot_key
-        operator_key = args.operator_key or credentials.operator_key
-        with TestClient(app) as client:
-            result = run_link_purchase_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key, real_link=args.real_link)
+        if "PAYJENT_DATABASE_URL" in os.environ:
+            init_db()
+            credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
+            bot_key = args.bot_key or credentials.bot_key
+            operator_key = args.operator_key or credentials.operator_key
+            with TestClient(app) as client:
+                result = run_link_purchase_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key, real_link=args.real_link)
+        else:
+            with _isolated_demo_session() as (client, temp_engine):
+                credentials = None
+                if not args.bot_key or not args.operator_key:
+                    with Session(temp_engine) as session:
+                        credentials = seed_credentials(session=session, bot_id=args.bot_id)
+                bot_key = args.bot_key or credentials.bot_key
+                operator_key = args.operator_key or credentials.operator_key
+                result = run_link_purchase_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key, real_link=args.real_link)
         print_link_purchase_summary(result)
         return 0
     if args.command == "reset-db":
