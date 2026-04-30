@@ -7,13 +7,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
 from .config import Settings, get_settings
 from .db import get_session, init_db
-from .auth import require_bot_credential, require_operator_credential
-from .models import BotCredential, Quote, PaymentSession, Grant, FulfillmentEvent, SpendLedgerEntry
+from .auth import generate_api_key, create_bot_credential, require_bot_credential, require_operator_credential
+from .models import AgentProfile, BotCredential, RailConnection, Quote, PaymentSession, Grant, FulfillmentEvent, SpendLedgerEntry
 from .money import validate_breakdown, quote_hash
 from .schemas import (
-    FulfillmentCreate, FulfillmentRead, GrantPresentation, GrantVerifyResponse,
+    AgentRead, AgentRegisterRequest, AgentRegisterResponse, FulfillmentCreate, FulfillmentRead, GrantPresentation, GrantVerifyResponse,
     LinkCredentialApproval, LinkCredentialRequest, LinkPollResponse, MockPayResponse, PaymentSessionRead,
-    QuoteCreate, QuoteRead, SpendAuthorizationCreate, SpendAuthorizationRead, SpendCaptureRequest,
+    QuoteCreate, QuoteRead, RailConnectionRead, SpendAuthorizationCreate, SpendAuthorizationRead, SpendCaptureRequest,
+    StripeConnectStartResponse, X402ConfigureRequest,
 )
 from .signing import verify_signature
 from .providers.mock import complete_mock_payment
@@ -135,12 +136,141 @@ def status_page(payment_session_id: str, session: Session = Depends(get_session)
     """
 
 
+def _rail_to_read(r: RailConnection) -> RailConnectionRead:
+    return RailConnectionRead(rail=r.rail, status=r.status, mode=r.mode, config=r.config_json)
+
+
+def _agent_to_read(agent: AgentProfile, session: Session) -> AgentRead:
+    rails = session.exec(select(RailConnection).where(RailConnection.agent_id == agent.id)).all()
+    return AgentRead(
+        id=agent.id,
+        owner_id=agent.owner_id,
+        bot_id=agent.bot_id,
+        name=agent.name,
+        platform=agent.platform,
+        callback_url=agent.callback_url,
+        default_currency=agent.default_currency,
+        status=agent.status,
+        rails={r.rail: _rail_to_read(r) for r in rails},
+    )
+
+
+def _upsert_rail(session: Session, agent: AgentProfile, rail: str, status: str, mode: str, config: dict) -> RailConnection:
+    existing = session.exec(select(RailConnection).where(RailConnection.agent_id == agent.id, RailConnection.rail == rail)).first()
+    now = datetime.now(timezone.utc)
+    if existing:
+        existing.status = status
+        existing.mode = mode
+        existing.config_json = config
+        existing.updated_at = now
+        rail_row = existing
+    else:
+        rail_row = RailConnection(id=f"rail_{uuid4().hex}", agent_id=agent.id, bot_id=agent.bot_id, rail=rail, status=status, mode=mode, config_json=config, updated_at=now)
+    session.add(rail_row); session.commit(); session.refresh(rail_row)
+    return rail_row
+
+
 def quote_to_read(q: Quote) -> QuoteRead:
     return QuoteRead.model_validate(q, from_attributes=True)
 
 
 def session_to_read(s: PaymentSession) -> PaymentSessionRead:
     return PaymentSessionRead.model_validate(s, from_attributes=True)
+
+
+@app.post("/api/v1/agents/register", response_model=AgentRegisterResponse)
+def register_agent(payload: AgentRegisterRequest, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_operator_credential)):
+    existing = session.exec(select(AgentProfile).where(AgentProfile.bot_id == payload.bot_id)).first()
+    generated_key = None
+    if existing:
+        return AgentRegisterResponse(agent=_agent_to_read(existing, session), bot_api_key=None)
+    agent = AgentProfile(id=f"agent_{uuid4().hex}", bot_id=payload.bot_id, name=payload.name, platform=payload.platform, callback_url=payload.callback_url, default_currency=payload.default_currency.upper())
+    session.add(agent); session.commit(); session.refresh(agent)
+    if not session.exec(select(BotCredential).where(BotCredential.bot_id == agent.bot_id, BotCredential.role == "bot")).first():
+        generated_key = generate_api_key()
+        create_bot_credential(session, agent.bot_id, generated_key, settings.signing_secret, role="bot")
+    return AgentRegisterResponse(agent=_agent_to_read(agent, session), bot_api_key=generated_key)
+
+
+@app.get("/api/v1/agents", response_model=list[AgentRead])
+def list_agents(session: Session = Depends(get_session), _credential: BotCredential = Depends(require_operator_credential)):
+    agents = session.exec(select(AgentProfile).order_by(AgentProfile.created_at.desc())).all()
+    return [_agent_to_read(a, session) for a in agents]
+
+
+@app.post("/api/v1/agents/{agent_id}/stripe-connect/start", response_model=StripeConnectStartResponse)
+def start_stripe_connect(agent_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_operator_credential)):
+    agent = session.get(AgentProfile, agent_id)
+    if not agent:
+        raise HTTPException(404, "agent not found")
+    if settings.is_production:
+        raise HTTPException(503, "live Stripe Connect OAuth is not configured; refusing to simulate production Connect")
+    mode = "test" if settings.stripe_secret_key and "test" in settings.stripe_secret_key else "local"
+    account_id = f"acct_test_{agent.id[-12:]}"
+    onboarding_url = f"/dashboard/agents/{agent.id}?stripe_onboarding=simulated&account_id={account_id}"
+    _upsert_rail(session, agent, "stripe_connect", "onboarding_started", mode, {"account_id": account_id, "onboarding_url": onboarding_url})
+    return StripeConnectStartResponse(mode=mode, account_id=account_id, onboarding_url=onboarding_url, status="onboarding_started")
+
+
+@app.post("/api/v1/agents/{agent_id}/stripe-connect/complete", response_model=RailConnectionRead)
+def complete_stripe_connect(agent_id: str, account_id: str | None = None, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), _credential: BotCredential = Depends(require_operator_credential)):
+    agent = session.get(AgentProfile, agent_id)
+    if not agent:
+        raise HTTPException(404, "agent not found")
+    if settings.is_production:
+        raise HTTPException(503, "live Stripe Connect completion is not configured")
+    existing = session.exec(select(RailConnection).where(RailConnection.agent_id == agent.id, RailConnection.rail == "stripe_connect")).first()
+    acct = account_id or (existing.config_json.get("account_id") if existing else None) or f"acct_test_{agent.id[-12:]}"
+    rail = _upsert_rail(session, agent, "stripe_connect", "connected", existing.mode if existing else "local", {"account_id": acct})
+    return _rail_to_read(rail)
+
+
+@app.post("/api/v1/agents/{agent_id}/x402/configure", response_model=RailConnectionRead)
+def configure_x402(agent_id: str, payload: X402ConfigureRequest, session: Session = Depends(get_session), _credential: BotCredential = Depends(require_operator_credential)):
+    agent = session.get(AgentProfile, agent_id)
+    if not agent:
+        raise HTTPException(404, "agent not found")
+    if payload.enabled and payload.max_per_call_minor > payload.max_per_request_minor:
+        raise HTTPException(status_code=422, detail="max_per_call_minor must be <= max_per_request_minor")
+    config = payload.model_dump()
+    rail = _upsert_rail(session, agent, "x402", "enabled" if payload.enabled else "disabled", "test", config)
+    return _rail_to_read(rail)
+
+
+def _integration_snippet(agent: AgentProfile) -> str:
+    return f"""export PAYJENT_BASE_URL=http://localhost:8000
+export PAYJENT_BOT_ID={agent.bot_id}
+export PAYJENT_BOT_KEY=<shown-once-from-registration>
+python -m payjent.demo discord-aggregator-stripe-smoke"""
+
+
+_DASHBOARD_CSS = """<style>
+body{margin:0;font-family:Inter,ui-sans-serif,system-ui;color:#0f172a;background:linear-gradient(135deg,#f8fbff,#fff 35%,#f5f3ff)}a{color:#4f46e5}main{max-width:1180px;margin:auto;padding:32px 20px}.hero{padding:34px;border:1px solid #e5e7eb;border-radius:28px;background:rgba(255,255,255,.82);box-shadow:0 24px 70px #4f46e51a}.eyebrow{color:#6366f1;font-weight:700;text-transform:uppercase;letter-spacing:.12em}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px;margin-top:22px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:20px;padding:20px;box-shadow:0 8px 30px #0f172a0c}.pill{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;background:#eef2ff;color:#3730a3}.ok{background:#dcfce7;color:#166534}.warn{background:#fef3c7;color:#92400e}pre{overflow:auto;background:#0b1020;color:#dbeafe;border-radius:16px;padding:16px}.muted{color:#64748b}.btn{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:10px;padding:9px 12px;font-weight:700}input{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:10px;padding:10px;margin:6px 0 12px}@media(max-width:650px){main{padding:18px}.hero{padding:22px}}
+</style>"""
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(session: Session = Depends(get_session)):
+    agents = session.exec(select(AgentProfile).order_by(AgentProfile.created_at.desc())).all()
+    cards = "".join(f"<div class='card'><span class='pill'>{_html_escape(a.platform)}</span><h3>{_html_escape(a.name)}</h3><p class='muted'><code>{_html_escape(a.bot_id)}</code></p><p><a class='btn' href='/dashboard/agents/{_html_escape(a.id)}'>Open setup</a></p></div>" for a in agents) or "<div class='card'><h3>No agents yet</h3><p class='muted'>Register via the operator-authenticated API below.</p></div>"
+    register_curl = "curl -X POST /api/v1/agents/register -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;' -H 'Content-Type: application/json' -d '{&quot;name&quot;:&quot;Hermes Research&quot;,&quot;platform&quot;:&quot;discord&quot;,&quot;bot_id&quot;:&quot;hermes-discord&quot;,&quot;default_currency&quot;:&quot;USD&quot;}'"
+    return f"<!doctype html><html><head><title>Payjent dashboard</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Payjent dashboard v0</div><h1>Agent rail control plane</h1><p class='muted'>Register agents, prepare Stripe Connect user funding, configure x402 downstream spend, and copy safe local integration snippets.</p><div class='grid'><div class='card'><h3>Agent registration</h3><pre><code>{register_curl}</code></pre></div><div class='card'><h3>Ledger stats</h3><p><b>{len(agents)}</b> agents</p><p class='muted'>Recent quote/spend state appears on each agent detail page.</p></div></div></section><h2>Agents</h2><div class='grid'>{cards}</div></main></body></html>"
+
+
+@app.get("/dashboard/agents/{agent_id}", response_class=HTMLResponse)
+def dashboard_agent(agent_id: str, session: Session = Depends(get_session)):
+    agent = session.get(AgentProfile, agent_id)
+    if not agent:
+        raise HTTPException(404, "agent not found")
+    rails = session.exec(select(RailConnection).where(RailConnection.agent_id == agent.id)).all()
+    rail_cards = "".join(f"<div class='card'><span class='pill {'ok' if r.status in {'connected','enabled'} else 'warn'}'>{_html_escape(r.status)}</span><h3>{_html_escape(r.rail)}</h3><p class='muted'>mode: {_html_escape(r.mode)}</p><pre><code>{_html_escape(r.config_json)}</code></pre></div>" for r in rails) or "<div class='card'><h3>Rails not configured</h3><p class='muted'>Start Stripe Connect and configure x402 with operator-authenticated API calls.</p></div>"
+    quotes = session.exec(select(Quote).where(Quote.bot_id == agent.bot_id).order_by(Quote.created_at.desc()).limit(10)).all()
+    quote_ids = [q.id for q in quotes]
+    spends = session.exec(select(SpendLedgerEntry).where(SpendLedgerEntry.quote_id.in_(quote_ids)).order_by(SpendLedgerEntry.created_at.desc()).limit(10)).all() if quote_ids else []
+    ledger = "".join(f"<li>{_html_escape(s.rail)} {_html_escape(_format_money(s.amount_minor, s.currency))} — {_html_escape(s.status)}</li>" for s in spends) or "<li>No spend ledger entries yet.</li>"
+    stripe_cmd = f"curl -X POST /api/v1/agents/{agent.id}/stripe-connect/start -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;'"
+    x402_cmd = f"curl -X POST /api/v1/agents/{agent.id}/x402/configure -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;' -H 'Content-Type: application/json' -d '{{\"network\":\"base-sepolia\",\"pay_to\":\"0xTEST_PAY_TO\",\"max_per_request_minor\":900,\"max_per_call_minor\":250,\"enabled\":true}}'"
+    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><a href='/dashboard'>← Dashboard</a><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div></main></body></html>"
 
 
 def _enforce_stripe_checkout_guardrails(settings: Settings) -> None:

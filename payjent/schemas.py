@@ -32,6 +32,55 @@ class QuoteRead(BaseModel):
     status: str
 
 
+class AgentRegisterRequest(BaseModel):
+    name: str = Field(min_length=1)
+    platform: str = Field(min_length=1)
+    bot_id: str = Field(min_length=1)
+    callback_url: str | None = None
+    default_currency: str = Field(default="USD", min_length=3, max_length=3)
+
+
+class RailConnectionRead(BaseModel):
+    rail: str
+    status: str
+    mode: str
+    config: dict[str, Any]
+
+
+class AgentRead(BaseModel):
+    id: str
+    owner_id: str
+    bot_id: str
+    name: str
+    platform: str
+    callback_url: str | None
+    default_currency: str
+    status: str
+    rails: dict[str, RailConnectionRead] = Field(default_factory=dict)
+
+
+class AgentRegisterResponse(BaseModel):
+    agent: AgentRead
+    bot_api_key: str | None = None
+    key_warning: str = "Store bot_api_key now; Payjent only stores a hash and will not show it again."
+
+
+class StripeConnectStartResponse(BaseModel):
+    mode: str
+    account_id: str
+    onboarding_url: str
+    status: str
+
+
+class X402ConfigureRequest(BaseModel):
+    network: str = Field(min_length=1)
+    pay_to: str | None = None
+    facilitator_url: str | None = None
+    max_per_request_minor: int = Field(gt=0)
+    max_per_call_minor: int = Field(gt=0)
+    enabled: bool = True
+
+
 class PaymentSessionRead(BaseModel):
     id: str
     quote_id: str

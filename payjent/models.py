@@ -30,6 +30,32 @@ class BotCredential(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class AgentProfile(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    owner_id: str = Field(default="local-owner", index=True)
+    bot_id: str = Field(index=True, unique=True)
+    name: str
+    platform: str
+    callback_url: str | None = None
+    default_currency: str = "USD"
+    status: str = Field(default="active", index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class RailConnection(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("agent_id", "rail", name="uq_rail_agent_rail"),)
+
+    id: str = Field(primary_key=True)
+    agent_id: str = Field(index=True)
+    bot_id: str = Field(index=True)
+    rail: str = Field(index=True)
+    status: str = Field(index=True)
+    mode: str = Field(default="local", index=True)
+    config_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime | None = None
+
+
 class PaymentSession(SQLModel, table=True):
     id: str = Field(primary_key=True)
     quote_id: str = Field(index=True)

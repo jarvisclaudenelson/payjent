@@ -259,3 +259,25 @@ python -m payjent.demo agent-prompt
 ```
 
 This is the first end-to-end local UX: ask agent → pay prompt → mock pay → grant consume → resume stored envelope → fulfill. The older hosted-style resume example still exists in `examples/discord_resume_flow.py` for a running API plus seeded credentials.
+
+## Dashboard v0
+
+Payjent now includes a built-in FastAPI dashboard/control-plane at `/dashboard` for agent developers and operators. It is intentionally server-rendered and credential-safe for local development: browser pages are read-only setup surfaces that show operator-authenticated `curl` commands instead of unauthenticated production actions.
+
+Dashboard v0 covers:
+
+- **Agent registration** via `POST /api/v1/agents/register` with an operator key. This creates an `AgentProfile` and returns a bot API key once. Payjent stores only the keyed hash in `BotCredential`; copy the plaintext key immediately.
+- **Stripe Connect funding rail setup** via `POST /api/v1/agents/{agent_id}/stripe-connect/start` and `/complete`. In local/test mode this returns a simulated `acct_test_...` account and onboarding URL, writes a non-secret `RailConnection`, and does not call Stripe. In production it fails closed with `503` until real Connect OAuth/configuration exists.
+- **x402 spend rail configuration** via `POST /api/v1/agents/{agent_id}/x402/configure`. The stored config is non-secret only: network, optional `pay_to`, optional facilitator URL, request/call caps, and enabled state. Do not place private keys, wallet seeds, Stripe secrets, or bearer tokens in `config_json`.
+- **Integration snippets and state** on `/dashboard/agents/{agent_id}` including agent identity, rail statuses, a `discord-aggregator-stripe-smoke` snippet, recent quotes, and spend ledger entries.
+
+Example local registration:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/agents/register \
+  -H "X-Payjent-Bot-Key: $PAYJENT_OPERATOR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Hermes Research","platform":"discord","bot_id":"demo-stripe-smoke-bot","default_currency":"USD"}'
+```
+
+This maps directly to the `python -m payjent.demo discord-aggregator-stripe-smoke` flow: the dashboard agent `bot_id` and one-time bot key are the control-plane version of the in-process seeded credentials used by the smoke demo. The demo still uses safe local/mock settlement by default; live Stripe Connect OAuth and real x402 facilitator/wallet settlement are the next integration layer, not part of this v0.
