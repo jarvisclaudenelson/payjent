@@ -262,7 +262,7 @@ This is the first end-to-end local UX: ask agent → pay prompt → mock pay →
 
 ## Dashboard v0
 
-Payjent now includes a built-in FastAPI dashboard/control-plane at `/dashboard` for agent developers and operators. It is intentionally server-rendered and credential-safe for local development: browser pages are read-only setup surfaces that show operator-authenticated `curl` commands instead of unauthenticated production actions.
+Payjent now includes a built-in FastAPI dashboard/control-plane at `/dashboard` for agent developers and operators. Dashboard v0 is a local/dev UI: it is intentionally server-rendered and credential-safe for local development, with browser pages as read-only setup surfaces that show operator-authenticated `curl` commands instead of unauthenticated production actions. In production mode, `/dashboard` and `/dashboard/agents/{agent_id}` fail closed with `403` until proper browser UI authentication is added; operator APIs remain credential-protected with bot/operator keys.
 
 Dashboard v0 covers:
 

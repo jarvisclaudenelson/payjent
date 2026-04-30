@@ -249,8 +249,23 @@ body{margin:0;font-family:Inter,ui-sans-serif,system-ui;color:#0f172a;background
 </style>"""
 
 
+_DASHBOARD_AUTH_NOT_CONFIGURED = "Dashboard UI authentication is not configured; use operator-authenticated API or enable a proper auth provider."
+
+
+def _production_dashboard_block(settings: Settings) -> HTMLResponse | None:
+    if not settings.is_production:
+        return None
+    return HTMLResponse(
+        f"<!doctype html><html><head><title>Payjent dashboard unavailable</title></head><body><h1>Dashboard unavailable</h1><p>{_html_escape(_DASHBOARD_AUTH_NOT_CONFIGURED)}</p></body></html>",
+        status_code=403,
+    )
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(session: Session = Depends(get_session)):
+def dashboard(session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    blocked = _production_dashboard_block(settings)
+    if blocked is not None:
+        return blocked
     agents = session.exec(select(AgentProfile).order_by(AgentProfile.created_at.desc())).all()
     cards = "".join(f"<div class='card'><span class='pill'>{_html_escape(a.platform)}</span><h3>{_html_escape(a.name)}</h3><p class='muted'><code>{_html_escape(a.bot_id)}</code></p><p><a class='btn' href='/dashboard/agents/{_html_escape(a.id)}'>Open setup</a></p></div>" for a in agents) or "<div class='card'><h3>No agents yet</h3><p class='muted'>Register via the operator-authenticated API below.</p></div>"
     register_curl = "curl -X POST /api/v1/agents/register -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;' -H 'Content-Type: application/json' -d '{&quot;name&quot;:&quot;Hermes Research&quot;,&quot;platform&quot;:&quot;discord&quot;,&quot;bot_id&quot;:&quot;hermes-discord&quot;,&quot;default_currency&quot;:&quot;USD&quot;}'"
@@ -258,7 +273,10 @@ def dashboard(session: Session = Depends(get_session)):
 
 
 @app.get("/dashboard/agents/{agent_id}", response_class=HTMLResponse)
-def dashboard_agent(agent_id: str, session: Session = Depends(get_session)):
+def dashboard_agent(agent_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    blocked = _production_dashboard_block(settings)
+    if blocked is not None:
+        return blocked
     agent = session.get(AgentProfile, agent_id)
     if not agent:
         raise HTTPException(404, "agent not found")

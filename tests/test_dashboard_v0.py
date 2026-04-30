@@ -102,6 +102,45 @@ def test_dashboard_and_agent_detail_render_key_copy(client, operator_headers):
         assert copy in detail.text
 
 
+def test_production_dashboard_pages_fail_closed_without_metadata(client, operator_headers):
+    agent = _register(client, operator_headers)["agent"]
+    client.post(f"/api/v1/agents/{agent['id']}/stripe-connect/start", headers=operator_headers)
+    client.post(
+        f"/api/v1/agents/{agent['id']}/x402/configure",
+        headers=operator_headers,
+        json={
+            "network": "base-sepolia",
+            "pay_to": "0xTEST_PAY_TO",
+            "facilitator_url": "https://facilitator.example",
+            "max_per_request_minor": 900,
+            "max_per_call_minor": 250,
+            "enabled": True,
+        },
+    )
+    app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, public_base_url="https://payjent.example")
+    try:
+        responses = [client.get("/dashboard"), client.get(f"/dashboard/agents/{agent['id']}")]
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    forbidden_values = [
+        "Hermes Research",
+        "hermes-bot",
+        "stripe_connect",
+        "acct_test_",
+        "x402 rail configuration",
+        "0xTEST_PAY_TO",
+        "facilitator.example",
+        "discord-aggregator-stripe-smoke",
+        "Integration snippet",
+    ]
+    for response in responses:
+        assert response.status_code == 403
+        assert "Dashboard UI authentication is not configured" in response.text
+        for value in forbidden_values:
+            assert value not in response.text
+
+
 def test_production_stripe_connect_start_fails_closed(client, operator_headers):
     agent = _register(client, operator_headers)["agent"]
     app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, public_base_url="https://payjent.example")
