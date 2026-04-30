@@ -71,8 +71,34 @@ class LinkApproval:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LinkStatusResult:
+    normalized_status: str
+    provider_session_id: str | None
+    raw_status: str | None
+    raw: dict[str, Any]
+    is_settled: bool
+
+
 Runner = Callable[[list[str]], str | bytes | dict[str, Any]]
 MCPClient = Callable[[LinkCredentialRequest], str | bytes | dict[str, Any]] | Any
+
+LINK_STATUS_PENDING = "pending"
+LINK_STATUS_APPROVED_NOT_SETTLED = "approved_not_settled"
+LINK_STATUS_CREDENTIAL_CREATED_NOT_SETTLED = "credential_created_not_settled"
+LINK_STATUS_SETTLED = "settled"
+LINK_STATUS_FAILED = "failed"
+LINK_STATUS_UNKNOWN = "unknown"
+
+_APPROVED_NOT_SETTLED_STATUSES = {
+    "approved", "approval_complete", "approval_completed", "authorized", "auth_complete", "authorization_complete",
+}
+_CREDENTIAL_CREATED_NOT_SETTLED_STATUSES = {
+    "credential_created", "credentials_created", "credential_issued", "card_created", "payment_method_created",
+}
+_PENDING_STATUSES = {"pending", "created", "requested", "requires_approval", "awaiting_approval", "processing", "in_progress"}
+_FAILED_STATUSES = {"failed", "failure", "declined", "canceled", "cancelled", "expired", "rejected", "error"}
+_SETTLED_STATUSES = {"paid", "settled", "payment_succeeded", "merchant_charge_succeeded"}
 
 
 def validate_http_url(value: str | None, *, field_name: str) -> str:
@@ -124,6 +150,12 @@ def build_link_cli_command_sequence(request: LinkCredentialRequest) -> list[list
     return [LINK_AUTH_STATUS_COMMAND.copy(), build_link_spend_request_command(request)]
 
 
+def build_link_retrieve_command(provider_session_id: str) -> list[str]:
+    if not str(provider_session_id).strip():
+        raise ValueError("provider_session_id is required for Link retrieve")
+    return ["link-cli", "spend-request", "retrieve", str(provider_session_id).strip(), "--format", "json"]
+
+
 def _coerce_polling_command(value: Any) -> list[str] | None:
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return value
@@ -156,6 +188,69 @@ def parse_link_spend_request_response(raw: str | bytes | dict[str, Any]) -> Link
         provider_session_id=str(provider_session_id),
         polling_command=_coerce_polling_command(next_hint.get("command")),
         raw=data,
+    )
+
+
+def _parse_json_dict(raw: str | bytes | dict[str, Any], *, context: str) -> dict[str, Any]:
+    if isinstance(raw, (str, bytes)):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{context} response was not valid JSON") from exc
+    elif isinstance(raw, dict):
+        data = raw
+    else:
+        raise ValueError(f"{context} response must be JSON text or a dict")
+    if not isinstance(data, dict):
+        raise ValueError(f"{context} response must be a JSON object")
+    return data
+
+
+def _normalize_status_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized or None
+
+
+def _extract_raw_status(data: dict[str, Any]) -> str | None:
+    candidates: list[Any] = [data.get("status"), data.get("state")]
+    for key in ("spend_request", "spendRequest", "payment", "charge", "merchant_charge", "merchantCharge", "credential"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            candidates.extend([nested.get("status"), nested.get("state")])
+    for value in candidates:
+        normalized = _normalize_status_value(value)
+        if normalized:
+            return normalized
+    return None
+
+
+def _normalize_link_status(raw_status: str | None) -> str:
+    if raw_status in _SETTLED_STATUSES:
+        return LINK_STATUS_SETTLED
+    if raw_status in _FAILED_STATUSES:
+        return LINK_STATUS_FAILED
+    if raw_status in _CREDENTIAL_CREATED_NOT_SETTLED_STATUSES:
+        return LINK_STATUS_CREDENTIAL_CREATED_NOT_SETTLED
+    if raw_status in _APPROVED_NOT_SETTLED_STATUSES:
+        return LINK_STATUS_APPROVED_NOT_SETTLED
+    if raw_status in _PENDING_STATUSES:
+        return LINK_STATUS_PENDING
+    return LINK_STATUS_UNKNOWN
+
+
+def parse_link_status_response(raw: str | bytes | dict[str, Any], *, provider_session_id: str | None = None) -> LinkStatusResult:
+    data = _parse_json_dict(raw, context="Link retrieve")
+    raw_status = _extract_raw_status(data)
+    normalized_status = _normalize_link_status(raw_status)
+    resolved_provider_session_id = provider_session_id or data.get("spend_request_id") or data.get("spendRequestId") or data.get("id")
+    return LinkStatusResult(
+        normalized_status=normalized_status,
+        provider_session_id=str(resolved_provider_session_id) if resolved_provider_session_id else None,
+        raw_status=raw_status,
+        raw=data,
+        is_settled=normalized_status == LINK_STATUS_SETTLED,
     )
 
 
@@ -194,6 +289,18 @@ def run_link_cli_spend_request(request: LinkCredentialRequest, runner: Runner | 
     return parse_link_spend_request_response(raw)
 
 
+def run_link_cli_retrieve(provider_session_id: str, runner: Runner | None = None) -> LinkStatusResult:
+    """Run CLI retrieve fallback with non-interactive auth status preflight."""
+    active_runner = runner or _default_cli_runner
+    auth_raw = active_runner(LINK_AUTH_STATUS_COMMAND.copy())
+    if not _is_authenticated(auth_raw):
+        raise RuntimeError(
+            "link-cli is not authenticated; run `link-cli auth login --client-name Payjent` in a background terminal and approve it before calling this API"
+        )
+    raw = active_runner(build_link_retrieve_command(provider_session_id))
+    return parse_link_status_response(raw, provider_session_id=provider_session_id)
+
+
 def _call_mcp_client(mcp_client: MCPClient, request: LinkCredentialRequest) -> str | bytes | dict[str, Any]:
     payload = request.model_dump()
     if callable(mcp_client):
@@ -203,6 +310,17 @@ def _call_mcp_client(mcp_client: MCPClient, request: LinkCredentialRequest) -> s
     if hasattr(mcp_client, "call_tool"):
         return mcp_client.call_tool(LINK_MCP_TOOLS["spend_request_create"], payload)
     raise TypeError("mcp_client must be callable or expose create_link_spend_request/call_tool")
+
+
+def _call_mcp_retrieve(mcp_client: Any, provider_session_id: str) -> str | bytes | dict[str, Any]:
+    payload = {"spend_request_id": provider_session_id, "id": provider_session_id}
+    if callable(mcp_client):
+        return mcp_client(provider_session_id)
+    if hasattr(mcp_client, "retrieve_link_spend_request"):
+        return mcp_client.retrieve_link_spend_request(payload)
+    if hasattr(mcp_client, "call_tool"):
+        return mcp_client.call_tool(LINK_MCP_TOOLS["spend_request_retrieve"], payload)
+    raise TypeError("mcp_client must be callable or expose retrieve_link_spend_request/call_tool")
 
 
 def create_link_spend_request(
@@ -219,3 +337,14 @@ def create_link_spend_request(
     if mcp_client is not None:
         return parse_link_spend_request_response(_call_mcp_client(mcp_client, payload))
     return run_link_cli_spend_request(payload, runner=cli_runner)
+
+
+def retrieve_link_status(
+    provider_session_id: str,
+    mcp_client: Any | None = None,
+    cli_runner: Runner | None = None,
+) -> LinkStatusResult:
+    """Retrieve a Link spend request using MCP first, then CLI fallback."""
+    if mcp_client is not None:
+        return parse_link_status_response(_call_mcp_retrieve(mcp_client, provider_session_id), provider_session_id=provider_session_id)
+    return run_link_cli_retrieve(provider_session_id, runner=cli_runner)

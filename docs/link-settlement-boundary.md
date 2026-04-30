@@ -6,8 +6,22 @@ Payjent's Link rail is currently an approval and credential-request flow only. A
 
 - Checkout with `X-Payjent-Provider: link` creates a Payjent payment session in `checkout_created` state.
 - `POST /api/v1/payment-sessions/{session_id}/link/spend-request` creates or requests a Link approval URL and polling hint.
+- `POST /api/v1/payment-sessions/{session_id}/link/poll` retrieves Link status using MCP first or `link-cli spend-request retrieve {provider_session_id} --format json` after an auth-status preflight.
 - Approval URL creation, user approval, and credential creation do not mark the Payjent session paid.
-- Payjent does not issue a receipt or grant from the current Link approval/credential-request flow.
+- Payjent does not issue a receipt or grant from the current Link approval/credential-request/polling flow.
+
+## Status normalization
+
+| Raw Link status/state examples | Payjent normalized status | Settlement? | Payjent action |
+| --- | --- | --- | --- |
+| missing, unrecognized | `unknown` | No | Leave session unpaid; no receipt/grant |
+| `pending`, `created`, `requires_approval`, `processing` | `pending` | No | Leave session unpaid; no receipt/grant |
+| `approved`, `approval_complete`, `authorized` | `approved_not_settled` | No | Leave session unpaid; no receipt/grant |
+| `credential_created`, `credential_issued`, `payment_method_created` | `credential_created_not_settled` | No | Leave session unpaid; no receipt/grant |
+| `failed`, `declined`, `canceled`, `expired`, `rejected` | `failed` | No | Leave session unpaid; no receipt/grant |
+| very explicit terminal-ish values: `paid`, `settled`, `payment_succeeded`, `merchant_charge_succeeded` | `settled` | Parser-only evidence | Endpoint still fails closed and returns `settlement_mapping_required`; no receipt/grant |
+
+The parser intentionally does not over-map vague status values. Current fake/demo statuses remain non-settled.
 
 ## Required settlement signal
 

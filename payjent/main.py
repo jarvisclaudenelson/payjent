@@ -11,14 +11,14 @@ from .models import BotCredential, Quote, PaymentSession, Grant, FulfillmentEven
 from .money import validate_breakdown, quote_hash
 from .schemas import (
     FulfillmentCreate, FulfillmentRead, GrantPresentation, GrantVerifyResponse,
-    LinkCredentialApproval, LinkCredentialRequest, MockPayResponse, PaymentSessionRead,
+    LinkCredentialApproval, LinkCredentialRequest, LinkPollResponse, MockPayResponse, PaymentSessionRead,
     QuoteCreate, QuoteRead,
 )
 from .signing import verify_signature
 from .providers.mock import complete_mock_payment
 from .providers.base import issue_receipt_and_grant
 from .providers.stripe import create_stripe_checkout_session, parse_stripe_event, verify_stripe_signature
-from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest, create_link_spend_request as create_link_provider_spend_request, validate_credential_type
+from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest, create_link_spend_request as create_link_provider_spend_request, retrieve_link_status as retrieve_link_provider_status, validate_credential_type
 from .risk import assess_checkout_risk
 
 @asynccontextmanager
@@ -302,6 +302,37 @@ def create_link_spend_request(session_id: str, payload: LinkCredentialRequest, s
         provider_session_id=approval.provider_session_id,
         polling_command=approval.polling_command,
         message="Show approval_url to the user and poll Link; Payjent remains unpaid until verified settlement is implemented.",
+    )
+
+
+@app.post("/api/v1/payment-sessions/{session_id}/link/poll", response_model=LinkPollResponse)
+def poll_link_payment_session(session_id: str, session: Session = Depends(get_session), _credential: BotCredential = Depends(require_operator_credential)):
+    ps = session.get(PaymentSession, session_id)
+    if not ps:
+        raise HTTPException(404, "payment session not found")
+    if ps.provider != "link":
+        raise HTTPException(409, "payment session provider is not link")
+    if not ps.provider_session_id:
+        raise HTTPException(409, "payment session has no Link provider_session_id; create a Link spend request before polling")
+    try:
+        status = retrieve_link_provider_status(ps.provider_session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # Fail closed: Link approval, credential creation, unknown values, and even
+    # currently parsed settled-ish values do not issue Payjent receipts/grants
+    # until a production Link terminal settlement signal is explicitly mapped.
+    session.add(ps); session.commit(); session.refresh(ps)
+    return LinkPollResponse(
+        payment_session=session_to_read(ps),
+        normalized_status=status.normalized_status,
+        provider_session_id=status.provider_session_id or ps.provider_session_id,
+        raw_status=status.raw_status,
+        is_settled=status.is_settled,
+        settlement_mapping_required=True,
+        message="Payjent remains unpaid; Link polling is fail-closed until terminal settlement mapping is enabled.",
     )
 
 

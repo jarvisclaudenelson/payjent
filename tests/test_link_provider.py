@@ -6,9 +6,13 @@ from payjent.providers.link import (
     LINK_AUTH_STATUS_COMMAND,
     LinkCredentialRequest,
     build_link_cli_command_sequence,
+    build_link_retrieve_command,
     build_link_spend_request_command,
     create_link_spend_request,
     parse_link_spend_request_response,
+    parse_link_status_response,
+    retrieve_link_status,
+    run_link_cli_retrieve,
     run_link_cli_spend_request,
     validate_credential_type,
 )
@@ -54,6 +58,38 @@ def test_parse_link_response_requires_approval_url_and_extracts_next_command():
     assert approval.polling_command == ["link-cli", "spend-request", "retrieve", "sr_123", "--format", "json"]
     with pytest.raises(ValueError, match="missing approval_url"):
         parse_link_spend_request_response({"id": "sr_missing"})
+
+
+def test_parse_link_status_response_is_conservative():
+    cases = [
+        ({"id": "sr_missing"}, "unknown", None, False),
+        ({"id": "sr_approved", "status": "approved"}, "approved_not_settled", "approved", False),
+        ({"id": "sr_cred", "credential": {"status": "credential_created"}}, "credential_created_not_settled", "credential_created", False),
+        ({"id": "sr_failed", "state": "failed"}, "failed", "failed", False),
+        ({"id": "sr_paid", "status": "merchant_charge_succeeded"}, "settled", "merchant_charge_succeeded", True),
+    ]
+    for raw, expected, raw_status, settled in cases:
+        result = parse_link_status_response(raw)
+        assert result.normalized_status == expected
+        assert result.raw_status == raw_status
+        assert result.is_settled is settled
+
+
+def test_link_retrieve_orchestrator_prefers_mcp_and_cli_auth_preflight():
+    assert build_link_retrieve_command("sr_123") == ["link-cli", "spend-request", "retrieve", "sr_123", "--format", "json"]
+    assert retrieve_link_status("sr_mcp", mcp_client=lambda provider_session_id: {"id": provider_session_id, "status": "approved"}).normalized_status == "approved_not_settled"
+
+    commands = []
+
+    def runner(command):
+        commands.append(command)
+        if command == LINK_AUTH_STATUS_COMMAND:
+            return {"authenticated": True}
+        return {"id": "sr_cli", "status": "credential_created"}
+
+    result = run_link_cli_retrieve("sr_cli", runner=runner)
+    assert result.normalized_status == "credential_created_not_settled"
+    assert commands == [LINK_AUTH_STATUS_COMMAND, build_link_retrieve_command("sr_cli")]
 
 
 def test_link_spend_request_endpoint_does_not_mark_paid_or_issue_grant(monkeypatch, engine, client, quote_payload, bot_headers, operator_headers):
@@ -103,6 +139,62 @@ def test_link_spend_request_rejects_missing_credential_type(client, quote_payloa
         json={"merchant_url": "https://merchant.example/checkout", "credential_type": ""},
     )
     assert r.status_code == 422
+
+
+def _create_link_session_with_provider_id(client, engine, quote_payload, bot_headers, provider_session_id="sr_poll"):
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+    ps = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers={**bot_headers, "X-Payjent-Provider": "link"}).json()
+    with Session(engine) as session:
+        stored = session.get(PaymentSession, ps["id"])
+        stored.provider_session_id = provider_session_id
+        session.add(stored)
+        session.commit()
+    return ps
+
+
+@pytest.mark.parametrize("raw_status,expected", [
+    ("approved", "approved_not_settled"),
+    ("credential_created", "credential_created_not_settled"),
+    (None, "unknown"),
+    ("merchant_charge_succeeded", "settled"),
+])
+def test_link_poll_endpoint_fail_closed_for_all_current_statuses(monkeypatch, engine, client, quote_payload, bot_headers, operator_headers, raw_status, expected):
+    import payjent.main as main
+
+    ps = _create_link_session_with_provider_id(client, engine, quote_payload, bot_headers)
+
+    def fake_retrieve(provider_session_id):
+        raw = {"id": provider_session_id}
+        if raw_status is not None:
+            raw["status"] = raw_status
+        return parse_link_status_response(raw, provider_session_id=provider_session_id)
+
+    monkeypatch.setattr(main, "retrieve_link_provider_status", fake_retrieve)
+    r = client.post(f"/api/v1/payment-sessions/{ps['id']}/link/poll", headers=operator_headers)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["normalized_status"] == expected
+    assert data["payment_session"]["status"] == "checkout_created"
+    assert data["settlement_mapping_required"] is True
+
+    with Session(engine) as session:
+        stored = session.get(PaymentSession, ps["id"])
+        assert stored.status == "checkout_created"
+        assert stored.receipt_id is None
+        assert session.exec(select(Grant).where(Grant.payment_session_id == ps["id"])).first() is None
+
+
+def test_link_poll_rejects_non_link_and_missing_provider_session_id(client, quote_payload, bot_headers, operator_headers):
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+    non_link = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers).json()
+    r = client.post(f"/api/v1/payment-sessions/{non_link['id']}/link/poll", headers=operator_headers)
+    assert r.status_code == 409
+    assert "provider is not link" in r.json()["detail"]
+
+    link_ps = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers={**bot_headers, "X-Payjent-Provider": "link"}).json()
+    r = client.post(f"/api/v1/payment-sessions/{link_ps['id']}/link/poll", headers=operator_headers)
+    assert r.status_code == 409
+    assert "provider_session_id" in r.json()["detail"]
 
 
 def _provider_request(**overrides):

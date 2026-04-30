@@ -64,6 +64,16 @@ class LinkCredentialApproval(BaseModel):
     message: str
 
 
+class LinkPollResponse(BaseModel):
+    payment_session: PaymentSessionRead
+    normalized_status: Literal["pending", "approved_not_settled", "credential_created_not_settled", "settled", "failed", "unknown"]
+    provider_session_id: str | None = None
+    raw_status: str | None = None
+    is_settled: bool
+    settlement_mapping_required: bool = True
+    message: str
+
+
 class GrantPresentation(BaseModel):
     bot_id: str | None = None
     external_user_id: str | None = None

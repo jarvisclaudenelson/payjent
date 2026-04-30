@@ -262,7 +262,7 @@ def print_flow_summary(result: dict[str, Any]) -> None:
 def print_link_purchase_summary(result: dict[str, Any]) -> None:
     approval = result["link_approval"]
     payment_session = result["payment_session"]
-    polling = approval.get("polling_command") or "poll Link status once a status endpoint is mapped"
+    polling = approval.get("polling_command") or f"POST /api/v1/payment-sessions/{payment_session['id']}/link/poll"
     if isinstance(polling, list):
         polling = " ".join(polling)
     print("Payjent Link purchase demo created an approval request.")
