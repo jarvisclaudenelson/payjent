@@ -3,6 +3,7 @@
 Commands:
   python -m payjent.demo seed
   python -m payjent.demo run-flow
+  python -m payjent.demo link-purchase
   python -m payjent.demo reset-db
 """
 
@@ -22,6 +23,7 @@ from .auth import create_bot_credential, generate_api_key
 from .config import get_settings
 from .db import engine, init_db
 from .main import app
+from .providers.link import LinkApproval
 
 DEFAULT_BOT_ID = "discord-bot-1"
 DEFAULT_OPERATOR_ID = "operator-1"
@@ -140,6 +142,77 @@ def run_flow_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key
     }
 
 
+def _demo_link_purchase_payload() -> dict[str, Any]:
+    return {
+        "merchant_url": "https://merchant.example/checkout/demo-order-123",
+        "credential_type": "card",
+        "purpose": "Demo: agent-mediated merchant purchase for a bounded item",
+        "metadata": {"demo": True, "merchant": "merchant.example"},
+    }
+
+
+def _fake_link_spend_request(_payload: Any) -> LinkApproval:
+    provider_session_id = "sr_payjent_demo_link_purchase"
+    return LinkApproval(
+        approval_url=f"https://link.example/approve/{provider_session_id}",
+        provider_session_id=provider_session_id,
+        polling_command=["link-cli", "spend-request", "retrieve", provider_session_id, "--format", "json"],
+        raw={"id": provider_session_id, "demo": True},
+    )
+
+
+def run_link_purchase_with_client(
+    client: Any,
+    *,
+    bot_id: str,
+    bot_key: str,
+    operator_key: str,
+    real_link: bool = False,
+) -> dict[str, Any]:
+    """Exercise quote -> Link checkout -> Link spend request without settlement.
+
+    By default this injects a deterministic fake Link approval so the demo never
+    calls link-cli, npm, MCP, or the network. Pass ``real_link=True`` only for an
+    intentional operator-driven Link integration check.
+    """
+    bot_headers = {"X-Payjent-Bot-Key": bot_key}
+    operator_headers = {"X-Payjent-Bot-Key": operator_key}
+    quote_payload = {
+        **_demo_quote_payload(bot_id),
+        "request_summary": "Demo: agent-mediated merchant purchase",
+        "request_hash": "demo-link-purchase-request-hash-1",
+        "amount_minor": 1299,
+        "cost_breakdown": [{"label": "merchant purchase", "amount_minor": 1299}],
+        "execution_envelope": {"merchant_url": "https://merchant.example/checkout/demo-order-123", "item": "demo item"},
+    }
+    quote = _raise_for_demo_response(client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers), "create quote")
+    checkout = _raise_for_demo_response(
+        client.post(
+            f"/api/v1/quotes/{quote['id']}/checkout",
+            headers={**bot_headers, "X-Payjent-Provider": "link", "Idempotency-Key": "payjent-demo-link-purchase-1"},
+        ),
+        "create Link checkout",
+    )
+    if real_link:
+        approval = _raise_for_demo_response(
+            client.post(f"/api/v1/payment-sessions/{checkout['id']}/link/spend-request", json=_demo_link_purchase_payload(), headers=operator_headers),
+            "create Link spend request",
+        )
+    else:
+        import payjent.main as main_module
+        original = main_module.create_link_provider_spend_request
+        main_module.create_link_provider_spend_request = _fake_link_spend_request
+        try:
+            approval = _raise_for_demo_response(
+                client.post(f"/api/v1/payment-sessions/{checkout['id']}/link/spend-request", json=_demo_link_purchase_payload(), headers=operator_headers),
+                "create fake Link spend request",
+            )
+        finally:
+            main_module.create_link_provider_spend_request = original
+    current_session = _raise_for_demo_response(client.get(f"/api/v1/payment-sessions/{checkout['id']}"), "fetch payment session")
+    return {"quote": quote, "payment_session": current_session, "link_approval": approval}
+
+
 def run_local_flow(*, bot_id: str, bot_key: str, operator_key: str, base_url: str | None = None) -> dict[str, Any]:
     if base_url:
         with httpx.Client(base_url=base_url.rstrip("/"), timeout=10.0) as client:
@@ -157,6 +230,22 @@ def print_flow_summary(result: dict[str, Any]) -> None:
     print(f"grant_id={result['grant']['id']}")
     print(f"fulfillment_id={result['fulfillment']['id']}")
     print(f"final_status={result['fulfillment']['status']}")
+
+
+def print_link_purchase_summary(result: dict[str, Any]) -> None:
+    approval = result["link_approval"]
+    payment_session = result["payment_session"]
+    polling = approval.get("polling_command") or "poll Link status once a status endpoint is mapped"
+    if isinstance(polling, list):
+        polling = " ".join(polling)
+    print("Payjent Link purchase demo created an approval request.")
+    print(f"quote_id={result['quote']['id']}")
+    print(f"payment_session_id={payment_session['id']}")
+    print(f"approval_url={approval['approval_url']}")
+    print(f"polling_hint={polling}")
+    print(f"payment_session_status={payment_session['status']}")
+    print("Settlement boundary: the Payjent session remains checkout_created/unpaid; no receipt or grant is issued by Link approval or credential creation alone.")
+    print("Payjent must fail closed until verified terminal payment evidence is mapped, such as a successful merchant charge or future Link MPP/payment confirmation.")
 
 
 def reset_dev_database() -> None:
@@ -181,6 +270,12 @@ def build_parser() -> argparse.ArgumentParser:
     flow.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
     flow.add_argument("--base-url", default=os.getenv("PAYJENT_BASE_URL"), help="optional running Payjent API base URL")
 
+    link = sub.add_parser("link-purchase", help="run a local Link approval demo without marking Payjent paid")
+    link.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
+    link.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    link.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+    link.add_argument("--real-link", action="store_true", default=os.getenv("PAYJENT_DEMO_REAL_LINK", "").lower() in {"1", "true", "yes"}, help="opt in to the real Link provider path; default uses a deterministic fake approval and makes no external calls")
+
     sub.add_parser(
         "reset-db",
         help="drop/recreate all Payjent tables for a disposable local/dev database (pre-live only)",
@@ -204,6 +299,15 @@ def main(argv: list[str] | None = None) -> int:
             base_url=args.base_url,
         )
         print_flow_summary(result)
+        return 0
+    if args.command == "link-purchase":
+        init_db()
+        credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
+        bot_key = args.bot_key or credentials.bot_key
+        operator_key = args.operator_key or credentials.operator_key
+        with TestClient(app) as client:
+            result = run_link_purchase_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key, real_link=args.real_link)
+        print_link_purchase_summary(result)
         return 0
     if args.command == "reset-db":
         reset_dev_database()

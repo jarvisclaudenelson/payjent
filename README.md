@@ -32,6 +32,14 @@ For a one-command local API exercise after seeding, export the keys printed by `
 python -m payjent.demo run-flow
 ```
 
+To demo the experimental Link purchase approval boundary locally without Link auth, npm, CLI, MCP, or network access, run:
+
+```bash
+python -m payjent.demo link-purchase
+```
+
+The Link demo creates a quote, creates checkout with `X-Payjent-Provider: link`, calls `/api/v1/payment-sessions/{session_id}/link/spend-request` with a deterministic fake approval, prints the approval URL and polling hint, and explicitly leaves the Payjent session `checkout_created`/unpaid with no receipt or grant. Use `--real-link` or `PAYJENT_DEMO_REAL_LINK=true` only for an intentional real Link integration check.
+
 If you already have a server running, target it explicitly:
 
 ```bash
@@ -112,7 +120,7 @@ Payment rails:
 - Stripe webhook URL: configure Stripe to send Checkout events to `https://<your-payjent-host>/api/v1/webhooks/stripe`.
 - Test/live caveat: automated tests monkeypatch/fake the Stripe adapter and never call live Stripe. Use Stripe test-mode credentials while testing and keep all keys out of source control.
 - `POST /api/v1/webhooks/stripe` verifies `Stripe-Signature` with `PAYJENT_STRIPE_WEBHOOK_SECRET`, maps Stripe Checkout Session ids or metadata back to Payjent payment sessions, and only then issues receipts/grants. If the secret is unset, Payjent returns `503` and does not mark anything paid.
-- Link one-time credential rail (experimental): create checkout with `X-Payjent-Provider: link`, then an operator calls `POST /api/v1/payment-sessions/{session_id}/link/spend-request` with an http/https `merchant_url` and an explicit `credential_type` (`card` or `bank_account`) chosen after evaluating the merchant site. Payjent does **not** infer/default to `card`. Link integration is MCP-first (`payment-methods_list`, `spend-request_create`, `spend-request_retrieve`) with `link-cli` fallback. CLI fallback runs `link-cli auth status --format json` before creating a spend request; if not authenticated, operators must run `link-cli auth login --client-name "Payjent"` separately and approve it out-of-band. The endpoint returns `approval_url` plus a polling command/hint; show the approval URL to the user and poll Link. Approval/credential creation does not mark Payjent paid, issue a receipt, or issue a grant.
+- Link one-time credential rail (experimental): create checkout with `X-Payjent-Provider: link`, then an operator calls `POST /api/v1/payment-sessions/{session_id}/link/spend-request` with an http/https `merchant_url` and an explicit `credential_type` (`card` or `bank_account`) chosen after evaluating the merchant site. Payjent does **not** infer/default to `card`. Link integration is MCP-first (`payment-methods_list`, `spend-request_create`, `spend-request_retrieve`) with `link-cli` fallback. CLI fallback runs `link-cli auth status --format json` before creating a spend request; if not authenticated, operators must run `link-cli auth login --client-name "Payjent"` separately and approve it out-of-band. The endpoint returns `approval_url` plus a polling command/hint; show the approval URL to the user and poll Link. Approval URL creation, spend requests, and credential creation are not Payjent settlement by themselves and do not mark Payjent paid, issue a receipt, or issue a grant. Payjent should not issue receipts/grants until verified terminal payment evidence exists, such as a successful merchant charge or future Link MPP/payment confirmation. A future Link status polling endpoint must fail closed until that terminal settlement signal is mapped. See `docs/link-settlement-boundary.md`.
 - `POST /api/v1/payment-sessions/{session_id}/crypto/mark-paid` is an operator-only dev placeholder that marks a session paid through the same receipt/grant issuance path; it is disabled in production and is not crypto settlement.
 
 ## Direct-host production/test-mode guidance
