@@ -67,9 +67,12 @@ class Grant(SQLModel, table=True):
 
 
 class SpendLedgerEntry(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("grant_id", "operation_id", name="uq_spend_grant_operation_id"),)
+
     id: str = Field(primary_key=True)
     grant_id: str = Field(index=True)
     quote_id: str = Field(index=True)
+    operation_id: str = Field(index=True)
     tool: str
     vendor: str
     rail: str

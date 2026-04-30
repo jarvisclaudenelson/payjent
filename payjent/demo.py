@@ -304,6 +304,7 @@ def _discord_aggregator_envelope(topic: str) -> dict[str, Any]:
 def _fake_x402_premium_call(bot_client: PayjentClient, *, grant_id: str, presentation: dict[str, Any], topic: str) -> dict[str, Any]:
     spend = bot_client.authorize_spend(
         grant_id,
+        operation_id="discord-demo-x402-premium-call-1",
         presentation=presentation,
         tool="premium-research-tool",
         vendor="premium-mcp-demo",
@@ -349,8 +350,8 @@ def run_discord_aggregator_with_client(client: Any, *, bot_id: str, bot_key: str
     )
     grant = paid["grant"]
     presentation = {"bot_id": pending.bot_id, "external_user_id": pending.external_user_id, "request_hash": pending.request_hash}
-    x402 = _fake_x402_premium_call(bot_client, grant_id=grant["id"], presentation=presentation, topic=pending.execution_envelope["topic"])
     resume = gate.resume_paid_request(pending.id, grant_id=grant["id"], **presentation)
+    x402 = _fake_x402_premium_call(bot_client, grant_id=grant["id"], presentation=presentation, topic=resume["execution_envelope"]["topic"])
     fulfilled = gate.record_fulfillment(
         pending.id,
         "fulfilled",
@@ -359,6 +360,7 @@ def run_discord_aggregator_with_client(client: Any, *, bot_id: str, bot_key: str
             "stripe_funding_placeholder": True,
             "x402_spend": x402["spend"],
             "remaining_budget": x402["spend"]["remaining_budget"],
+            "grant_consumed_before_x402_spend": True,
         },
     )
     return {"pending": pending, "payment": paid, "grant": grant, "resume": resume, "x402": x402, "fulfilled": fulfilled}
@@ -460,7 +462,9 @@ def print_discord_aggregator_summary(result: dict[str, Any]) -> None:
     print("  one_payment_covers=Stripe-style user funding prompt plus downstream paid x402 action")
     print("  dev_note=operator mock-pay is local/dev-only; no live Stripe charge, x402 settlement, network call, or wallet is used")
     print(f"grant_id={result['grant']['id']}")
+    print("grant_consumed_before_x402_spend=True")
     print(f"x402_spend_id={spend['id']}")
+    print(f"x402_operation_id={spend['operation_id']}")
     print(f"x402_spend_status={spend['status']}")
     print(f"x402_spend_amount=USD {spend['amount_minor'] / 100:.2f}")
     print(f"x402_vendor={spend['vendor']}")

@@ -88,6 +88,7 @@ class GrantVerifyResponse(BaseModel):
 
 
 class SpendAuthorizationCreate(BaseModel):
+    operation_id: str = Field(min_length=1)
     presentation: GrantPresentation
     tool: str = Field(min_length=1)
     vendor: str = Field(min_length=1)
@@ -104,6 +105,7 @@ class SpendAuthorizationRead(BaseModel):
     id: str
     grant_id: str
     quote_id: str
+    operation_id: str
     tool: str
     vendor: str
     rail: str

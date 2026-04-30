@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
 from .config import Settings, get_settings
 from .db import get_session, init_db
@@ -423,6 +424,7 @@ def _spend_to_read(entry: SpendLedgerEntry, session: Session, grant: Grant) -> S
         id=entry.id,
         grant_id=entry.grant_id,
         quote_id=entry.quote_id,
+        operation_id=entry.operation_id,
         tool=entry.tool,
         vendor=entry.vendor,
         rail=entry.rail,
@@ -442,8 +444,16 @@ def _spend_to_read(entry: SpendLedgerEntry, session: Session, grant: Grant) -> S
 def create_spend_authorization(grant_id: str, payload: SpendAuthorizationCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
     grant = _load_valid_grant(grant_id, payload.presentation, session, settings)
     _enforce_bot_scope(credential, grant.payload.get("bot_id"))
-    if grant.consumed_at is not None:
-        raise HTTPException(409, "grant already consumed")
+    if grant.consumed_at is None:
+        raise HTTPException(409, "grant must be consumed before spend authorization")
+    existing = session.exec(
+        select(SpendLedgerEntry).where(
+            SpendLedgerEntry.grant_id == grant.id,
+            SpendLedgerEntry.operation_id == payload.operation_id,
+        )
+    ).first()
+    if existing:
+        return _spend_to_read(existing, session, grant)
     currency = payload.currency.upper()
     if currency != str(grant.payload.get("currency", "")).upper():
         raise HTTPException(status_code=422, detail="currency mismatch")
@@ -455,6 +465,7 @@ def create_spend_authorization(grant_id: str, payload: SpendAuthorizationCreate,
         id=f"spend_{uuid4().hex}",
         grant_id=grant.id,
         quote_id=grant.quote_id,
+        operation_id=payload.operation_id,
         tool=payload.tool,
         vendor=payload.vendor,
         rail=payload.rail,
@@ -465,7 +476,21 @@ def create_spend_authorization(grant_id: str, payload: SpendAuthorizationCreate,
         provider_reference=payload.provider_reference,
         metadata_json=payload.metadata,
     )
-    session.add(entry); session.commit(); session.refresh(entry)
+    session.add(entry)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        existing = session.exec(
+            select(SpendLedgerEntry).where(
+                SpendLedgerEntry.grant_id == grant.id,
+                SpendLedgerEntry.operation_id == payload.operation_id,
+            )
+        ).first()
+        if existing:
+            return _spend_to_read(existing, session, grant)
+        raise
+    session.refresh(entry)
     return _spend_to_read(entry, session, grant)
 
 
@@ -476,8 +501,8 @@ def capture_spend_authorization(spend_id: str, payload: SpendCaptureRequest, ses
         raise HTTPException(404, "spend authorization not found")
     grant = _load_valid_grant(entry.grant_id, payload.presentation, session, settings)
     _enforce_bot_scope(credential, grant.payload.get("bot_id"))
-    if grant.consumed_at is not None:
-        raise HTTPException(409, "grant already consumed")
+    if grant.consumed_at is None:
+        raise HTTPException(409, "grant must be consumed before spend capture")
     if entry.status == "captured":
         return _spend_to_read(entry, session, grant)
     if entry.status != "authorized":
