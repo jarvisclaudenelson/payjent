@@ -18,7 +18,7 @@ from .signing import verify_signature
 from .providers.mock import complete_mock_payment
 from .providers.base import issue_receipt_and_grant
 from .providers.stripe import create_stripe_checkout_session, parse_stripe_event, verify_stripe_signature
-from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest, run_link_cli_spend_request, validate_credential_type
+from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest, create_link_spend_request as create_link_provider_spend_request, validate_credential_type
 from .risk import assess_checkout_risk
 
 @asynccontextmanager
@@ -275,6 +275,9 @@ def create_link_spend_request(session_id: str, payload: LinkCredentialRequest, s
     q = session.get(Quote, ps.quote_id)
     if not q:
         raise HTTPException(404, "quote not found")
+    reserved_metadata_keys = {"payjent_quote_id", "payjent_payment_session_id"}
+    if reserved_metadata_keys.intersection(payload.metadata):
+        raise HTTPException(status_code=422, detail="metadata may not include reserved Payjent keys")
     try:
         provider_payload = LinkProviderCredentialRequest(
             merchant_url=payload.merchant_url,
@@ -283,9 +286,9 @@ def create_link_spend_request(session_id: str, payload: LinkCredentialRequest, s
             currency=q.currency,
             purpose=payload.purpose or q.request_summary,
             external_user_id=q.external_user_id,
-            metadata={"payjent_quote_id": q.id, "payjent_payment_session_id": ps.id, **payload.metadata},
+            metadata={**payload.metadata, "payjent_quote_id": q.id, "payjent_payment_session_id": ps.id},
         )
-        approval = run_link_cli_spend_request(provider_payload)
+        approval = create_link_provider_spend_request(provider_payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:

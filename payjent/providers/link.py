@@ -4,10 +4,11 @@ Payjent treats Link as a bounded downstream credential rail for agent-mediated
 merchant purchases. Payjent still owns quote/payment/grant state; a Link spend
 request only produces an approval URL and provider id. It is not settlement.
 
-Integration order is MCP first, CLI fallback second. MCP adapter bindings can use
-LINK_MCP_TOOLS below. CLI fallback must authenticate/check status before login
-(`link-cli auth status --format json`, then interactive `auth login --client-name
-Payjent --format json` if needed) and must not run login in tests.
+Integration order is MCP first, CLI fallback second. The public
+``create_link_spend_request`` orchestrator prefers an injected MCP callable/client
+when available and otherwise falls back to the CLI helper. CLI fallback performs a
+non-interactive auth preflight before creating a spend request and never runs
+interactive login inside the API process.
 
 Credential type is intentionally explicit. Payjent does not infer or default to
 `card`; callers must evaluate the merchant site and choose the credential type.
@@ -19,10 +20,11 @@ import json
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
 
-SUPPORTED_CREDENTIAL_TYPES = {"card", "bank_account", "unknown"}
+SUPPORTED_CREDENTIAL_TYPES = {"card", "bank_account"}
 
 LINK_MCP_TOOLS = {
     "auth_status": "auth_status",
@@ -45,6 +47,11 @@ class LinkCredentialRequest(BaseModel):
     external_user_id: str = Field(min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("merchant_url")
+    @classmethod
+    def _validate_merchant_url(cls, value: str) -> str:
+        return validate_http_url(value, field_name="merchant_url")
+
     @field_validator("credential_type")
     @classmethod
     def _validate_credential_type(cls, value: str) -> str:
@@ -62,6 +69,20 @@ class LinkApproval:
     provider_session_id: str
     polling_command: list[str] | None
     raw: dict[str, Any]
+
+
+Runner = Callable[[list[str]], str | bytes | dict[str, Any]]
+MCPClient = Callable[[LinkCredentialRequest], str | bytes | dict[str, Any]] | Any
+
+
+def validate_http_url(value: str | None, *, field_name: str) -> str:
+    if value is None or not str(value).strip():
+        raise ValueError(f"{field_name} is required")
+    normalized = str(value).strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{field_name} must be an http or https URL")
+    return normalized
 
 
 def validate_credential_type(value: str | None) -> str:
@@ -99,6 +120,10 @@ def build_link_spend_request_command(request: LinkCredentialRequest) -> list[str
     return argv
 
 
+def build_link_cli_command_sequence(request: LinkCredentialRequest) -> list[list[str]]:
+    return [LINK_AUTH_STATUS_COMMAND.copy(), build_link_spend_request_command(request)]
+
+
 def _coerce_polling_command(value: Any) -> list[str] | None:
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return value
@@ -121,32 +146,76 @@ def parse_link_spend_request_response(raw: str | bytes | dict[str, Any]) -> Link
     approval_url = data.get("approval_url") or data.get("approvalUrl")
     if not approval_url:
         raise ValueError("Link spend request response missing approval_url; approval must be shown to the user")
+    approval_url = validate_http_url(str(approval_url), field_name="approval_url")
     provider_session_id = data.get("spend_request_id") or data.get("spendRequestId") or data.get("id")
     if not provider_session_id:
         raise ValueError("Link spend request response missing spend_request_id/id")
     next_hint = data.get("_next") if isinstance(data.get("_next"), dict) else {}
     return LinkApproval(
-        approval_url=str(approval_url),
+        approval_url=approval_url,
         provider_session_id=str(provider_session_id),
         polling_command=_coerce_polling_command(next_hint.get("command")),
         raw=data,
     )
 
 
-Runner = Callable[[list[str]], str | bytes | dict[str, Any]]
+def _default_cli_runner(command: list[str]) -> str:
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError("link-cli is not installed or not on PATH") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"link-cli command failed: {exc.stderr or exc.stdout}") from exc
+    return completed.stdout
+
+
+def _is_authenticated(raw: str | bytes | dict[str, Any]) -> bool:
+    if isinstance(raw, (str, bytes)):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("link-cli auth status returned invalid JSON") from exc
+    elif isinstance(raw, dict):
+        data = raw
+    else:
+        raise RuntimeError("link-cli auth status returned an unsupported response")
+    return bool(data.get("authenticated") or data.get("is_authenticated") or data.get("logged_in"))
 
 
 def run_link_cli_spend_request(request: LinkCredentialRequest, runner: Runner | None = None) -> LinkApproval:
-    """CLI fallback execution hook. Tests should inject runner; no auth/login here."""
-    command = build_link_spend_request_command(request)
-    if runner is None:
-        try:
-            completed = subprocess.run(command, check=True, capture_output=True, text=True)
-        except FileNotFoundError as exc:
-            raise RuntimeError("link-cli is not installed or not on PATH") from exc
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"link-cli spend request failed: {exc.stderr or exc.stdout}") from exc
-        raw: str | bytes | dict[str, Any] = completed.stdout
-    else:
-        raw = runner(command)
+    """Run CLI fallback with non-interactive auth status preflight."""
+    active_runner = runner or _default_cli_runner
+    auth_raw = active_runner(LINK_AUTH_STATUS_COMMAND.copy())
+    if not _is_authenticated(auth_raw):
+        raise RuntimeError(
+            "link-cli is not authenticated; run `link-cli auth login --client-name Payjent` in a background terminal and approve it before calling this API"
+        )
+    raw = active_runner(build_link_spend_request_command(request))
     return parse_link_spend_request_response(raw)
+
+
+def _call_mcp_client(mcp_client: MCPClient, request: LinkCredentialRequest) -> str | bytes | dict[str, Any]:
+    payload = request.model_dump()
+    if callable(mcp_client):
+        return mcp_client(request)
+    if hasattr(mcp_client, "create_link_spend_request"):
+        return mcp_client.create_link_spend_request(payload)
+    if hasattr(mcp_client, "call_tool"):
+        return mcp_client.call_tool(LINK_MCP_TOOLS["spend_request_create"], payload)
+    raise TypeError("mcp_client must be callable or expose create_link_spend_request/call_tool")
+
+
+def create_link_spend_request(
+    payload: LinkCredentialRequest,
+    mcp_client: MCPClient | None = None,
+    cli_runner: Runner | None = None,
+) -> LinkApproval:
+    """Create a Link spend request using MCP first, then CLI fallback.
+
+    Tests can inject ``mcp_client`` and/or ``cli_runner`` so no real external calls
+    are required. If an MCP client is provided it is always preferred and CLI is
+    not invoked.
+    """
+    if mcp_client is not None:
+        return parse_link_spend_request_response(_call_mcp_client(mcp_client, payload))
+    return run_link_cli_spend_request(payload, runner=cli_runner)
