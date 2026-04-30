@@ -11,12 +11,14 @@ from .models import BotCredential, Quote, PaymentSession, Grant, FulfillmentEven
 from .money import validate_breakdown, quote_hash
 from .schemas import (
     FulfillmentCreate, FulfillmentRead, GrantPresentation, GrantVerifyResponse,
-    MockPayResponse, PaymentSessionRead, QuoteCreate, QuoteRead,
+    LinkCredentialApproval, LinkCredentialRequest, MockPayResponse, PaymentSessionRead,
+    QuoteCreate, QuoteRead,
 )
 from .signing import verify_signature
 from .providers.mock import complete_mock_payment
 from .providers.base import issue_receipt_and_grant
 from .providers.stripe import create_stripe_checkout_session, parse_stripe_event, verify_stripe_signature
+from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest, run_link_cli_spend_request, validate_credential_type
 from .risk import assess_checkout_risk
 
 @asynccontextmanager
@@ -105,6 +107,17 @@ def status_page(payment_session_id: str, session: Session = Depends(get_session)
     grant_state = "not issued"
     if grant:
         grant_state = f"issued: <code>{_html_escape(grant.id)}</code>; consumed: {_html_escape(grant.consumed_at is not None)}"
+    link_instructions = ""
+    if ps.provider == "link" and ps.status != "paid":
+        link_instructions = f"""
+      <section>
+        <h2>Link approval required</h2>
+        <p>This session uses Link as an experimental one-time credential rail. There is no browser-side completion on this page.</p>
+        <p>An operator must evaluate the merchant site, choose the explicit credential type, and call the authenticated API:</p>
+        <pre><code>POST /api/v1/payment-sessions/{_html_escape(ps.id)}/link/spend-request</code></pre>
+        <p>Payjent will return a Link approval URL and polling hint. Approval does not mark this session paid or issue a grant.</p>
+      </section>
+        """
     return f"""
     <!doctype html><html><head><title>Payjent status</title><style>body{{font-family:system-ui;margin:2rem;max-width:760px}}code{{background:#eee;padding:.1rem .25rem}}</style></head>
     <body>
@@ -113,6 +126,7 @@ def status_page(payment_session_id: str, session: Session = Depends(get_session)
       <p>Payment status: <strong>{_html_escape(ps.status)}</strong></p>
       <p>Quote: <code>{_html_escape(q.id)}</code> ({_html_escape(q.status)})</p>
       <p>Grant: {grant_state}</p>
+      {link_instructions}
       <h2>Fulfillment</h2><ul>{fulfillment_items}</ul>
       <p><a href="/pay/{_html_escape(ps.id)}">Back to checkout</a></p>
     </body></html>
@@ -197,7 +211,7 @@ def checkout(
         if existing:
             return session_to_read(existing)
     requested_provider = (provider or settings.checkout_provider or "mock").lower()
-    if requested_provider not in {"mock", "local", "stripe"}:
+    if requested_provider not in {"mock", "local", "stripe", "link"}:
         raise HTTPException(status_code=422, detail="unsupported checkout provider")
     session_id = f"ps_{uuid4().hex}"
     ps = PaymentSession(
@@ -247,6 +261,45 @@ def mock_pay(session_id: str, session: Session = Depends(get_session), settings:
     if ps.status == "paid": raise HTTPException(409, "payment session already paid")
     receipt, grant = complete_mock_payment(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds)
     return _issued_response(ps, receipt, grant)
+
+
+@app.post("/api/v1/payment-sessions/{session_id}/link/spend-request", response_model=LinkCredentialApproval)
+def create_link_spend_request(session_id: str, payload: LinkCredentialRequest, session: Session = Depends(get_session), _credential: BotCredential = Depends(require_operator_credential)):
+    ps = session.get(PaymentSession, session_id)
+    if not ps:
+        raise HTTPException(404, "payment session not found")
+    if ps.provider != "link":
+        raise HTTPException(409, "payment session provider is not link")
+    if ps.status == "paid":
+        raise HTTPException(409, "payment session already paid")
+    q = session.get(Quote, ps.quote_id)
+    if not q:
+        raise HTTPException(404, "quote not found")
+    try:
+        provider_payload = LinkProviderCredentialRequest(
+            merchant_url=payload.merchant_url,
+            credential_type=validate_credential_type(payload.credential_type),
+            amount_minor=q.amount_minor,
+            currency=q.currency,
+            purpose=payload.purpose or q.request_summary,
+            external_user_id=q.external_user_id,
+            metadata={"payjent_quote_id": q.id, "payjent_payment_session_id": ps.id, **payload.metadata},
+        )
+        approval = run_link_cli_spend_request(provider_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    ps.provider_session_id = approval.provider_session_id
+    ps.checkout_url = approval.approval_url
+    session.add(ps); session.commit(); session.refresh(ps)
+    return LinkCredentialApproval(
+        payment_session=session_to_read(ps),
+        approval_url=approval.approval_url,
+        provider_session_id=approval.provider_session_id,
+        polling_command=approval.polling_command,
+        message="Show approval_url to the user and poll Link; Payjent remains unpaid until verified settlement is implemented.",
+    )
 
 
 @app.post("/api/v1/payment-sessions/{session_id}/crypto/mark-paid", response_model=MockPayResponse)

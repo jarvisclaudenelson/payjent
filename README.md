@@ -2,7 +2,7 @@
 
 Payjent v0 is a small FastAPI gateway skeleton for paid, bounded bot requests: quote -> checkout -> mock payment -> signed receipt/grant -> consume -> fulfillment.
 
-**v0 defaults to mock/local payment rails.** Stripe Checkout is available only when explicitly configured (`PAYJENT_CHECKOUT_PROVIDER=stripe` or `X-Payjent-Provider: stripe`) and the optional Stripe SDK extra is installed for live calls. Checkout creation never marks a session paid; Stripe receipt/grant issuance happens only after a verified webhook. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
+**v0 defaults to mock/local payment rails.** Stripe Checkout is available only when explicitly configured (`PAYJENT_CHECKOUT_PROVIDER=stripe` or `X-Payjent-Provider: stripe`) and the optional Stripe SDK extra is installed for live calls. Link is available as an experimental one-time credential rail (`X-Payjent-Provider: link`) for downstream agent-mediated merchant purchases, not as Payjent settlement. Checkout creation never marks a session paid; Stripe receipt/grant issuance happens only after a verified webhook. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
 
 ## Local setup
 
@@ -112,6 +112,7 @@ Payment rails:
 - Stripe webhook URL: configure Stripe to send Checkout events to `https://<your-payjent-host>/api/v1/webhooks/stripe`.
 - Test/live caveat: automated tests monkeypatch/fake the Stripe adapter and never call live Stripe. Use Stripe test-mode credentials while testing and keep all keys out of source control.
 - `POST /api/v1/webhooks/stripe` verifies `Stripe-Signature` with `PAYJENT_STRIPE_WEBHOOK_SECRET`, maps Stripe Checkout Session ids or metadata back to Payjent payment sessions, and only then issues receipts/grants. If the secret is unset, Payjent returns `503` and does not mark anything paid.
+- Link one-time credential rail (experimental): create checkout with `X-Payjent-Provider: link`, then an operator calls `POST /api/v1/payment-sessions/{session_id}/link/spend-request` with `merchant_url` and an explicit `credential_type` chosen after evaluating the merchant site. Payjent does **not** infer/default to `card`. Link integration is MCP-first (`auth_status`, `auth_login`, `payment-methods_list`, `spend-request_create`, `spend-request_retrieve`) with `link-cli` fallback. CLI fallback should check `link-cli auth status --format json` before any interactive `link-cli auth login --client-name "Payjent" --format json`. The endpoint returns `approval_url` plus a polling command/hint; show the approval URL to the user and poll Link. Approval/credential creation does not mark Payjent paid, issue a receipt, or issue a grant.
 - `POST /api/v1/payment-sessions/{session_id}/crypto/mark-paid` is an operator-only dev placeholder that marks a session paid through the same receipt/grant issuance path; it is disabled in production and is not crypto settlement.
 
 ## Direct-host production/test-mode guidance

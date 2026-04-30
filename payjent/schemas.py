@@ -49,6 +49,21 @@ class MockPayResponse(BaseModel):
     grant: dict[str, Any]
 
 
+class LinkCredentialRequest(BaseModel):
+    merchant_url: str = Field(min_length=1)
+    credential_type: str = Field(min_length=1)
+    purpose: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LinkCredentialApproval(BaseModel):
+    payment_session: PaymentSessionRead
+    approval_url: str
+    provider_session_id: str
+    polling_command: list[str] | None = None
+    message: str
+
+
 class GrantPresentation(BaseModel):
     bot_id: str | None = None
     external_user_id: str | None = None
