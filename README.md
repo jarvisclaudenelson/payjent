@@ -48,6 +48,16 @@ python -m payjent.demo discord-aggregator
 
 This proves the control-plane thesis: **one user payment/approval -> bounded Payjent grant -> resumed paid request -> downstream x402 paid call + Stripe funding rail in one agent command**. The demo simulates `/research-with-paid-tools topic=...`, prints one Discord-style `PAYMENT_PROMPT` with a total USD 9.00 budget and checkout URL, completes the user funding step with a dev/operator mock-pay, verifies/consumes the grant by resuming the stored request, then authorizes and captures a USD 2.50 local fake x402 premium-tool spend against the same consumed grant and records fulfillment with the ledger summary. The “Stripe” line is intentionally a **mock Stripe funding placeholder** for a future Stripe test-mode hosted checkout/webhook path; the default command uses local mock-pay and does not create a live Stripe charge. The x402 call is a deterministic fake local ledger capture; no live x402 settlement, external network call, or wallet is used.
 
+To demo a stronger, still credential-safe Stripe test-mode smoke for the same Discord-style aggregator UX, run:
+
+```bash
+python -m payjent.demo discord-aggregator-stripe-smoke
+```
+
+This opt-in smoke calls the real Payjent `/api/v1/quotes/{quote_id}/checkout` path with `X-Payjent-Provider: stripe` and test-looking local settings (`sk_test_demo`, `whsec_demo`, and a public base URL), but dependency-injects a fake Stripe checkout adapter that returns `cs_test_discord_aggregator` and `https://checkout.stripe.test/discord-aggregator`. It then posts a correctly HMAC-signed synthetic `checkout.session.completed` event to `/api/v1/webhooks/stripe`, proves receipt/grant issuance through the Stripe webhook path, consumes the grant, records a local fake x402 capture, and fulfills the request. Output includes `stripe_test_webhook_simulated=True` and `live_stripe_charge=False`; no Stripe SDK call, network call, wallet, or live charge is performed.
+
+For a manual real Stripe test-mode check, run Payjent behind an HTTPS/tunnel URL, install `payjent[stripe]`, set `PAYJENT_STRIPE_SECRET_KEY=sk_test_...`, `PAYJENT_STRIPE_WEBHOOK_SECRET=whsec_...`, `PAYJENT_PUBLIC_BASE_URL=https://<your-tunnel>`, configure Stripe Checkout webhooks to `https://<your-tunnel>/api/v1/webhooks/stripe`, and request checkout with `X-Payjent-Provider: stripe`. Keep this outside default tests and never commit keys.
+
 To demo the experimental Link purchase approval boundary locally without Link auth, npm, CLI, MCP, or network access, run:
 
 ```bash

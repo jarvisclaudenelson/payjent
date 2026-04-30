@@ -215,6 +215,81 @@ def test_demo_agent_prompt_cli_ignores_stale_default_sqlite_db(tmp_path):
     assert "final_status=fulfilled" in completed.stdout
 
 
+def test_demo_discord_aggregator_stripe_smoke_uses_fake_stripe_webhook(engine, capsys, monkeypatch):
+    with Session(engine) as session:
+        credentials = demo.seed_credentials(session=session, bot_id="demo-stripe-smoke-bot")
+
+    def override_session():
+        with Session(engine) as session:
+            yield session
+
+    def explode_if_live_stripe_is_called(*args, **kwargs):
+        raise AssertionError("live Stripe SDK/network adapter must not be called by smoke demo")
+
+    import payjent.providers.stripe as stripe_provider
+
+    monkeypatch.setattr(stripe_provider.StripeSDKCheckoutClient, "create_checkout_session", explode_if_live_stripe_is_called)
+    app.dependency_overrides[get_session] = override_session
+    try:
+        with TestClient(app) as client:
+            result = demo.run_discord_aggregator_stripe_smoke_with_client(
+                client,
+                bot_id=credentials.bot_id,
+                bot_key=credentials.bot_key,
+                operator_key=credentials.operator_key,
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert result["payment_session"]["provider"] == "stripe"
+    assert result["payment_session"]["checkout_url"] == "https://checkout.stripe.test/discord-aggregator"
+    assert result["payment_session"]["provider_session_id"] == "cs_test_discord_aggregator"
+    assert result["stripe_webhook"]["processed"] is True
+    assert result["stripe_test_webhook_simulated"] is True
+    assert result["live_stripe_charge"] is False
+    assert result["grant"]["id"].startswith("grant_")
+    assert result["x402"]["spend"]["status"] == "captured"
+    assert result["fulfilled"].status == "fulfilled"
+
+    demo.print_discord_aggregator_stripe_smoke_summary(result)
+    output = capsys.readouterr().out
+    assert "checkout_url=https://checkout.stripe.test/discord-aggregator" in output
+    assert "provider_session_id=cs_test_discord_aggregator" in output
+    assert "stripe_test_webhook_simulated=True" in output
+    assert "stripe_webhook_processed=True" in output
+    assert "live_stripe_charge=False" in output
+    assert "grant_consumed_before_x402_spend=True" in output
+    assert "x402_spend_status=captured" in output
+    assert "x402_captured=True" in output
+    assert "final_status=fulfilled" in output
+
+
+def test_demo_discord_aggregator_stripe_smoke_cli_returns_success_without_real_stripe(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    db_url = f"sqlite:///{tmp_path / 'demo-stripe-smoke.db'}"
+    env = {**os.environ, "PAYJENT_DATABASE_URL": db_url, "PYTHONPATH": os.getcwd()}
+    completed = subprocess.run(
+        [sys.executable, "-m", "payjent.demo", "discord-aggregator-stripe-smoke"],
+        cwd=os.getcwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "checkout_url=https://checkout.stripe.test/discord-aggregator" in completed.stdout
+    assert "provider_session_id=cs_test_discord_aggregator" in completed.stdout
+    assert "stripe_test_webhook_simulated=True" in completed.stdout
+    assert "live_stripe_charge=False" in completed.stdout
+    assert "grant_id=grant_" in completed.stdout
+    assert "grant_consumed_before_x402_spend=True" in completed.stdout
+    assert "x402_spend_status=captured" in completed.stdout
+    assert "final_status=fulfilled" in completed.stdout
+
+
 def test_app_lifespan_has_no_fastapi_on_event_deprecation_warning(engine):
     def override_session():
         with Session(engine) as session:

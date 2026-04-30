@@ -11,11 +11,15 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
+import json
 import os
 import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 import httpx
@@ -23,8 +27,8 @@ from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session
 
 from .auth import create_bot_credential, generate_api_key
-from .bot_adapter import MemoryPendingRequestStore, PayjentBotGate
-from .config import get_settings
+from .bot_adapter import MemoryPendingRequestStore, PayjentBotGate, PendingRequest, request_hash_for
+from .config import Settings, get_settings
 from .db import engine, get_session, init_db, make_engine
 from .main import app
 from .providers.link import LinkApproval
@@ -366,6 +370,136 @@ def run_discord_aggregator_with_client(client: Any, *, bot_id: str, bot_key: str
     return {"pending": pending, "payment": paid, "grant": grant, "resume": resume, "x402": x402, "fulfilled": fulfilled}
 
 
+def _stripe_demo_checkout_session(_quote: Any, _payment_session: Any, _settings: Any) -> tuple[str, str]:
+    return "cs_test_discord_aggregator", "https://checkout.stripe.test/discord-aggregator"
+
+
+def _stripe_signature_header(raw_body: bytes, secret: str, *, timestamp: int = 1_700_000_000) -> str:
+    digest = hmac.new(secret.encode("utf-8"), f"{timestamp}.".encode("utf-8") + raw_body, hashlib.sha256).hexdigest()
+    return f"t={timestamp},v1={digest}"
+
+
+def _stripe_checkout_completed_payload(*, payment_session_id: str, provider_session_id: str) -> bytes:
+    event = {
+        "id": "evt_test_discord_aggregator",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": provider_session_id,
+                "object": "checkout.session",
+                "payment_status": "paid",
+                "client_reference_id": payment_session_id,
+                "metadata": {"payment_session_id": payment_session_id},
+            }
+        },
+    }
+    return json.dumps(event, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def run_discord_aggregator_stripe_smoke_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
+    """Discord aggregator with hosted Stripe checkout + signed synthetic webhook.
+
+    This intentionally injects a fake Stripe checkout adapter and local test-looking
+    settings, so it proves the Payjent Stripe webhook/grant path without keys,
+    Stripe SDK calls, external network, live charges, x402 network, or wallets.
+    """
+    del operator_key  # Stripe webhook replaces operator mock-pay in this smoke.
+    import payjent.main as main_module
+
+    webhook_secret = "whsec_demo"
+    smoke_settings = Settings(
+        checkout_provider="mock",
+        stripe_secret_key="sk_test_demo",
+        stripe_webhook_secret=webhook_secret,
+        public_base_url="https://payjent.example.test",
+    )
+    original_stripe_checkout = main_module.create_stripe_checkout_session
+    app.dependency_overrides[get_settings] = lambda: smoke_settings
+    main_module.create_stripe_checkout_session = _stripe_demo_checkout_session
+    try:
+        bot_client = PayjentClient("http://testserver", api_key=bot_key, client=client)
+        store = MemoryPendingRequestStore()
+        gate = PayjentBotGate(bot_client, store, checkout_base_url="http://testserver")
+        topic = "agent payment aggregation"
+        envelope = _discord_aggregator_envelope(topic)
+        request_hash = request_hash_for(envelope)
+        summary = f"Discord /research-with-paid-tools topic={topic}"
+        quote = bot_client.create_quote(
+            bot_id=bot_id,
+            external_user_id=DEFAULT_EXTERNAL_USER_ID,
+            request_summary=summary,
+            request_hash=request_hash,
+            amount_minor=900,
+            currency="USD",
+            cost_breakdown=[
+                {"label": "Stripe test-mode hosted checkout funding rail", "amount_minor": 650},
+                {"label": "downstream x402 premium data call", "amount_minor": 250},
+            ],
+            execution_envelope=envelope,
+        )
+        checkout = _raise_for_demo_response(
+            client.post(
+                f"/api/v1/quotes/{quote['id']}/checkout",
+                headers={"X-Payjent-Bot-Key": bot_key, "X-Payjent-Provider": "stripe", "Idempotency-Key": request_hash},
+            ),
+            "create Stripe checkout",
+        )
+        pending = PendingRequest(
+            id=quote["id"],
+            bot_id=bot_id,
+            external_user_id=DEFAULT_EXTERNAL_USER_ID,
+            request_hash=request_hash,
+            summary=summary,
+            execution_envelope=envelope,
+            quote_id=quote["id"],
+            payment_session_id=checkout["id"],
+            checkout_url=checkout["checkout_url"],
+            status="awaiting_payment",
+            expires_at=(datetime.now(timezone.utc) + timedelta(seconds=3600)).isoformat(),
+            channel_id="discord-demo-channel",
+        )
+        store.save(pending)
+        raw_body = _stripe_checkout_completed_payload(payment_session_id=checkout["id"], provider_session_id=checkout["provider_session_id"])
+        webhook = _raise_for_demo_response(
+            client.post(
+                "/api/v1/webhooks/stripe",
+                content=raw_body,
+                headers={"Stripe-Signature": _stripe_signature_header(raw_body, webhook_secret), "Content-Type": "application/json"},
+            ),
+            "simulate Stripe webhook",
+        )
+        grant = webhook["grant"]
+        presentation = {"bot_id": pending.bot_id, "external_user_id": pending.external_user_id, "request_hash": pending.request_hash}
+        resume = gate.resume_paid_request(pending.id, grant_id=grant["id"], **presentation)
+        x402 = _fake_x402_premium_call(bot_client, grant_id=grant["id"], presentation=presentation, topic=resume["execution_envelope"]["topic"])
+        fulfilled = gate.record_fulfillment(
+            pending.id,
+            "fulfilled",
+            {
+                "demo": "discord-aggregator-stripe-smoke",
+                "stripe_test_webhook_simulated": True,
+                "live_stripe_charge": False,
+                "x402_spend": x402["spend"],
+                "remaining_budget": x402["spend"]["remaining_budget"],
+                "grant_consumed_before_x402_spend": True,
+            },
+        )
+        return {
+            "pending": pending,
+            "payment_session": checkout,
+            "stripe_webhook": webhook,
+            "grant": grant,
+            "resume": resume,
+            "x402": x402,
+            "fulfilled": fulfilled,
+            "stripe_test_webhook_simulated": True,
+            "live_stripe_charge": False,
+        }
+    finally:
+        main_module.create_stripe_checkout_session = original_stripe_checkout
+        app.dependency_overrides.pop(get_settings, None)
+
+
 @contextmanager
 def _isolated_demo_session() -> Iterator[tuple[Any, Any]]:
     """Yield a TestClient and engine backed by a temporary SQLite database.
@@ -473,6 +607,37 @@ def print_discord_aggregator_summary(result: dict[str, Any]) -> None:
     print(f"final_status={result['fulfilled'].status}")
 
 
+def print_discord_aggregator_stripe_smoke_summary(result: dict[str, Any]) -> None:
+    pending = result["pending"]
+    payment_session = result["payment_session"]
+    webhook = result["stripe_webhook"]
+    spend = result["x402"]["spend"]
+    print("Payjent Discord Stripe smoke demo completed.")
+    print("DISCORD_COMMAND: /research-with-paid-tools topic=agent payment aggregation")
+    print("PAYMENT_PROMPT:")
+    print(f"  task={pending.summary}")
+    print("  total_budget=USD 9.00")
+    print(f"  checkout_url={pending.checkout_url}")
+    print("  provider=stripe")
+    print(f"  provider_session_id={payment_session['provider_session_id']}")
+    print("  breakdown[0]=USD 6.50 Stripe test-mode hosted checkout funding rail")
+    print("  breakdown[1]=USD 2.50 downstream local fake x402 premium data call")
+    print("  dev_note=fake Stripe adapter + synthetic signed webhook; no Stripe SDK/network/wallet is used")
+    print(f"stripe_test_webhook_simulated={result['stripe_test_webhook_simulated']}")
+    print(f"stripe_webhook_processed={webhook['processed']}")
+    print(f"live_stripe_charge={result['live_stripe_charge']}")
+    print(f"grant_id={result['grant']['id']}")
+    print("grant_consumed_before_x402_spend=True")
+    print(f"x402_spend_id={spend['id']}")
+    print(f"x402_operation_id={spend['operation_id']}")
+    print(f"x402_spend_status={spend['status']}")
+    print(f"x402_captured={spend['status'] == 'captured'}")
+    print(f"x402_spend_amount=USD {spend['amount_minor'] / 100:.2f}")
+    print(f"remaining_budget=USD {spend['remaining_budget'] / 100:.2f}")
+    print(f"premium_data={result['x402']['data']['headline']}")
+    print(f"final_status={result['fulfilled'].status}")
+
+
 def reset_dev_database() -> None:
     """Drop and recreate all SQLModel tables for a disposable pre-live database."""
     settings = get_settings()
@@ -510,6 +675,11 @@ def build_parser() -> argparse.ArgumentParser:
     discord.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
     discord.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     discord.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
+    stripe_smoke = sub.add_parser("discord-aggregator-stripe-smoke", help="run Discord aggregator with fake Stripe hosted checkout and signed local webhook smoke")
+    stripe_smoke.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
+    stripe_smoke.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    stripe_smoke.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
     sub.add_parser(
         "reset-db",
@@ -591,6 +761,25 @@ def main(argv: list[str] | None = None) -> int:
                 operator_key = args.operator_key or credentials.operator_key
                 result = run_discord_aggregator_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_discord_aggregator_summary(result)
+        return 0
+    if args.command == "discord-aggregator-stripe-smoke":
+        if "PAYJENT_DATABASE_URL" in os.environ:
+            init_db()
+            credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
+            bot_key = args.bot_key or credentials.bot_key
+            operator_key = args.operator_key or credentials.operator_key
+            with TestClient(app) as client:
+                result = run_discord_aggregator_stripe_smoke_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        else:
+            with _isolated_demo_session() as (client, temp_engine):
+                credentials = None
+                if not args.bot_key or not args.operator_key:
+                    with Session(temp_engine) as session:
+                        credentials = seed_credentials(session=session, bot_id=args.bot_id)
+                bot_key = args.bot_key or credentials.bot_key
+                operator_key = args.operator_key or credentials.operator_key
+                result = run_discord_aggregator_stripe_smoke_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        print_discord_aggregator_stripe_smoke_summary(result)
         return 0
     if args.command == "reset-db":
         reset_dev_database()
