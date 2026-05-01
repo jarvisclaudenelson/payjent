@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs
 from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
 from .config import Settings, get_settings
@@ -108,6 +109,20 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
 @app.get("/status", response_class=HTMLResponse)
 def status_index():
     return """<!doctype html><html><head><title>Payjent status</title></head><body><h1>Payjent status</h1><p>Open <code>/status/{payment_session_id}</code> to view a payment session.</p></body></html>"""
+
+
+@app.get("/healthz")
+def healthz(session: Session = Depends(get_session)):
+    bind = session.get_bind()
+    backend = bind.dialect.name
+    try:
+        session.exec(text("select 1")).one()
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "database": {"ok": False, "backend": backend}},
+        )
+    return {"status": "ok", "database": {"ok": True, "backend": backend}}
 
 
 @app.get("/status/{payment_session_id}", response_class=HTMLResponse)

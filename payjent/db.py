@@ -5,8 +5,36 @@ from sqlmodel import SQLModel, Session, create_engine
 from .config import get_settings
 
 
+POSTGRES_SCHEMES_WITHOUT_DRIVER = ("postgres://", "postgresql://")
+POSTGRES_PSYCOPG_SCHEME = "postgresql+psycopg://"
+
+
+def normalize_database_url(database_url: str) -> str:
+    """Normalize common database URLs into SQLAlchemy/SQLModel URLs.
+
+    Vercel/Supabase commonly expose pooled Postgres URLs with either the
+    deprecated ``postgres://`` scheme or a driver-less ``postgresql://`` scheme.
+    SQLAlchemy 2 works best here when the psycopg3 driver is explicit.
+    """
+    if database_url.startswith(POSTGRES_SCHEMES_WITHOUT_DRIVER):
+        return POSTGRES_PSYCOPG_SCHEME + database_url.split("://", 1)[1]
+    return database_url
+
+
+def database_backend_from_url(database_url: str) -> str:
+    """Return a non-secret backend label for status/health responses."""
+    normalized_url = normalize_database_url(database_url)
+    scheme = normalized_url.split("://", 1)[0].lower()
+    if scheme.startswith("sqlite"):
+        return "sqlite"
+    if scheme.startswith("postgresql") or scheme.startswith("postgres"):
+        return "postgresql"
+    return scheme.split("+", 1)[0]
+
+
 def make_engine(database_url: str | None = None):
-    url = database_url or get_settings().database_url
+    raw_url = database_url or get_settings().database_url
+    url = normalize_database_url(raw_url)
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
     return create_engine(url, connect_args=connect_args)
 

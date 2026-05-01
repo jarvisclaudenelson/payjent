@@ -18,6 +18,18 @@ uvicorn payjent.main:app --reload
 
 By default the service uses SQLite at `sqlite:///./payjent.db`, `PAYJENT_ENV=local`, dev mode enabled, mock payment rails enabled, and a development signing secret from `.env.example`. Do not use the example secret in production.
 
+## Durable Postgres storage
+
+SQLite is fine for local demos, but Vercel serverless filesystems are ephemeral and are not suitable for durable Payjent state. For hosted deployments, set `PAYJENT_DATABASE_URL` to a managed, pooled Postgres connection string such as a Vercel/Supabase pooler URL. Payjent accepts provider-style `postgres://...` and driverless `postgresql://...` URLs and normalizes them internally to SQLAlchemy's psycopg3 driver form.
+
+Example shape only; do not commit or chat-paste a real URL:
+
+```bash
+PAYJENT_DATABASE_URL="postgres://<user>:<password>@<pooler-host>:6543/<database>?sslmode=require"
+```
+
+Store the real value only in your deployment secret manager or local untracked `.env`. Treat the full database URL as a secret because it contains credentials and host details. The `/healthz` endpoint reports only a non-secret database backend label and whether `select 1` succeeds; it never returns the configured URL, host, username, or password.
+
 Payjent is pre-live/disposable-DB today: there is intentionally no Alembic/migration layer yet. For local/dev only, reset all SQLModel tables with:
 
 ```bash
