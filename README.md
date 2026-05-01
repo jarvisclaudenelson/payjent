@@ -74,9 +74,31 @@ PAYJENT_BASE_URL=http://127.0.0.1:8000 python -m payjent.demo run-flow
 
 ## Dashboard account auth
 
-The developer dashboard at `/dashboard` and `/dashboard/agents/{agent_id}` now requires a first-party Payjent account session in both local/dev and production. Visit `/auth/register` to create the first account, or `/auth/login` for an existing account; passwords are stored as PBKDF2-HMAC-SHA256 hashes with per-user salts, and browser sessions are HTTP-only signed cookies derived from `PAYJENT_SIGNING_SECRET` (`Secure` in production). Use `POST /auth/logout` or the dashboard logout button to clear the session.
+The developer dashboard at `/dashboard` and `/dashboard/agents/{agent_id}` requires a Payjent dashboard account session in both local/dev and production. Browser sessions are HTTP-only signed cookies derived from `PAYJENT_SIGNING_SECRET` (`Secure` in production). Use `POST /auth/logout`, `GET /auth/logout`, or the dashboard logout button to clear the local Payjent session.
 
-This is an MVP Payjent-owned account flow for protecting dashboard pages only; it is not OAuth, SSO, SCIM, or team-based RBAC. Operator/bot API routes remain protected by API credentials exactly as before. For production, set a strong non-default `PAYJENT_SIGNING_SECRET` and HTTPS `PAYJENT_PUBLIC_BASE_URL`. The current Vercel/serverless SQLite setup is ephemeral, so dashboard accounts are acceptable for demos only until durable database storage/migrations are added.
+First-party auth remains available as a fallback: visit `/auth/register` to create the first account, or `/auth/login` for an existing account. Passwords are stored as PBKDF2-HMAC-SHA256 hashes with per-user salts.
+
+### WorkOS AuthKit dashboard login
+
+Payjent can optionally use WorkOS AuthKit hosted login for the dashboard. Configure all values with the existing `PAYJENT_` env prefix:
+
+```bash
+PAYJENT_WORKOS_API_KEY=<set in your secret manager>
+PAYJENT_WORKOS_CLIENT_ID=<your WorkOS client id>
+PAYJENT_PUBLIC_BASE_URL=https://payjent.vercel.app
+# Optional override if it differs from PUBLIC_BASE_URL + /auth/workos/callback:
+PAYJENT_WORKOS_REDIRECT_URI=https://payjent.vercel.app/auth/workos/callback
+```
+
+In the WorkOS Dashboard, add this redirect URI to the AuthKit application:
+
+```text
+https://payjent.vercel.app/auth/workos/callback
+```
+
+When `PAYJENT_WORKOS_API_KEY` and `PAYJENT_WORKOS_CLIENT_ID` are configured, `/auth/register` and `/auth/login` show a **Sign in with WorkOS AuthKit** CTA that redirects through `/auth/workos/login`. If WorkOS is not configured, the WorkOS route fails closed with `503` and the first-party Payjent account form remains usable for local/dev and deployed smoke checks. Do not commit WorkOS API keys or paste them into chat/logs; tests use fakes and never call WorkOS.
+
+This auth layer protects dashboard pages only. Operator/bot API routes remain protected by API credentials exactly as before. For production, set a strong non-default `PAYJENT_SIGNING_SECRET` and HTTPS `PAYJENT_PUBLIC_BASE_URL`. The current Vercel/serverless SQLite setup is ephemeral, so dashboard accounts are acceptable for demos only until durable database storage/migrations are added.
 
 ## Browser demo
 

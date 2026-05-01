@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str | None = None
     stripe_success_url_template: str | None = None
     stripe_cancel_url_template: str | None = None
+    workos_api_key: str | None = None
+    workos_client_id: str | None = None
+    workos_redirect_uri: str | None = None
     grant_ttl_seconds: int = 900
     allow_unsafe_db_reset: bool = False
 

@@ -23,6 +23,7 @@ from .providers.base import issue_receipt_and_grant
 from .providers.stripe import create_stripe_checkout_session, parse_stripe_event, verify_stripe_signature
 from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest, create_link_spend_request as create_link_provider_spend_request, retrieve_link_status as retrieve_link_provider_status, validate_credential_type
 from .risk import assess_checkout_risk
+from . import workos_auth
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -261,13 +262,18 @@ async def _form_fields(request: Request) -> dict[str, str]:
     return {key: values[-1] if values else "" for key, values in parsed.items()}
 
 
-def _auth_page(kind: str, error: str | None = None, email: str = "") -> HTMLResponse:
+def _auth_page(kind: str, error: str | None = None, email: str = "", settings: Settings | None = None) -> HTMLResponse:
     is_register = kind == "register"
     title = "Create your Payjent account" if is_register else "Log in to Payjent"
     action = "/auth/register" if is_register else "/auth/login"
     alternate = "Already have an account? <a href='/auth/login'>Log in</a>" if is_register else "New to Payjent? <a href='/auth/register'>Create an account</a>"
     error_html = f"<div class='error'>{_html_escape(error)}</div>" if error else ""
-    return HTMLResponse(f"""<!doctype html><html><head><title>{title}</title>{_DASHBOARD_CSS}</head><body><div class='auth-wrap'><section class='auth-card'><div class='eyebrow'>Payjent dashboard</div><h1>{title}</h1><p class='muted'>First-party MVP auth for developers configuring paid agent rails. Sessions use HTTP-only signed cookies.</p>{error_html}<form method='post' action='{action}'><label>Email</label><input name='email' type='email' autocomplete='email' required value='{_html_escape(email)}'><label>Password</label><input name='password' type='password' autocomplete='current-password' minlength='8' required><button type='submit'>{'Create account' if is_register else 'Log in'}</button></form><p class='fine'>{alternate}</p><p class='fine'>MVP note: not OAuth or SSO yet. Use a unique password and a production PAYJENT_SIGNING_SECRET.</p></section></div></body></html>""")
+    workos_html = ""
+    if settings and workos_auth.workos_configured(settings):
+        workos_html = "<p><a class='btn' href='/auth/workos/login'>Sign in with WorkOS AuthKit</a></p><p class='fine'>Hosted WorkOS AuthKit is configured for this Payjent instance.</p><hr>"
+    else:
+        workos_html = "<p class='fine'>WorkOS AuthKit sign-in is not configured; use Payjent account auth below.</p>"
+    return HTMLResponse(f"""<!doctype html><html><head><title>{title}</title>{_DASHBOARD_CSS}</head><body><div class='auth-wrap'><section class='auth-card'><div class='eyebrow'>Payjent dashboard</div><h1>{title}</h1><p class='muted'>Dashboard sessions use HTTP-only signed cookies.</p>{error_html}{workos_html}<form method='post' action='{action}'><label>Email</label><input name='email' type='email' autocomplete='email' required value='{_html_escape(email)}'><label>Password</label><input name='password' type='password' autocomplete='current-password' minlength='8' required><button type='submit'>{'Create account' if is_register else 'Log in'}</button></form><p class='fine'>{alternate}</p><p class='fine'>First-party auth remains available as a fallback. Use a unique password and a production PAYJENT_SIGNING_SECRET.</p></section></div></body></html>""")
 
 
 def _set_session(response: RedirectResponse, account: Account, settings: Settings) -> RedirectResponse:
@@ -289,8 +295,8 @@ def _require_dashboard_account(request: Request, session: Session, settings: Set
 
 
 @app.get("/auth/register", response_class=HTMLResponse)
-def register_page():
-    return _auth_page("register")
+def register_page(settings: Settings = Depends(get_settings)):
+    return _auth_page("register", settings=settings)
 
 
 @app.post("/auth/register")
@@ -299,23 +305,23 @@ async def register_account(request: Request, session: Session = Depends(get_sess
     email = normalize_email(form.get("email", ""))
     password = form.get("password", "")
     if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
-        return _auth_page("register", "Enter a valid email address.", email)
+        return _auth_page("register", "Enter a valid email address.", email, settings)
     if len(password) < 8:
-        return _auth_page("register", "Password must be at least 8 characters.", email)
+        return _auth_page("register", "Password must be at least 8 characters.", email, settings)
     account = Account(id=f"acct_{uuid4().hex}", email=email, password_hash=hash_password(password))
     session.add(account)
     try:
         session.commit()
     except IntegrityError:
         session.rollback()
-        return _auth_page("register", "An account with that email already exists. Log in instead.", email)
+        return _auth_page("register", "An account with that email already exists. Log in instead.", email, settings)
     session.refresh(account)
     return _set_session(RedirectResponse("/dashboard", status_code=303), account, settings)
 
 
 @app.get("/auth/login", response_class=HTMLResponse)
-def login_page():
-    return _auth_page("login")
+def login_page(settings: Settings = Depends(get_settings)):
+    return _auth_page("login", settings=settings)
 
 
 @app.post("/auth/login")
@@ -325,12 +331,51 @@ async def login_account(request: Request, session: Session = Depends(get_session
     password = form.get("password", "")
     account = session.exec(select(Account).where(Account.email == email)).first()
     if not account or not verify_password(password, account.password_hash):
-        return _auth_page("login", "Invalid email or password.", email)
+        return _auth_page("login", "Invalid email or password.", email, settings)
+    return _set_session(RedirectResponse("/dashboard", status_code=303), account, settings)
+
+
+@app.get("/auth/workos/login")
+def workos_login(settings: Settings = Depends(get_settings)):
+    redirect_uri = workos_auth.require_workos_config(settings)
+    client = workos_auth.create_workos_client(settings)
+    return RedirectResponse(workos_auth.get_authorization_url(client, redirect_uri), status_code=303)
+
+
+@app.get("/auth/workos/callback")
+def workos_callback(code: str | None = None, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    if not code:
+        return HTMLResponse("WorkOS authentication failed: missing authorization code.", status_code=400)
+    try:
+        workos_auth.require_workos_config(settings)
+        client = workos_auth.create_workos_client(settings)
+        profile = workos_auth.authenticate_with_code(client, code)
+    except HTTPException:
+        raise
+    except Exception:
+        return HTMLResponse("WorkOS authentication failed. Please try again.", status_code=401)
+
+    email = normalize_email(profile.email)
+    account = session.exec(select(Account).where(Account.email == email)).first()
+    if account:
+        account.auth_provider = "workos"
+        if profile.user_id:
+            account.workos_user_id = profile.user_id
+    else:
+        account = Account(id=f"acct_{uuid4().hex}", email=email, auth_provider="workos", workos_user_id=profile.user_id)
+    session.add(account)
+    session.commit()
+    session.refresh(account)
     return _set_session(RedirectResponse("/dashboard", status_code=303), account, settings)
 
 
 @app.post("/auth/logout")
 def logout_account():
+    return _clear_session(RedirectResponse("/auth/login", status_code=303))
+
+
+@app.get("/auth/logout")
+def logout_account_get():
     return _clear_session(RedirectResponse("/auth/login", status_code=303))
 
 
