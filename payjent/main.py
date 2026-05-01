@@ -24,6 +24,7 @@ from .providers.base import issue_receipt_and_grant
 from .providers.stripe import create_stripe_checkout_session, parse_stripe_event, verify_stripe_signature
 from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest, create_link_spend_request as create_link_provider_spend_request, retrieve_link_status as retrieve_link_provider_status, validate_credential_type
 from .risk import assess_checkout_risk
+from .rails import normalize_spend_rail
 from . import workos_auth
 
 @asynccontextmanager
@@ -737,6 +738,10 @@ def create_spend_authorization(grant_id: str, payload: SpendAuthorizationCreate,
     if existing:
         return _spend_to_read(existing, session, grant)
     currency = payload.currency.upper()
+    try:
+        rail = normalize_spend_rail(payload.rail)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if currency != str(grant.payload.get("currency", "")).upper():
         raise HTTPException(status_code=422, detail="currency mismatch")
     budget = int(grant.payload.get("amount_minor", 0))
@@ -750,7 +755,7 @@ def create_spend_authorization(grant_id: str, payload: SpendAuthorizationCreate,
         operation_id=payload.operation_id,
         tool=payload.tool,
         vendor=payload.vendor,
-        rail=payload.rail,
+        rail=rail,
         amount_minor=payload.amount_minor,
         currency=currency,
         reason=payload.reason,

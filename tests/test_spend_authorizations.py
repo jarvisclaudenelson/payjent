@@ -12,13 +12,13 @@ def _consume(client, q, grant, bot_headers):
     assert resp.status_code == 200, resp.text
 
 
-def _spend_payload(q, operation_id, *, amount_minor=125, presentation=None, capture=True):
+def _spend_payload(q, operation_id, *, amount_minor=125, presentation=None, capture=True, rail="x402"):
     return {
         "operation_id": operation_id,
         "presentation": presentation or _presentation(q),
         "tool": "premium-research-tool",
         "vendor": "premium-mcp-demo",
-        "rail": "x402",
+        "rail": rail,
         "amount_minor": amount_minor,
         "currency": "USD",
         "reason": "premium lookup",
@@ -52,6 +52,63 @@ def test_spend_after_grant_consume_succeeds(client, paid_grant, bot_headers):
         json=_spend_payload(q, "post-consume-call-1", amount_minor=1),
     )
     assert resp.status_code == 200, resp.text
+
+
+def test_spend_rail_aliases_are_normalized(client, paid_grant, bot_headers):
+    q, _ps, grant = paid_grant
+    _consume(client, q, grant, bot_headers)
+
+    x402_resp = client.post(
+        f"/api/v1/grants/{grant['id']}/spend-authorizations",
+        headers=bot_headers,
+        json=_spend_payload(q, "alias-x402-call-1", amount_minor=1, rail="x402"),
+    )
+    stripe_resp = client.post(
+        f"/api/v1/grants/{grant['id']}/spend-authorizations",
+        headers=bot_headers,
+        json=_spend_payload(q, "alias-stripe-call-1", amount_minor=1, rail="stripe"),
+    )
+
+    assert x402_resp.status_code == 200, x402_resp.text
+    assert stripe_resp.status_code == 200, stripe_resp.text
+    assert x402_resp.json()["rail"] == "x402_payment"
+    assert stripe_resp.json()["rail"] == "stripe_funding"
+
+
+def test_known_spend_rails_are_accepted(client, paid_grant, bot_headers):
+    q, _ps, grant = paid_grant
+    _consume(client, q, grant, bot_headers)
+
+    for index, rail in enumerate(["stripe_funding", "x402_payment", "link_credential", "card_credential"], start=1):
+        resp = client.post(
+            f"/api/v1/grants/{grant['id']}/spend-authorizations",
+            headers=bot_headers,
+            json=_spend_payload(q, f"known-rail-call-{index}", amount_minor=1, rail=rail),
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["rail"] == rail
+
+
+def test_unsupported_spend_rail_rejected_before_ledger_write(client, paid_grant, bot_headers):
+    q, _ps, grant = paid_grant
+    _consume(client, q, grant, bot_headers)
+
+    resp = client.post(
+        f"/api/v1/grants/{grant['id']}/spend-authorizations",
+        headers=bot_headers,
+        json=_spend_payload(q, "unsupported-rail-call-1", amount_minor=1, rail="moonagents_card"),
+    )
+
+    assert resp.status_code == 422
+    assert "unsupported spend rail" in resp.text
+
+    retry = client.post(
+        f"/api/v1/grants/{grant['id']}/spend-authorizations",
+        headers=bot_headers,
+        json=_spend_payload(q, "unsupported-rail-call-1", amount_minor=1, rail="card_credential"),
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["rail"] == "card_credential"
 
 
 def test_spend_before_grant_consume_is_rejected(client, paid_grant, bot_headers):

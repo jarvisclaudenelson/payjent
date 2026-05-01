@@ -2,6 +2,8 @@
 
 Payjent v0 is a small FastAPI gateway skeleton for paid, bounded bot requests: quote -> checkout -> mock payment -> signed receipt/grant -> consume -> fulfillment.
 
+Payjent is the paid execution and spend authorization control plane, not the card or payment rail itself. User funding, x402-style paid calls, Link one-time credentials, Stripe checkout, and card credentials are downstream rails under the same bounded grant and spend ledger model.
+
 **v0 defaults to mock/local payment rails.** Stripe Checkout is available only when explicitly configured (`PAYJENT_CHECKOUT_PROVIDER=stripe` or `X-Payjent-Provider: stripe`) and the optional Stripe SDK extra is installed for live calls. Link is available as an experimental one-time credential rail (`X-Payjent-Provider: link`) for downstream agent-mediated merchant purchases, not as Payjent settlement. Checkout creation never marks a session paid; Stripe receipt/grant issuance happens only after a verified webhook. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
 
 ## Local setup
@@ -180,6 +182,10 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/payment-sessions/{session_id}/mock-
 ```
 
 Payment rails:
+
+Payjent treats rails as replaceable downstream categories underneath the same paid grant and spend authorization flow. New spend authorization ledger entries must use a supported canonical rail: `stripe_funding`, `x402_payment`, `link_credential`, or `card_credential`. For API compatibility, `stripe` normalizes to `stripe_funding` and `x402` normalizes to `x402_payment`; unsupported new rails are rejected with `422` before a spend ledger row is written. Existing historical/free-form ledger data is not migrated.
+
+`card_credential` means a downstream card-credential rail category: for example, a MoonAgents-style agent card could sit under Payjent's controls as the credential used at a merchant. This repository does not integrate MoonPay or MoonAgents, does not issue cards, and does not claim support for MoonAgents Card.
 
 - Mock/local remains the default in local/dev. `POST /api/v1/quotes/{quote_id}/checkout` returns a local `/pay/{payment_session_id}` URL unless Stripe is requested. Mock completion endpoints are disabled in production even if dev flags are accidentally left enabled.
 - Stripe Checkout: install `pip install -e '.[stripe]'`, set `PAYJENT_CHECKOUT_PROVIDER=stripe` (or send `X-Payjent-Provider: stripe` per request), `PAYJENT_STRIPE_SECRET_KEY`, `PAYJENT_PUBLIC_BASE_URL`, and `PAYJENT_STRIPE_WEBHOOK_SECRET`. Checkout sessions are created with quote amount/currency/summary metadata and an idempotency key; Payjent stores Stripe's Checkout Session id and hosted URL.
