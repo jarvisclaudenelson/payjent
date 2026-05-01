@@ -6,6 +6,16 @@ from payjent.main import app
 from payjent.models import Account
 
 
+def test_unauthenticated_root_redirects_to_dashboard_then_auth(client):
+    root = client.get("/", follow_redirects=False)
+    assert root.status_code == 303
+    assert root.headers["location"] == "/dashboard"
+
+    final = client.get("/", follow_redirects=True)
+    assert final.status_code == 200
+    assert "Create your Payjent account" in final.text
+
+
 def test_unauthenticated_dashboard_redirects_without_metadata(client, operator_headers):
     agent = client.post(
         "/api/v1/agents/register",

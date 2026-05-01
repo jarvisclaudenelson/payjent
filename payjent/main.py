@@ -35,6 +35,11 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Payjent", lifespan=lifespan)
 
 
+@app.get("/")
+def root_redirect():
+    return RedirectResponse("/dashboard", status_code=303)
+
+
 def _html_escape(value) -> str:
     import html
     return html.escape(str(value), quote=True)
