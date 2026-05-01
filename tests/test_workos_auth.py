@@ -1,8 +1,12 @@
-from sqlmodel import Session, select
+from fastapi.testclient import TestClient
+from sqlalchemy import inspect, text
+from sqlmodel import Session, create_engine, select
+from sqlmodel.pool import StaticPool
 
 from payjent import workos_auth
 from payjent.auth import DASHBOARD_SESSION_COOKIE
 from payjent.config import Settings, get_settings
+from payjent.db import WORKOS_UNUSABLE_PASSWORD_HASH, get_session, migrate_sqlite_account_auth_columns
 from payjent.main import app
 from payjent.models import Account
 
@@ -106,6 +110,53 @@ def test_workos_callback_links_existing_account(client, engine, monkeypatch):
         assert accounts[0].auth_provider == "workos"
         assert accounts[0].workos_user_id == "user_existing"
         assert accounts[0].password_hash.startswith("pbkdf2_sha256$")
+
+
+def test_workos_callback_migrates_old_sqlite_account_schema(monkeypatch):
+    old_engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    with old_engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE account (
+                id VARCHAR NOT NULL PRIMARY KEY,
+                email VARCHAR NOT NULL UNIQUE,
+                password_hash VARCHAR NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        connection.execute(
+            text("INSERT INTO account (id, email, password_hash, created_at) VALUES (:id, :email, :password_hash, :created_at)"),
+            {"id": "acct_old", "email": "old@example.com", "password_hash": "pbkdf2_sha256$old", "created_at": "2026-01-01 00:00:00"},
+        )
+
+    migrate_sqlite_account_auth_columns(old_engine)
+    columns = {column["name"]: column for column in inspect(old_engine).get_columns("account")}
+    assert columns["auth_provider"]["nullable"] is False
+    assert "workos_user_id" in columns
+
+    with Session(old_engine) as session:
+        accounts = session.exec(select(Account)).all()
+        assert len(accounts) == 1
+        assert accounts[0].auth_provider == "password"
+
+    def override_session():
+        with Session(old_engine) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides[get_settings] = lambda: workos_settings()
+    monkeypatch.setattr(workos_auth, "create_workos_client", lambda settings: FakeWorkOSClient(email="legacy-workos@example.com", user_id="user_legacy"))
+    try:
+        with TestClient(app) as legacy_client:
+            response = legacy_client.get("/auth/workos/callback?code=good_code", follow_redirects=False)
+            assert response.status_code == 303
+    finally:
+        app.dependency_overrides.clear()
+
+    with Session(old_engine) as session:
+        account = session.exec(select(Account).where(Account.email == "legacy-workos@example.com")).one()
+        assert account.auth_provider == "workos"
+        assert account.workos_user_id == "user_legacy"
+        assert account.password_hash == WORKOS_UNUSABLE_PASSWORD_HASH
 
 
 def test_workos_callback_missing_or_failed_code_is_safe(client, monkeypatch):

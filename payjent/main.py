@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
 from .config import Settings, get_settings
-from .db import get_session, init_db
+from .db import WORKOS_UNUSABLE_PASSWORD_HASH, account_password_hash_nullable, get_session, init_db
 from .auth import DASHBOARD_SESSION_COOKIE, create_dashboard_session_cookie, generate_api_key, create_bot_credential, get_account_from_cookie, hash_password, normalize_email, require_bot_credential, require_operator_credential, verify_password
 from .models import Account, AgentProfile, BotCredential, RailConnection, Quote, PaymentSession, Grant, FulfillmentEvent, SpendLedgerEntry
 from .money import validate_breakdown, quote_hash
@@ -362,7 +362,8 @@ def workos_callback(code: str | None = None, session: Session = Depends(get_sess
         if profile.user_id:
             account.workos_user_id = profile.user_id
     else:
-        account = Account(id=f"acct_{uuid4().hex}", email=email, auth_provider="workos", workos_user_id=profile.user_id)
+        password_hash = None if account_password_hash_nullable(session) else WORKOS_UNUSABLE_PASSWORD_HASH
+        account = Account(id=f"acct_{uuid4().hex}", email=email, password_hash=password_hash, auth_provider="workos", workos_user_id=profile.user_id)
     session.add(account)
     session.commit()
     session.refresh(account)

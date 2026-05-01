@@ -34,7 +34,7 @@ class Account(SQLModel, table=True):
     id: str = Field(primary_key=True)
     email: str = Field(index=True, unique=True)
     password_hash: str | None = None
-    auth_provider: str = Field(default="local", index=True)
+    auth_provider: str = Field(default="password", index=True)
     workos_user_id: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=now_utc)
 
