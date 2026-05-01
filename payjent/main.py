@@ -1,14 +1,15 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from urllib.parse import parse_qs
 from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
 from .config import Settings, get_settings
 from .db import get_session, init_db
-from .auth import generate_api_key, create_bot_credential, require_bot_credential, require_operator_credential
-from .models import AgentProfile, BotCredential, RailConnection, Quote, PaymentSession, Grant, FulfillmentEvent, SpendLedgerEntry
+from .auth import DASHBOARD_SESSION_COOKIE, create_dashboard_session_cookie, generate_api_key, create_bot_credential, get_account_from_cookie, hash_password, normalize_email, require_bot_credential, require_operator_credential, verify_password
+from .models import Account, AgentProfile, BotCredential, RailConnection, Quote, PaymentSession, Grant, FulfillmentEvent, SpendLedgerEntry
 from .money import validate_breakdown, quote_hash
 from .schemas import (
     AgentRead, AgentRegisterRequest, AgentRegisterResponse, FulfillmentCreate, FulfillmentRead, GrantPresentation, GrantVerifyResponse,
@@ -245,38 +246,105 @@ python -m payjent.demo discord-aggregator-stripe-smoke"""
 
 
 _DASHBOARD_CSS = """<style>
-body{margin:0;font-family:Inter,ui-sans-serif,system-ui;color:#0f172a;background:linear-gradient(135deg,#f8fbff,#fff 35%,#f5f3ff)}a{color:#4f46e5}main{max-width:1180px;margin:auto;padding:32px 20px}.hero{padding:34px;border:1px solid #e5e7eb;border-radius:28px;background:rgba(255,255,255,.82);box-shadow:0 24px 70px #4f46e51a}.eyebrow{color:#6366f1;font-weight:700;text-transform:uppercase;letter-spacing:.12em}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px;margin-top:22px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:20px;padding:20px;box-shadow:0 8px 30px #0f172a0c}.pill{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;background:#eef2ff;color:#3730a3}.ok{background:#dcfce7;color:#166534}.warn{background:#fef3c7;color:#92400e}pre{overflow:auto;background:#0b1020;color:#dbeafe;border-radius:16px;padding:16px}.muted{color:#64748b}.btn{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:10px;padding:9px 12px;font-weight:700}input{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:10px;padding:10px;margin:6px 0 12px}@media(max-width:650px){main{padding:18px}.hero{padding:22px}}
+body{margin:0;font-family:Inter,ui-sans-serif,system-ui;color:#0f172a;background:linear-gradient(135deg,#f8fbff,#fff 35%,#f5f3ff)}a{color:#4f46e5}main{max-width:1180px;margin:auto;padding:32px 20px}.hero{padding:34px;border:1px solid #e5e7eb;border-radius:28px;background:rgba(255,255,255,.82);box-shadow:0 24px 70px #4f46e51a}.eyebrow{color:#6366f1;font-weight:700;text-transform:uppercase;letter-spacing:.12em}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px;margin-top:22px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:20px;padding:20px;box-shadow:0 8px 30px #0f172a0c}.pill{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;background:#eef2ff;color:#3730a3}.ok{background:#dcfce7;color:#166534}.warn{background:#fef3c7;color:#92400e}pre{overflow:auto;background:#0b1020;color:#dbeafe;border-radius:16px;padding:16px}.muted{color:#64748b}.btn,button{display:inline-block;background:#111827;color:white;text-decoration:none;border:0;border-radius:10px;padding:10px 13px;font-weight:750;cursor:pointer}.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.logout{background:#fff;color:#334155;border:1px solid #e5e7eb}.auth-wrap{min-height:100vh;display:grid;place-items:center;padding:24px}.auth-card{width:min(440px,100%);background:rgba(255,255,255,.9);border:1px solid #e5e7eb;border-radius:24px;padding:30px;box-shadow:0 24px 70px #0f172a14}.error{background:#fef2f2;color:#991b1b;border:1px solid #fecaca;border-radius:12px;padding:10px 12px;margin:12px 0}label{display:block;font-weight:700;margin-top:12px}input{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:10px;padding:11px;margin:6px 0 12px;background:white}.fine{font-size:13px;color:#64748b;line-height:1.5}@media(max-width:650px){main{padding:18px}.hero{padding:22px}}
 </style>"""
 
 
-_DASHBOARD_AUTH_NOT_CONFIGURED = "Dashboard UI authentication is not configured; use operator-authenticated API or enable a proper auth provider."
+async def _form_fields(request: Request) -> dict[str, str]:
+    body = (await request.body()).decode("utf-8")
+    parsed = parse_qs(body, keep_blank_values=True)
+    return {key: values[-1] if values else "" for key, values in parsed.items()}
 
 
-def _production_dashboard_block(settings: Settings) -> HTMLResponse | None:
-    if not settings.is_production:
-        return None
-    return HTMLResponse(
-        f"<!doctype html><html><head><title>Payjent dashboard unavailable</title></head><body><h1>Dashboard unavailable</h1><p>{_html_escape(_DASHBOARD_AUTH_NOT_CONFIGURED)}</p></body></html>",
-        status_code=403,
-    )
+def _auth_page(kind: str, error: str | None = None, email: str = "") -> HTMLResponse:
+    is_register = kind == "register"
+    title = "Create your Payjent account" if is_register else "Log in to Payjent"
+    action = "/auth/register" if is_register else "/auth/login"
+    alternate = "Already have an account? <a href='/auth/login'>Log in</a>" if is_register else "New to Payjent? <a href='/auth/register'>Create an account</a>"
+    error_html = f"<div class='error'>{_html_escape(error)}</div>" if error else ""
+    return HTMLResponse(f"""<!doctype html><html><head><title>{title}</title>{_DASHBOARD_CSS}</head><body><div class='auth-wrap'><section class='auth-card'><div class='eyebrow'>Payjent dashboard</div><h1>{title}</h1><p class='muted'>First-party MVP auth for developers configuring paid agent rails. Sessions use HTTP-only signed cookies.</p>{error_html}<form method='post' action='{action}'><label>Email</label><input name='email' type='email' autocomplete='email' required value='{_html_escape(email)}'><label>Password</label><input name='password' type='password' autocomplete='current-password' minlength='8' required><button type='submit'>{'Create account' if is_register else 'Log in'}</button></form><p class='fine'>{alternate}</p><p class='fine'>MVP note: not OAuth or SSO yet. Use a unique password and a production PAYJENT_SIGNING_SECRET.</p></section></div></body></html>""")
+
+
+def _set_session(response: RedirectResponse, account: Account, settings: Settings) -> RedirectResponse:
+    response.set_cookie(DASHBOARD_SESSION_COOKIE, create_dashboard_session_cookie(account.id, settings.signing_secret), httponly=True, samesite="lax", secure=settings.is_production, max_age=60 * 60 * 24 * 7, path="/")
+    return response
+
+
+def _clear_session(response: RedirectResponse) -> RedirectResponse:
+    response.delete_cookie(DASHBOARD_SESSION_COOKIE, path="/")
+    return response
+
+
+def _require_dashboard_account(request: Request, session: Session, settings: Settings):
+    account = get_account_from_cookie(request.cookies.get(DASHBOARD_SESSION_COOKIE), session, settings)
+    if account:
+        return account
+    has_accounts = session.exec(select(Account.id).limit(1)).first() is not None
+    return RedirectResponse("/auth/login" if has_accounts else "/auth/register", status_code=303)
+
+
+@app.get("/auth/register", response_class=HTMLResponse)
+def register_page():
+    return _auth_page("register")
+
+
+@app.post("/auth/register")
+async def register_account(request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    form = await _form_fields(request)
+    email = normalize_email(form.get("email", ""))
+    password = form.get("password", "")
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        return _auth_page("register", "Enter a valid email address.", email)
+    if len(password) < 8:
+        return _auth_page("register", "Password must be at least 8 characters.", email)
+    account = Account(id=f"acct_{uuid4().hex}", email=email, password_hash=hash_password(password))
+    session.add(account)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return _auth_page("register", "An account with that email already exists. Log in instead.", email)
+    session.refresh(account)
+    return _set_session(RedirectResponse("/dashboard", status_code=303), account, settings)
+
+
+@app.get("/auth/login", response_class=HTMLResponse)
+def login_page():
+    return _auth_page("login")
+
+
+@app.post("/auth/login")
+async def login_account(request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    form = await _form_fields(request)
+    email = normalize_email(form.get("email", ""))
+    password = form.get("password", "")
+    account = session.exec(select(Account).where(Account.email == email)).first()
+    if not account or not verify_password(password, account.password_hash):
+        return _auth_page("login", "Invalid email or password.", email)
+    return _set_session(RedirectResponse("/dashboard", status_code=303), account, settings)
+
+
+@app.post("/auth/logout")
+def logout_account():
+    return _clear_session(RedirectResponse("/auth/login", status_code=303))
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
-    blocked = _production_dashboard_block(settings)
-    if blocked is not None:
-        return blocked
+def dashboard(request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    account = _require_dashboard_account(request, session, settings)
+    if isinstance(account, RedirectResponse):
+        return account
     agents = session.exec(select(AgentProfile).order_by(AgentProfile.created_at.desc())).all()
     cards = "".join(f"<div class='card'><span class='pill'>{_html_escape(a.platform)}</span><h3>{_html_escape(a.name)}</h3><p class='muted'><code>{_html_escape(a.bot_id)}</code></p><p><a class='btn' href='/dashboard/agents/{_html_escape(a.id)}'>Open setup</a></p></div>" for a in agents) or "<div class='card'><h3>No agents yet</h3><p class='muted'>Register via the operator-authenticated API below.</p></div>"
     register_curl = "curl -X POST /api/v1/agents/register -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;' -H 'Content-Type: application/json' -d '{&quot;name&quot;:&quot;Hermes Research&quot;,&quot;platform&quot;:&quot;discord&quot;,&quot;bot_id&quot;:&quot;hermes-discord&quot;,&quot;default_currency&quot;:&quot;USD&quot;}'"
-    return f"<!doctype html><html><head><title>Payjent dashboard</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Payjent dashboard v0</div><h1>Agent rail control plane</h1><p class='muted'>Register agents, prepare Stripe Connect user funding, configure x402 downstream spend, and copy safe local integration snippets.</p><div class='grid'><div class='card'><h3>Agent registration</h3><pre><code>{register_curl}</code></pre></div><div class='card'><h3>Ledger stats</h3><p><b>{len(agents)}</b> agents</p><p class='muted'>Recent quote/spend state appears on each agent detail page.</p></div></div></section><h2>Agents</h2><div class='grid'>{cards}</div></main></body></html>"
+    return f"<!doctype html><html><head><title>Payjent dashboard</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><span class='muted'>Signed in as <b>{_html_escape(account.email)}</b></span><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><div class='eyebrow'>Payjent dashboard v0</div><h1>Agent rail control plane</h1><p class='muted'>Register agents, prepare Stripe Connect user funding, configure x402 downstream spend, and copy safe local integration snippets.</p><div class='grid'><div class='card'><h3>Agent registration</h3><pre><code>{register_curl}</code></pre></div><div class='card'><h3>Ledger stats</h3><p><b>{len(agents)}</b> agents</p><p class='muted'>Recent quote/spend state appears on each agent detail page.</p></div></div></section><h2>Agents</h2><div class='grid'>{cards}</div></main></body></html>"
 
 
 @app.get("/dashboard/agents/{agent_id}", response_class=HTMLResponse)
-def dashboard_agent(agent_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
-    blocked = _production_dashboard_block(settings)
-    if blocked is not None:
-        return blocked
+def dashboard_agent(agent_id: str, request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    account = _require_dashboard_account(request, session, settings)
+    if isinstance(account, RedirectResponse):
+        return account
     agent = session.get(AgentProfile, agent_id)
     if not agent:
         raise HTTPException(404, "agent not found")
@@ -288,7 +356,7 @@ def dashboard_agent(agent_id: str, session: Session = Depends(get_session), sett
     ledger = "".join(f"<li>{_html_escape(s.rail)} {_html_escape(_format_money(s.amount_minor, s.currency))} — {_html_escape(s.status)}</li>" for s in spends) or "<li>No spend ledger entries yet.</li>"
     stripe_cmd = f"curl -X POST /api/v1/agents/{agent.id}/stripe-connect/start -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;'"
     x402_cmd = f"curl -X POST /api/v1/agents/{agent.id}/x402/configure -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;' -H 'Content-Type: application/json' -d '{{\"network\":\"base-sepolia\",\"pay_to\":\"0xTEST_PAY_TO\",\"max_per_request_minor\":900,\"max_per_call_minor\":250,\"enabled\":true}}'"
-    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><a href='/dashboard'>← Dashboard</a><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div></main></body></html>"
+    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a href='/dashboard'>← Dashboard</a><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div></main></body></html>"
 
 
 def _enforce_stripe_checkout_guardrails(settings: Settings) -> None:

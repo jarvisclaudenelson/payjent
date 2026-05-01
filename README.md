@@ -72,6 +72,12 @@ If you already have a server running, target it explicitly:
 PAYJENT_BASE_URL=http://127.0.0.1:8000 python -m payjent.demo run-flow
 ```
 
+## Dashboard account auth
+
+The developer dashboard at `/dashboard` and `/dashboard/agents/{agent_id}` now requires a first-party Payjent account session in both local/dev and production. Visit `/auth/register` to create the first account, or `/auth/login` for an existing account; passwords are stored as PBKDF2-HMAC-SHA256 hashes with per-user salts, and browser sessions are HTTP-only signed cookies derived from `PAYJENT_SIGNING_SECRET` (`Secure` in production). Use `POST /auth/logout` or the dashboard logout button to clear the session.
+
+This is an MVP Payjent-owned account flow for protecting dashboard pages only; it is not OAuth, SSO, SCIM, or team-based RBAC. Operator/bot API routes remain protected by API credentials exactly as before. For production, set a strong non-default `PAYJENT_SIGNING_SECRET` and HTTPS `PAYJENT_PUBLIC_BASE_URL`. The current Vercel/serverless SQLite setup is ephemeral, so dashboard accounts are acceptable for demos only until durable database storage/migrations are added.
+
 ## Browser demo
 
 Run the server, seed demo credentials, then create a quote and checkout via the API (or let `run-flow` do that for you). The checkout response includes `checkout_url` like `/pay/{payment_session_id}`. Open it in a browser:

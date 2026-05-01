@@ -4,7 +4,7 @@ from payjent.auth import hash_api_key
 from payjent.config import Settings, get_settings
 from payjent.db import get_session
 from payjent.main import app
-from payjent.models import AgentProfile, BotCredential, RailConnection
+from payjent.models import Account, AgentProfile, BotCredential, RailConnection
 
 
 def _register(client, operator_headers):
@@ -91,6 +91,7 @@ def test_x402_config_validation_and_persistence(client, operator_headers, engine
 
 def test_dashboard_and_agent_detail_render_key_copy(client, operator_headers):
     agent = _register(client, operator_headers)["agent"]
+    assert client.post("/auth/register", data={"email": "dev@example.com", "password": "correct horse battery staple"}, follow_redirects=False).status_code == 303
     overview = client.get("/dashboard")
     assert overview.status_code == 200
     for copy in ["Payjent dashboard v0", "Agent registration", "Stripe Connect", "x402", "integration snippets"]:
@@ -119,7 +120,7 @@ def test_production_dashboard_pages_fail_closed_without_metadata(client, operato
     )
     app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, public_base_url="https://payjent.example")
     try:
-        responses = [client.get("/dashboard"), client.get(f"/dashboard/agents/{agent['id']}")]
+        responses = [client.get("/dashboard", follow_redirects=False), client.get(f"/dashboard/agents/{agent['id']}", follow_redirects=False)]
     finally:
         app.dependency_overrides.pop(get_settings, None)
 
@@ -135,8 +136,8 @@ def test_production_dashboard_pages_fail_closed_without_metadata(client, operato
         "Integration snippet",
     ]
     for response in responses:
-        assert response.status_code == 403
-        assert "Dashboard UI authentication is not configured" in response.text
+        assert response.status_code == 303
+        assert response.headers["location"] in {"/auth/register", "/auth/login"}
         for value in forbidden_values:
             assert value not in response.text
 

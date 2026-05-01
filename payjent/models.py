@@ -30,6 +30,13 @@ class BotCredential(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class Account(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    email: str = Field(index=True, unique=True)
+    password_hash: str
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class AgentProfile(SQLModel, table=True):
     id: str = Field(primary_key=True)
     owner_id: str = Field(default="local-owner", index=True)
