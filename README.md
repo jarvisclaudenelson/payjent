@@ -6,6 +6,19 @@ Payjent is the paid execution and spend authorization control plane, not the car
 
 **v0 defaults to mock/local payment rails.** Stripe Checkout is available only when explicitly configured (`PAYJENT_CHECKOUT_PROVIDER=stripe` or `X-Payjent-Provider: stripe`) and the optional Stripe SDK extra is installed for live calls. Link is available as an experimental one-time credential rail (`X-Payjent-Provider: link`) for downstream agent-mediated merchant purchases, not as Payjent settlement. Checkout creation never marks a session paid; Stripe receipt/grant issuance happens only after a verified webhook. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
 
+## Agent owner quickstart (10 minutes)
+
+If you own an agent and want to gate a premium action, start here:
+
+```bash
+cp .env.agent.example .env.agent
+python -m payjent.demo agent-owner-quickstart
+# after `pip install -e .`, the console script works too:
+payjent agent-owner-quickstart
+```
+
+Then follow [`docs/agent-owner-quickstart.md`](docs/agent-owner-quickstart.md). The quickstart is generic for any agent owner: your agent creates a Payjent-gated pay.sh action with `AgentPayjentBridge` + `PayjentClient`, sends the user a public-safe payment message, polls Payjent with bot auth, resumes the stored envelope after payment, executes/settles pay.sh externally in your runtime, and calls `mark_fulfilled`. Public users never paste grant ids or payment tokens in the default flow.
+
 ## Local setup
 
 ```bash

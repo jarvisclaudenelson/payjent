@@ -653,22 +653,38 @@ def run_agent_pay_sh_with_client(client: Any, *, bot_id: str, bot_key: str, oper
     return {"agent_ask": agent_ask, "pending": pending, "prompt": prompt, "unpaid_poll": unpaid_poll, "paid_poll": paid_poll, "payment": paid, "resumed": resumed, "fulfilled": fulfilled}
 
 
-def print_agent_pay_sh_summary(result: dict[str, Any]) -> None:
+def _redact_grant_token(token: Any) -> str | None:
+    if token is None:
+        return None
+    text = str(token)
+    if text.startswith("grant_"):
+        return "grant_..."
+    return "<redacted>"
+
+
+def print_agent_pay_sh_summary(result: dict[str, Any], *, quickstart: bool = False) -> None:
     envelope = result["resumed"]["execution_envelope"]
-    print("Payjent generic agent pay.sh bridge demo completed.")
-    print("FLOW: community ask -> payment prompt -> unpaid poll -> mock pay -> token discovered by bot-auth poll -> resume_when_paid -> fulfill")
+    if quickstart:
+        print("Payjent agent owner quickstart smoke completed.")
+        print("FLOW: create premium pay.sh action -> payment link/message -> unpaid bot-auth poll no token -> local mock pay -> bot-auth poll discovers readiness -> resume_when_paid -> external pay.sh runtime placeholder -> mark_fulfilled")
+    else:
+        print("Payjent generic agent pay.sh bridge demo completed.")
+        print("FLOW: community ask -> payment prompt -> unpaid poll -> mock pay -> token discovered by bot-auth poll -> resume_when_paid -> fulfill")
     print(f"AGENT_ASK: {result['agent_ask']}")
     print("AGENT_PAYMENT_PROMPT:")
     print(result["prompt"])
+    print(f"payment_message_public_safe={result['pending'].payment_message is not None}")
     print(f"unpaid_poll_status={result['unpaid_poll']['status']}")
-    print(f"unpaid_poll_payment_token={result['unpaid_poll']['payment_token']}")
+    print(f"unpaid_poll_payment_token={_redact_grant_token(result['unpaid_poll']['payment_token'])}")
     print(f"paid_poll_status={result['paid_poll']['status']}")
-    print(f"paid_poll_discovered_token={result['paid_poll']['payment_token']}")
+    print(f"paid_poll_discovered_token={_redact_grant_token(result['paid_poll']['payment_token'])}")
     print(f"resumed_status={result['resumed']['status']}")
     print(f"resumed_provider={envelope['provider']}")
     print(f"resumed_settlement={envelope['settlement']}")
     print(f"resumed_command_preview={envelope['command_preview']}")
+    print("external_pay_sh_execution=integrating_agent_runtime")
     print(f"fulfilled_status={result['fulfilled'].status}")
+    print("security_note=Public users never paste grant ids/payment tokens in the default flow; the agent polls Payjent with bot auth.")
     print("dev_note=Payjent gates payment and returns the stored pay.sh envelope; the integrating agent must execute/settle pay.sh externally.")
 
 
@@ -831,6 +847,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent_pay_sh_poll.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     agent_pay_sh_poll.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
+    agent_owner_quickstart = sub.add_parser("agent-owner-quickstart", help="run the 10-minute generic agent-owner Payjent quickstart smoke")
+    agent_owner_quickstart.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
+    agent_owner_quickstart.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    agent_owner_quickstart.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
     c3po_pay_sh = sub.add_parser("c3po-pay-sh", help="compatibility alias for agent-pay-sh")
     c3po_pay_sh.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
     c3po_pay_sh.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
@@ -946,7 +967,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = run_pay_sh_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_pay_sh_action_summary(result)
         return 0
-    if args.command in {"agent-pay-sh", "agent-pay-sh-poll", "c3po-pay-sh"}:
+    if args.command in {"agent-pay-sh", "agent-pay-sh-poll", "agent-owner-quickstart", "c3po-pay-sh"}:
         if "PAYJENT_DATABASE_URL" in os.environ:
             init_db()
             credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
@@ -963,7 +984,7 @@ def main(argv: list[str] | None = None) -> int:
                 bot_key = args.bot_key or credentials.bot_key
                 operator_key = args.operator_key or credentials.operator_key
                 result = run_agent_pay_sh_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
-        print_agent_pay_sh_summary(result)
+        print_agent_pay_sh_summary(result, quickstart=args.command == "agent-owner-quickstart")
         return 0
     if args.command == "discord-aggregator":
         if "PAYJENT_DATABASE_URL" in os.environ:

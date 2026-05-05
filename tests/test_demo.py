@@ -290,6 +290,35 @@ def test_demo_discord_aggregator_stripe_smoke_cli_returns_success_without_real_s
     assert "final_status=fulfilled" in completed.stdout
 
 
+def test_demo_agent_owner_quickstart_cli_returns_success_and_redacts_tokens(tmp_path):
+    import os
+    import re
+    import subprocess
+    import sys
+
+    db_url = f"sqlite:///{tmp_path / 'agent-owner-quickstart.db'}"
+    env = {**os.environ, "PAYJENT_DATABASE_URL": db_url, "PYTHONPATH": os.getcwd()}
+    completed = subprocess.run(
+        [sys.executable, "-m", "payjent.demo", "agent-owner-quickstart"],
+        cwd=os.getcwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Payjent agent owner quickstart smoke completed." in completed.stdout
+    assert "create premium pay.sh action" in completed.stdout
+    assert "unpaid_poll_payment_token=None" in completed.stdout
+    assert "paid_poll_discovered_token=grant_..." in completed.stdout
+    assert "resumed_provider=pay_sh" in completed.stdout
+    assert "resumed_settlement=external_pay_sh_runtime" in completed.stdout
+    assert "external_pay_sh_execution=integrating_agent_runtime" in completed.stdout
+    assert "fulfilled_status=fulfilled" in completed.stdout
+    assert "Public users never paste grant ids/payment tokens" in completed.stdout
+    assert not re.search(r"grant_[A-Za-z0-9]{8,}", completed.stdout)
+
+
 def test_app_lifespan_has_no_fastapi_on_event_deprecation_warning(engine):
     def override_session():
         with Session(engine) as session:
