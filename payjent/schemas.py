@@ -161,7 +161,7 @@ class AgentActionCreateResponse(BaseModel):
 
 class AgentActionConsumeRequest(BaseModel):
     payment_token: str
-    presentation: GrantPresentation | None = None
+    presentation: GrantPresentation
 
 
 class AgentActionExecutionEnvelope(BaseModel):

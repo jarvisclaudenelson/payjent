@@ -580,8 +580,17 @@ def run_paid_action_with_client(client: Any, *, bot_id: str, bot_key: str, opera
     }
     action = _raise_for_demo_response(client.post("/api/v1/agent-actions", json=action_payload, headers=bot_headers), "create paid agent action")
     paid = _raise_for_demo_response(client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers), "operator mock pay")
+    presentation = {
+        "bot_id": action_payload["bot_id"],
+        "external_user_id": action_payload["external_user_id"],
+        "request_hash": action_payload["request_hash"],
+    }
     started = _raise_for_demo_response(
-        client.post(f"/api/v1/agent-actions/{action['action_id']}/consume", json={"payment_token": paid["grant"]["id"]}, headers=bot_headers),
+        client.post(
+            f"/api/v1/agent-actions/{action['action_id']}/consume",
+            json={"payment_token": paid["grant"]["id"], "presentation": presentation},
+            headers=bot_headers,
+        ),
         "consume paid agent action token",
     )
     result_text = f"Launch blurb for {started['execution_envelope']['topic']}: agents can ask, users pay, then bots safely resume exactly the paid action."

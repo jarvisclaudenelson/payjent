@@ -2,6 +2,16 @@ def _create_action(client, quote_payload, bot_headers):
     return client.post("/api/v1/agent-actions", json=quote_payload, headers=bot_headers)
 
 
+def _presentation(quote_payload, **overrides):
+    data = {
+        "bot_id": quote_payload["bot_id"],
+        "external_user_id": quote_payload["external_user_id"],
+        "request_hash": quote_payload["request_hash"],
+    }
+    data.update(overrides)
+    return data
+
+
 def test_create_agent_action_returns_payment_prompt_and_action_id(client, quote_payload, bot_headers):
     r = _create_action(client, quote_payload, bot_headers)
     assert r.status_code == 200
@@ -19,7 +29,7 @@ def test_unpaid_agent_action_cannot_start(client, quote_payload, bot_headers):
     action = _create_action(client, quote_payload, bot_headers).json()
     r = client.post(
         f"/api/v1/agent-actions/{action['action_id']}/consume",
-        json={"payment_token": "grant_missing"},
+        json={"payment_token": "grant_missing", "presentation": _presentation(quote_payload)},
         headers=bot_headers,
     )
     assert r.status_code == 409
@@ -32,20 +42,30 @@ def test_paid_agent_action_consumes_once_and_binds_request_hash(client, quote_pa
 
     bad = client.post(
         f"/api/v1/agent-actions/{action['action_id']}/consume",
-        json={"payment_token": token, "presentation": {"request_hash": "wrong"}},
+        json={"payment_token": token, "presentation": _presentation(quote_payload, request_hash="wrong")},
         headers=bot_headers,
     )
     assert bad.status_code == 403
+
+    wrong_user = client.post(
+        f"/api/v1/agent-actions/{action['action_id']}/consume",
+        json={"payment_token": token, "presentation": _presentation(quote_payload, external_user_id="wrong-user")},
+        headers=bot_headers,
+    )
+    assert wrong_user.status_code == 403
+
+    wrong_bot = client.post(
+        f"/api/v1/agent-actions/{action['action_id']}/consume",
+        json={"payment_token": token, "presentation": _presentation(quote_payload, bot_id="wrong-bot")},
+        headers=bot_headers,
+    )
+    assert wrong_bot.status_code == 403
 
     ok = client.post(
         f"/api/v1/agent-actions/{action['action_id']}/consume",
         json={
             "payment_token": token,
-            "presentation": {
-                "bot_id": quote_payload["bot_id"],
-                "external_user_id": quote_payload["external_user_id"],
-                "request_hash": quote_payload["request_hash"],
-            },
+            "presentation": _presentation(quote_payload),
         },
         headers=bot_headers,
     )
@@ -57,10 +77,22 @@ def test_paid_agent_action_consumes_once_and_binds_request_hash(client, quote_pa
 
     replay = client.post(
         f"/api/v1/agent-actions/{action['action_id']}/consume",
-        json={"payment_token": token},
+        json={"payment_token": token, "presentation": _presentation(quote_payload)},
         headers=bot_headers,
     )
     assert replay.status_code == 409
+
+
+def test_paid_agent_action_consume_requires_presentation(client, quote_payload, bot_headers, operator_headers):
+    action = _create_action(client, quote_payload, bot_headers).json()
+    paid = client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers).json()
+
+    r = client.post(
+        f"/api/v1/agent-actions/{action['action_id']}/consume",
+        json={"payment_token": paid["grant"]["id"]},
+        headers=bot_headers,
+    )
+    assert r.status_code == 422
 
 
 def test_agent_action_complete_records_fulfillment(client, quote_payload, bot_headers, operator_headers):
@@ -68,7 +100,7 @@ def test_agent_action_complete_records_fulfillment(client, quote_payload, bot_he
     paid = client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers).json()
     started = client.post(
         f"/api/v1/agent-actions/{action['action_id']}/start",
-        json={"payment_token": paid["grant"]["id"]},
+        json={"payment_token": paid["grant"]["id"], "presentation": _presentation(quote_payload)},
         headers=bot_headers,
     )
     assert started.status_code == 200

@@ -616,8 +616,7 @@ def consume_agent_action(action_id: str, payload: AgentActionConsumeRequest, ses
     grant = session.get(Grant, payload.payment_token)
     if not grant or grant.quote_id != q.id:
         raise HTTPException(403, "payment_token is not valid for this action")
-    presentation = payload.presentation or GrantPresentation(bot_id=q.bot_id, external_user_id=q.external_user_id, request_hash=q.request_hash)
-    grant = _load_valid_grant(grant.id, presentation, session, settings)
+    grant = _load_valid_grant(grant.id, payload.presentation, session, settings)
     if grant.quote_id != q.id:
         raise HTTPException(403, "payment_token is not valid for this action")
     if not _mark_grant_consumed(grant.id, session):
