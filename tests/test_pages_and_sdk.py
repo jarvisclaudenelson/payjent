@@ -1,3 +1,5 @@
+import re
+
 import httpx
 
 from examples import discord_bot_flow
@@ -35,7 +37,7 @@ def test_browser_mock_pay_post_action_is_not_available(client, quote_payload, bo
     assert "checkout_created" in status.text
 
 
-def test_status_pages_show_payment_grant_and_fulfillment(client, quote_payload, bot_headers, operator_headers):
+def test_status_pages_show_payment_access_and_fulfillment_without_grant_id(client, quote_payload, bot_headers, operator_headers):
     quote, payment_session = _create_checkout(client, quote_payload, bot_headers)
     paid = client.post(f"/api/v1/payment-sessions/{payment_session['id']}/mock-pay", headers=operator_headers).json()
     client.post(f"/api/v1/grants/{paid['grant']['id']}/consume", headers=bot_headers, json={"bot_id": quote_payload["bot_id"]})
@@ -49,8 +51,30 @@ def test_status_pages_show_payment_grant_and_fulfillment(client, quote_payload, 
     assert status.status_code == 200
     assert "Payment status" in status.text
     assert "paid" in status.text
-    assert paid["grant"]["id"] in status.text
+    assert "Access:" in status.text
+    assert paid["grant"]["id"] not in status.text
     assert "fulfilled" in status.text
+
+
+def test_public_pay_and_status_hide_paid_payment_token_but_bot_polling_returns_it(client, quote_payload, bot_headers, operator_headers):
+    action = client.post("/api/v1/agent-actions", json=quote_payload, headers=bot_headers).json()
+    paid = client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers).json()
+    token = paid["grant"]["id"]
+
+    pay_page = client.get(f"/pay/{action['payment_session_id']}")
+    status_page = client.get(f"/status/{action['payment_session_id']}")
+    bot_status = client.get(f"/api/v1/agent-actions/{action['action_id']}", headers=bot_headers).json()
+
+    assert pay_page.status_code == 200
+    assert status_page.status_code == 200
+    for html in (pay_page.text, status_page.text):
+        assert token not in html
+        assert "payment_token" not in html
+        assert not re.search(r"grant_[A-Za-z0-9_-]+", html)
+    assert "agent will resume automatically" in pay_page.text
+    assert "agent will resume automatically" in status_page.text
+    assert bot_status["payment_token"] == token
+    assert bot_status["payment_token_status"] == "available"
 
 
 def test_example_module_imports():

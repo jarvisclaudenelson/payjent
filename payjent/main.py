@@ -154,7 +154,7 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
   -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;'</code></pre>
         </section>
         """
-    grant_line = f"<p>Grant: <code>{_html_escape(grant.id)}</code></p>" if grant else "<p>Grant: not issued</p>"
+    grant_line = "<p>Access issued; agent will resume automatically.</p>" if grant else "<p>Access not issued yet.</p>"
     return f"""
     <!doctype html><html><head><title>Payjent checkout</title><style>body{{font-family:system-ui;margin:2rem;max-width:760px}}code{{background:#eee;padding:.1rem .25rem}}</style></head>
     <body>
@@ -196,7 +196,7 @@ def status_page(payment_session_id: str, session: Session = Depends(get_session)
     fulfillment_items = "".join(f"<li>{_html_escape(ev.status)} <code>{_html_escape(ev.id)}</code></li>" for ev in fulfillment) or "<li>none</li>"
     grant_state = "not issued"
     if grant:
-        grant_state = f"issued: <code>{_html_escape(grant.id)}</code>; consumed: {_html_escape(grant.consumed_at is not None)}"
+        grant_state = f"issued; consumed: {_html_escape(grant.consumed_at is not None)}; agent will resume automatically"
     link_instructions = ""
     if ps.provider == "link" and ps.status != "paid":
         link_instructions = f"""
@@ -215,7 +215,7 @@ def status_page(payment_session_id: str, session: Session = Depends(get_session)
       <p>Payment session: <code>{_html_escape(ps.id)}</code></p>
       <p>Payment status: <strong>{_html_escape(ps.status)}</strong></p>
       <p>Quote: <code>{_html_escape(q.id)}</code> ({_html_escape(q.status)})</p>
-      <p>Grant: {grant_state}</p>
+      <p>Access: {grant_state}</p>
       {link_instructions}
       <h2>Fulfillment</h2><ul>{fulfillment_items}</ul>
       <p><a href="/pay/{_html_escape(ps.id)}">Back to checkout</a></p>
