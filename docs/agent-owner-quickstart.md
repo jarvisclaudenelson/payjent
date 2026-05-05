@@ -161,14 +161,38 @@ Use Payjent's configured signing secret, or a dedicated webhook secret in your o
 
 ## 6. Run the owner smokes
 
+Local safe smokes (temporary SQLite credentials, no network, no pay.sh execution):
+
 ```bash
 python -m payjent.demo agent-owner-quickstart
 python -m payjent.demo agent-webhook-resume
+python -m payjent.demo hosted-agent-webhook-smoke --in-process
 # or, after installing the package:
 payjent agent-owner-quickstart
 payjent agent-webhook-resume
+payjent hosted-agent-webhook-smoke --in-process
+```
+
+Hosted/base-URL smoke against a running Payjent deployment:
+
+```bash
+export PAYJENT_BASE_URL="https://payjent.vercel.app"   # or your staging Payjent URL
+export PAYJENT_BOT_ID="agent_<your_agent_id>"
+export PAYJENT_BOT_KEY="payjent_<redacted_bot_key>"
+export PAYJENT_OPERATOR_KEY="payjent_<redacted_operator_key>"  # test/staging operator only
+
+# Optional: public HTTPS callback receiver that records/verifies the signed webhook.
+export PAYJENT_CALLBACK_URL="https://your-agent.example.com/payjent/callback"
+
+python -m payjent.demo hosted-agent-webhook-smoke
+# or explicitly:
+python -m payjent.demo hosted-agent-webhook-smoke --base-url "$PAYJENT_BASE_URL" --callback-url "$PAYJENT_CALLBACK_URL"
 ```
 
 The polling smoke proves: create premium pay.sh action, generate payment link/message, unpaid poll with no token, local/test mock payment, bot-auth poll discovers readiness, resume request, inspect the pay.sh command preview, and mark fulfilled. Output redacts any grant/payment token as `grant_...`.
 
 The webhook smoke proves: register `callback_url`, receive a signed callback after local/test payment, verify the signature, confirm the callback payload contains no grant/payment token, then resume with bot auth and mark fulfilled.
+
+The hosted smoke proves the same API flow against `PAYJENT_BASE_URL`: create generic pay.sh premium action, require a payment link, perform operator-auth dev/test mock-pay, optionally validate a webhook when an observable test receiver is available, use bot-auth `resume_when_paid`, and mark fulfilled. If no callback URL is supplied, it prints `callback_mode=not_provided` and an explicit skip reason; if a callback URL is supplied to a real hosted deployment, inspect that receiver's logs for delivery/signature validation. If hosted production disables mock-pay, the command fails instead of pretending success; use a staging/test deployment or a future real test checkout/webhook rail.
+
+Security notes for all smokes: output redacts grant ids/payment tokens, public pages/prompts must not expose them, mock-pay is an operator-auth dev/test rail only, and Payjent still does not execute or settle pay.sh.

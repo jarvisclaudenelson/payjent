@@ -347,6 +347,83 @@ def test_demo_agent_webhook_resume_cli_returns_success_and_redacts_tokens(tmp_pa
     assert not re.search(r"grant_[A-Za-z0-9]{8,}", completed.stdout)
 
 
+def test_demo_hosted_agent_webhook_smoke_in_process_redacts_tokens(engine, capsys):
+    import re
+
+    with Session(engine) as session:
+        credentials = demo.seed_credentials(session=session, bot_id="demo-hosted-smoke-bot")
+
+    def override_session():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        with TestClient(app) as client:
+            result = demo.run_hosted_agent_webhook_smoke_with_client(
+                client,
+                base_url="http://testserver",
+                bot_id=credentials.bot_id,
+                bot_key=credentials.bot_key,
+                operator_key=credentials.operator_key,
+                in_process_callback=True,
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert result["callback_mode"] == "in_process"
+    assert result["callback_validation"] == "verified"
+    assert result["callback"]["signature_verified"] is True
+    assert result["unpaid_poll"]["payment_token"] is None
+    assert result["paid_poll"]["payment_token"].startswith("grant_")
+    assert result["resumed"]["execution_envelope"]["provider"] == "pay_sh"
+    assert result["fulfilled"].status == "fulfilled"
+
+    demo.print_hosted_agent_webhook_smoke_summary(result)
+    output = capsys.readouterr().out
+    assert "Payjent hosted agent-owner smoke completed." in output
+    assert "base_url=http://testserver" in output
+    assert "hosted_mode=False" in output
+    assert "callback_mode=in_process" in output
+    assert "callback_validation=verified" in output
+    assert "callback_contains_payment_token=False" in output
+    assert "callback_contains_grant=False" in output
+    assert "payment_link_exists=True" in output
+    assert "unpaid_poll_payment_token=None" in output
+    assert "paid_poll_discovered_token=grant_..." in output
+    assert "operator_mock_pay=test_rail_only" in output
+    assert "resumed_provider=pay_sh" in output
+    assert "fulfilled_status=fulfilled" in output
+    assert not re.search(r"grant_[A-Za-z0-9]{8,}", output)
+
+
+def test_demo_hosted_agent_webhook_smoke_cli_safe_local_mode(tmp_path):
+    import os
+    import re
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "PAYJENT_DATABASE_URL"}
+    env["PYTHONPATH"] = os.getcwd()
+    completed = subprocess.run(
+        [sys.executable, "-m", "payjent.demo", "hosted-agent-webhook-smoke", "--in-process"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "base_url=http://testserver" in completed.stdout
+    assert "hosted_mode=False" in completed.stdout
+    assert "callback_mode=in_process" in completed.stdout
+    assert "callback_validation=verified" in completed.stdout
+    assert "operator_mock_pay=test_rail_only" in completed.stdout
+    assert "paid_poll_discovered_token=grant_..." in completed.stdout
+    assert "fulfilled_status=fulfilled" in completed.stdout
+    assert not re.search(r"grant_[A-Za-z0-9]{8,}", completed.stdout)
+
+
 def test_app_lifespan_has_no_fastapi_on_event_deprecation_warning(engine):
     def override_session():
         with Session(engine) as session:

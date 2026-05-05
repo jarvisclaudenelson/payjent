@@ -161,6 +161,21 @@ For a no-network local walkthrough, run:
 python -m payjent.demo agent-pay-sh-poll
 ```
 
+For the hosted/base-URL agent-owner smoke rail, set hosted credentials and run the smoke against a running Payjent API:
+
+```bash
+export PAYJENT_BASE_URL="https://payjent.vercel.app"
+export PAYJENT_BOT_ID="agent_<your_agent_id>"
+export PAYJENT_BOT_KEY="payjent_<redacted_bot_key>"
+export PAYJENT_OPERATOR_KEY="payjent_<redacted_operator_key>"  # operator test rail only
+# Optional public HTTPS receiver for signed, token-free callbacks:
+export PAYJENT_CALLBACK_URL="https://your-agent.example.com/payjent/callback"
+
+python -m payjent.demo hosted-agent-webhook-smoke
+```
+
+For a safe local fallback that uses TestClient, temporary credentials, and an in-process callback capture, run `python -m payjent.demo hosted-agent-webhook-smoke --in-process`. The hosted smoke creates a generic pay.sh premium action, verifies a payment link exists, uses operator-auth dev/test mock-pay, validates a webhook when an observable test receiver is available (otherwise prints an explicit callback skip reason), resumes with bot auth, and marks fulfilled. It redacts grant/payment tokens and never executes or settles pay.sh. If the hosted environment disables mock-pay, the command fails with an actionable staging/test-rail message rather than pretending success.
+
 The older `python -m payjent.demo c3po-pay-sh` command remains as a compatibility alias. Caveat: Payjent gates payment and returns a stored pay.sh execution envelope/`command_preview`; pay.sh execution and settlement happen in the integrating agent runtime. This scaffold does not verify live pay.sh settlement or execute `paycurl`.
 
 To demo the first end-to-end local agent UX with no env keys, running server, Discord token, Stripe, Link, or network access, run:

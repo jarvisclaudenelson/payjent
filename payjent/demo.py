@@ -697,6 +697,96 @@ def run_agent_webhook_resume_with_client(client: Any, *, bot_id: str, bot_key: s
     return {"pending": pending, "prompt": prompt, "payment": paid, "callback": received[0], "resumed": resumed, "fulfilled": fulfilled}
 
 
+def _safe_mock_pay(client: Any, payment_session_id: str, operator_key: str) -> dict[str, Any]:
+    response = client.post(f"/api/v1/payment-sessions/{payment_session_id}/mock-pay", headers={"X-Payjent-Bot-Key": operator_key})
+    if response.status_code >= 400:
+        detail = response.text
+        if response.status_code in {403, 404, 409, 422, 503}:
+            raise RuntimeError(
+                "operator test mock-pay failed. This smoke uses the operator-auth dev/test mock payment rail only; "
+                "if the hosted environment disables mock-pay, run against a staging/test Payjent deployment or enable a real test checkout/webhook path. "
+                f"HTTP {response.status_code}: {detail}"
+            )
+        raise RuntimeError(f"operator test mock-pay failed: HTTP {response.status_code}: {detail}")
+    return response.json()
+
+
+def run_hosted_agent_webhook_smoke_with_client(
+    client: Any,
+    *,
+    base_url: str,
+    bot_id: str,
+    bot_key: str,
+    operator_key: str,
+    callback_url: str | None = None,
+    in_process_callback: bool = False,
+) -> dict[str, Any]:
+    """Run hosted/base-URL generic agent-owner pay.sh smoke without executing pay.sh."""
+    import payjent.main as main_module
+
+    base_url = base_url.rstrip("/")
+    received: list[dict[str, Any]] = []
+    effective_callback_url = callback_url
+    callback_mode = "provided" if callback_url else "not_provided"
+
+    class DemoResponse:
+        status_code = 204
+        text = ""
+
+    class DemoWebhookClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None: pass
+        def __enter__(self): return self
+        def __exit__(self, *args: Any) -> None: pass
+        def post(self, url: str, json: dict[str, Any], headers: dict[str, str]):
+            ok = verify_agent_action_webhook(json, headers["X-Payjent-Timestamp"], headers["X-Payjent-Signature"], get_settings().signing_secret)
+            assert ok, "smoke webhook signature verification failed"
+            assert "payment_token" not in json and "grant" not in json
+            received.append({"url": url, "payload": json, "headers": headers, "signature_verified": ok})
+            return DemoResponse()
+
+    original_client = main_module.httpx.Client
+    if in_process_callback and not callback_url:
+        effective_callback_url = f"{base_url}/agent-owner-smoke/callback"
+        callback_mode = "in_process"
+        main_module.httpx.Client = DemoWebhookClient
+    try:
+        bot_client = PayjentClient(base_url, api_key=bot_key, client=client)
+        bridge = AgentPayjentBridge(bot_client, bot_id=bot_id, store=MemoryPendingPremiumRequestStore(), public_base_url=base_url)
+        pending, prompt = bridge.request_pay_sh_data(
+            agent_user_id=DEFAULT_EXTERNAL_USER_ID,
+            request_summary="Hosted agent-owner smoke: premium pay.sh weather lookup",
+            amount_minor=800,
+            cost_breakdown=[{"label": "Payjent gate for downstream pay.sh API call", "amount_minor": 800}],
+            service_url="https://api.weather.ai/forecast",
+            method="POST",
+            body={"city": "Lisbon", "units": "metric"},
+            description="Premium weather data via external agent pay.sh runtime",
+            callback_url=effective_callback_url,
+        )
+        unpaid_poll = bridge.check_payment(pending.action_id)
+        paid = _safe_mock_pay(client, pending.payment_session_id, operator_key)
+    finally:
+        if in_process_callback and not callback_url:
+            main_module.httpx.Client = original_client
+    paid_poll = bridge.check_payment(pending.action_id)
+    resumed = bridge.resume_when_paid(pending_id=pending.action_id, agent_user_id=DEFAULT_EXTERNAL_USER_ID, timeout_seconds=0)
+    fulfilled = bridge.mark_fulfilled(pending.action_id, "fulfilled", {"demo": "hosted-agent-webhook-smoke", "pay_sh_executed_externally": True})
+    callback_validation = "verified" if received else ("provided_receiver_not_observed" if callback_url else "skipped_no_callback_url")
+    return {
+        "base_url": base_url,
+        "callback_mode": callback_mode,
+        "callback_validation": callback_validation,
+        "callback": received[0] if received else None,
+        "pending": pending,
+        "prompt": prompt,
+        "unpaid_poll": unpaid_poll,
+        "payment": paid,
+        "paid_poll": paid_poll,
+        "resumed": resumed,
+        "fulfilled": fulfilled,
+    }
+
+
 def _redact_grant_token(token: Any) -> str | None:
     if token is None:
         return None
@@ -752,6 +842,44 @@ def print_agent_webhook_resume_summary(result: dict[str, Any]) -> None:
     print(f"fulfilled_status={result['fulfilled'].status}")
     print("security_note=Webhook payloads do not include grant ids/payment tokens; the agent still uses bot-auth resume_when_paid to consume payment readiness.")
     print("dev_note=Payjent notifies the agent runtime; the integrating agent still executes/settles pay.sh externally.")
+
+
+def print_hosted_agent_webhook_smoke_summary(result: dict[str, Any]) -> None:
+    envelope = result["resumed"].get("execution_envelope", {})
+    callback = result.get("callback")
+    payload = callback["payload"] if callback else {}
+    print("Payjent hosted agent-owner smoke completed.")
+    print("FLOW: create premium pay.sh action against base_url -> payment link exists -> operator-auth dev/test mock-pay -> optional signed webhook validation -> bot-auth resume_when_paid -> mark_fulfilled")
+    print(f"base_url={result['base_url']}")
+    print(f"hosted_mode={result['base_url'] != 'http://testserver'}")
+    print(f"callback_mode={result['callback_mode']}")
+    print(f"callback_validation={result['callback_validation']}")
+    if callback:
+        print(f"callback_url={callback['url']}")
+        print(f"callback_event={payload.get('event_type')}")
+        print(f"callback_status={payload.get('status')}")
+        print(f"callback_contains_payment_token={'payment_token' in payload}")
+        print(f"callback_contains_grant={'grant' in payload}")
+        print("callback_signature_verified=True")
+    else:
+        if result["callback_mode"] == "provided":
+            print("callback_skip_reason=provided receiver is external; inspect that receiver logs")
+        else:
+            print("callback_skip_reason=no observable test callback receiver was provided")
+    print(f"payment_link_exists={bool(result['pending'].payment_url)}")
+    print(f"unpaid_poll_status={result['unpaid_poll']['status']}")
+    print(f"unpaid_poll_payment_token={_redact_grant_token(result['unpaid_poll'].get('payment_token'))}")
+    print("operator_mock_pay=test_rail_only")
+    print(f"paid_poll_status={result['paid_poll']['status']}")
+    print(f"paid_poll_discovered_token={_redact_grant_token(result['paid_poll'].get('payment_token'))}")
+    print(f"resumed_status={result['resumed']['status']}")
+    print(f"resumed_provider={envelope.get('provider')}")
+    print(f"resumed_settlement={envelope.get('settlement')}")
+    print(f"resumed_command_preview={envelope.get('command_preview')}")
+    print("external_pay_sh_execution=integrating_agent_runtime")
+    print(f"fulfilled_status={result['fulfilled'].status}")
+    print("security_note=Output redacts grant ids/payment tokens; public pages/prompts must not expose them. Bot auth is used for resume_when_paid.")
+    print("dev_note=Mock-pay is an operator-auth dev/test rail. Payjent gates payment only; it does not execute or settle pay.sh.")
 
 
 def print_paid_action_summary(result: dict[str, Any]) -> None:
@@ -923,6 +1051,14 @@ def build_parser() -> argparse.ArgumentParser:
     agent_webhook_resume.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     agent_webhook_resume.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
+    hosted_smoke = sub.add_parser("hosted-agent-webhook-smoke", help="run generic agent-owner pay.sh smoke against PAYJENT_BASE_URL or hosted Payjent")
+    hosted_smoke.add_argument("--base-url", default=os.getenv("PAYJENT_BASE_URL", "https://payjent.vercel.app"))
+    hosted_smoke.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
+    hosted_smoke.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    hosted_smoke.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+    hosted_smoke.add_argument("--callback-url", default=os.getenv("PAYJENT_CALLBACK_URL"), help="optional public HTTPS agent callback receiver for hosted webhook delivery")
+    hosted_smoke.add_argument("--in-process", action="store_true", help="safe local test fallback using TestClient and in-process callback capture")
+
     c3po_pay_sh = sub.add_parser("c3po-pay-sh", help="compatibility alias for agent-pay-sh")
     c3po_pay_sh.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
     c3po_pay_sh.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
@@ -1075,6 +1211,39 @@ def main(argv: list[str] | None = None) -> int:
                 operator_key = args.operator_key or credentials.operator_key
                 result = run_agent_webhook_resume_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_agent_webhook_resume_summary(result)
+        return 0
+    if args.command == "hosted-agent-webhook-smoke":
+        if args.in_process or args.base_url.rstrip("/") == "http://testserver":
+            with _isolated_demo_session() as (client, temp_engine):
+                credentials = None
+                if not args.bot_key or not args.operator_key:
+                    with Session(temp_engine) as session:
+                        credentials = seed_credentials(session=session, bot_id=args.bot_id)
+                bot_key = args.bot_key or credentials.bot_key
+                operator_key = args.operator_key or credentials.operator_key
+                result = run_hosted_agent_webhook_smoke_with_client(
+                    client,
+                    base_url="http://testserver",
+                    bot_id=args.bot_id,
+                    bot_key=bot_key,
+                    operator_key=operator_key,
+                    callback_url=args.callback_url,
+                    in_process_callback=True,
+                )
+        else:
+            if not args.bot_key or not args.operator_key:
+                raise SystemExit("PAYJENT_BOT_KEY and PAYJENT_OPERATOR_KEY are required for hosted-agent-webhook-smoke against a running base URL.")
+            with httpx.Client(base_url=args.base_url.rstrip("/"), timeout=20.0) as client:
+                result = run_hosted_agent_webhook_smoke_with_client(
+                    client,
+                    base_url=args.base_url,
+                    bot_id=args.bot_id,
+                    bot_key=args.bot_key,
+                    operator_key=args.operator_key,
+                    callback_url=args.callback_url,
+                    in_process_callback=False,
+                )
+        print_hosted_agent_webhook_smoke_summary(result)
         return 0
     if args.command == "discord-aggregator":
         if "PAYJENT_DATABASE_URL" in os.environ:
