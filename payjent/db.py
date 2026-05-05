@@ -1,9 +1,10 @@
 from collections.abc import Generator
+
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
-from sqlmodel import SQLModel, Session, create_engine
-from .config import get_settings
+from sqlmodel import Session, SQLModel, create_engine
 
+from .config import get_settings
 
 POSTGRES_SCHEMES_WITHOUT_DRIVER = ("postgres://", "postgresql://")
 POSTGRES_PSYCOPG_SCHEME = "postgresql+psycopg://"

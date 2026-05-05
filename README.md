@@ -46,6 +46,14 @@ For a one-command local API exercise after seeding, export the keys printed by `
 python -m payjent.demo run-flow
 ```
 
+To demo the first-class paid agent action API surface with no env keys, running server, Discord token, Stripe, Link, or network access, run:
+
+```bash
+python -m payjent.demo paid-action
+```
+
+This calls `/api/v1/agent-actions` to create a quote and checkout in one bot-authenticated request, prints `action_id`, `payment_url`, and a user-facing payment prompt, completes local dev mock payment, consumes the returned `payment_token` for that exact action/request hash, resumes the stored execution envelope, and records completion. MVP note: `action_id` is currently an alias for the underlying `quote_id` so the existing quote/grant request-hash binding is preserved without a migration.
+
 To demo the first end-to-end local agent UX with no env keys, running server, Discord token, Stripe, Link, or network access, run:
 
 ```bash

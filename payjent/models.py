@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
-from sqlmodel import Field, SQLModel, Column, JSON, UniqueConstraint
+
+from sqlmodel import JSON, Column, Field, SQLModel, UniqueConstraint
 
 
 def now_utc() -> datetime:

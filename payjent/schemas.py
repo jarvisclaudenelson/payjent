@@ -1,4 +1,5 @@
 from typing import Any, Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -127,6 +128,60 @@ class GrantPresentation(BaseModel):
     bot_id: str | None = None
     external_user_id: str | None = None
     request_hash: str | None = None
+
+
+class AgentActionCreate(QuoteCreate):
+    """Create a paid agent action request.
+
+    MVP alias: the returned action_id is the created quote id, preserving the
+    existing request_hash binding to bot/user/payload without a migration.
+    """
+
+
+class PaymentPrompt(BaseModel):
+    action_id: str
+    payment_url: str | None = None
+    amount_minor: int
+    currency: str
+    message: str
+
+
+class AgentActionCreateResponse(BaseModel):
+    action_id: str
+    quote_id: str
+    payment_session_id: str
+    payment_url: str | None = None
+    amount_minor: int
+    currency: str
+    status: str
+    request_hash: str
+    payment_prompt: PaymentPrompt
+    message: str
+
+
+class AgentActionConsumeRequest(BaseModel):
+    payment_token: str
+    presentation: GrantPresentation | None = None
+
+
+class AgentActionExecutionEnvelope(BaseModel):
+    action_id: str
+    quote_id: str
+    grant_id: str
+    payment_token: str
+    request_hash: str
+    external_user_id: str
+    bot_id: str
+    execution_envelope: dict[str, Any]
+    status: str
+
+
+class AgentActionCompleteResponse(BaseModel):
+    action_id: str
+    quote_id: str
+    fulfillment_id: str
+    status: str
+    metadata: dict[str, Any]
 
 
 class GrantVerifyResponse(BaseModel):

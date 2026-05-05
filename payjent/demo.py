@@ -4,6 +4,7 @@ Commands:
   python -m payjent.demo seed
   python -m payjent.demo run-flow
   python -m payjent.demo link-purchase
+  python -m payjent.demo paid-action
   python -m payjent.demo agent-prompt
   python -m payjent.demo reset-db
 """
@@ -24,10 +25,15 @@ from typing import Any, Iterator
 
 import httpx
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, Session
+from sqlmodel import Session, SQLModel
 
 from .auth import create_bot_credential, generate_api_key
-from .bot_adapter import MemoryPendingRequestStore, PayjentBotGate, PendingRequest, request_hash_for
+from .bot_adapter import (
+    MemoryPendingRequestStore,
+    PayjentBotGate,
+    PendingRequest,
+    request_hash_for,
+)
 from .config import Settings, get_settings
 from .db import engine, get_session, init_db, make_engine
 from .main import app
@@ -560,6 +566,48 @@ def print_link_purchase_summary(result: dict[str, Any]) -> None:
     print("Payjent must fail closed until verified terminal payment evidence is mapped, such as a successful merchant charge or future Link MPP/payment confirmation.")
 
 
+def run_paid_action_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
+    """Exercise first-class agent action: create -> prompt -> mock pay -> start -> complete."""
+    bot_headers = {"X-Payjent-Bot-Key": bot_key}
+    operator_headers = {"X-Payjent-Bot-Key": operator_key}
+    action_payload = {
+        **_demo_quote_payload(bot_id),
+        "request_summary": "Paid Discord/Hermes action: write a concise launch blurb",
+        "request_hash": "demo-paid-agent-action-hash-1",
+        "amount_minor": 600,
+        "cost_breakdown": [{"label": "paid agent action", "amount_minor": 600}],
+        "execution_envelope": {"command": "/launch-blurb", "topic": "Payjent paid agent actions", "max_words": 60},
+    }
+    action = _raise_for_demo_response(client.post("/api/v1/agent-actions", json=action_payload, headers=bot_headers), "create paid agent action")
+    paid = _raise_for_demo_response(client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers), "operator mock pay")
+    started = _raise_for_demo_response(
+        client.post(f"/api/v1/agent-actions/{action['action_id']}/consume", json={"payment_token": paid["grant"]["id"]}, headers=bot_headers),
+        "consume paid agent action token",
+    )
+    result_text = f"Launch blurb for {started['execution_envelope']['topic']}: agents can ask, users pay, then bots safely resume exactly the paid action."
+    completed = _raise_for_demo_response(
+        client.post(f"/api/v1/agent-actions/{action['action_id']}/complete", json={"status": "fulfilled", "metadata": {"result_text": result_text}}, headers=bot_headers),
+        "complete paid agent action",
+    )
+    return {"action": action, "payment": paid, "started": started, "result_text": result_text, "completed": completed}
+
+
+def print_paid_action_summary(result: dict[str, Any]) -> None:
+    action = result["action"]
+    print("Payjent paid agent action demo completed.")
+    print("FLOW: create agent action -> payment prompt -> mock pay -> consume payment_token -> complete")
+    print(f"action_id={action['action_id']}")
+    print(f"quote_id={action['quote_id']}")
+    print(f"payment_session_id={action['payment_session_id']}")
+    print(f"payment_url={action['payment_url']}")
+    print(f"payment_prompt={action['message']}")
+    print(f"payment_token={result['payment']['grant']['id']}")
+    print(f"started_status={result['started']['status']}")
+    print(f"execution_envelope={result['started']['execution_envelope']}")
+    print(f"result_text={result['result_text']}")
+    print(f"final_status={result['completed']['status']}")
+
+
 def print_agent_prompt_summary(result: dict[str, Any]) -> None:
     pending = result["pending"]
     grant = result["grant"]
@@ -671,6 +719,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     agent.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
+    paid_action = sub.add_parser("paid-action", help="run the first-class paid agent action API demo")
+    paid_action.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
+    paid_action.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    paid_action.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
     discord = sub.add_parser("discord-aggregator", help="run Discord-style one payment prompt covering mock Stripe funding and fake x402 spend")
     discord.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
     discord.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
@@ -742,6 +795,25 @@ def main(argv: list[str] | None = None) -> int:
                 operator_key = args.operator_key or credentials.operator_key
                 result = run_agent_prompt_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_agent_prompt_summary(result)
+        return 0
+    if args.command == "paid-action":
+        if "PAYJENT_DATABASE_URL" in os.environ:
+            init_db()
+            credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
+            bot_key = args.bot_key or credentials.bot_key
+            operator_key = args.operator_key or credentials.operator_key
+            with TestClient(app) as client:
+                result = run_paid_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        else:
+            with _isolated_demo_session() as (client, temp_engine):
+                credentials = None
+                if not args.bot_key or not args.operator_key:
+                    with Session(temp_engine) as session:
+                        credentials = seed_credentials(session=session, bot_id=args.bot_id)
+                bot_key = args.bot_key or credentials.bot_key
+                operator_key = args.operator_key or credentials.operator_key
+                result = run_paid_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        print_paid_action_summary(result)
         return 0
     if args.command == "discord-aggregator":
         if "PAYJENT_DATABASE_URL" in os.environ:

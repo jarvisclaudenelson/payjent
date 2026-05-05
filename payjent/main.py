@@ -2,30 +2,90 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
 from uuid import uuid4
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, update
+
+from . import workos_auth
+from .agent_actions import action_result_response, create_paid_action_response, execution_envelope_for_action
+from .auth import (
+    DASHBOARD_SESSION_COOKIE,
+    create_bot_credential,
+    create_dashboard_session_cookie,
+    generate_api_key,
+    get_account_from_cookie,
+    hash_password,
+    normalize_email,
+    require_bot_credential,
+    require_operator_credential,
+    verify_password,
+)
 from .config import Settings, get_settings
-from .db import WORKOS_UNUSABLE_PASSWORD_HASH, account_password_hash_nullable, get_session, init_db
-from .auth import DASHBOARD_SESSION_COOKIE, create_dashboard_session_cookie, generate_api_key, create_bot_credential, get_account_from_cookie, hash_password, normalize_email, require_bot_credential, require_operator_credential, verify_password
-from .models import Account, AgentProfile, BotCredential, RailConnection, Quote, PaymentSession, Grant, FulfillmentEvent, SpendLedgerEntry
-from .money import validate_breakdown, quote_hash
+from .db import (
+    WORKOS_UNUSABLE_PASSWORD_HASH,
+    account_password_hash_nullable,
+    get_session,
+    init_db,
+)
+from .models import (
+    Account,
+    AgentProfile,
+    BotCredential,
+    FulfillmentEvent,
+    Grant,
+    PaymentSession,
+    Quote,
+    RailConnection,
+    SpendLedgerEntry,
+)
+from .money import quote_hash, validate_breakdown
+from .providers.base import issue_receipt_and_grant
+from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest
+from .providers.link import (
+    create_link_spend_request as create_link_provider_spend_request,
+)
+from .providers.link import retrieve_link_status as retrieve_link_provider_status
+from .providers.link import validate_credential_type
+from .providers.mock import complete_mock_payment
+from .providers.stripe import (
+    create_stripe_checkout_session,
+    parse_stripe_event,
+    verify_stripe_signature,
+)
+from .rails import normalize_spend_rail
+from .risk import assess_checkout_risk
 from .schemas import (
-    AgentRead, AgentRegisterRequest, AgentRegisterResponse, FulfillmentCreate, FulfillmentRead, GrantPresentation, GrantVerifyResponse,
-    LinkCredentialApproval, LinkCredentialRequest, LinkPollResponse, MockPayResponse, PaymentSessionRead,
-    QuoteCreate, QuoteRead, RailConnectionRead, SpendAuthorizationCreate, SpendAuthorizationRead, SpendCaptureRequest,
-    StripeConnectStartResponse, X402ConfigureRequest,
+    AgentRead,
+    AgentRegisterRequest,
+    AgentRegisterResponse,
+    AgentActionCompleteResponse,
+    AgentActionConsumeRequest,
+    AgentActionCreate,
+    AgentActionCreateResponse,
+    AgentActionExecutionEnvelope,
+    FulfillmentCreate,
+    FulfillmentRead,
+    GrantPresentation,
+    GrantVerifyResponse,
+    LinkCredentialApproval,
+    LinkCredentialRequest,
+    LinkPollResponse,
+    MockPayResponse,
+    PaymentSessionRead,
+    QuoteCreate,
+    QuoteRead,
+    RailConnectionRead,
+    SpendAuthorizationCreate,
+    SpendAuthorizationRead,
+    SpendCaptureRequest,
+    StripeConnectStartResponse,
+    X402ConfigureRequest,
 )
 from .signing import verify_signature
-from .providers.mock import complete_mock_payment
-from .providers.base import issue_receipt_and_grant
-from .providers.stripe import create_stripe_checkout_session, parse_stripe_event, verify_stripe_signature
-from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest, create_link_spend_request as create_link_provider_spend_request, retrieve_link_status as retrieve_link_provider_status, validate_credential_type
-from .risk import assess_checkout_risk
-from .rails import normalize_spend_rail
-from . import workos_auth
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -471,18 +531,14 @@ def get_quote(quote_id: str, session: Session = Depends(get_session)):
     return quote_to_read(q)
 
 
-@app.post("/api/v1/quotes/{quote_id}/checkout", response_model=PaymentSessionRead)
-def checkout(
-    quote_id: str,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
-    session: Session = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-    credential: BotCredential = Depends(require_bot_credential),
-):
-    q = session.get(Quote, quote_id)
-    if not q: raise HTTPException(404, "quote not found")
-    _enforce_bot_scope(credential, q.bot_id)
+def _create_checkout_for_quote(
+    q: Quote,
+    *,
+    idempotency_key: str | None,
+    provider: str | None,
+    session: Session,
+    settings: Settings,
+) -> PaymentSession:
     risk = assess_checkout_risk(q.request_summary, q.execution_envelope)
     if not risk.allowed:
         raise HTTPException(status_code=403, detail=f"checkout blocked by risk policy: {risk.reason}")
@@ -494,7 +550,7 @@ def checkout(
             )
         ).first()
         if existing:
-            return session_to_read(existing)
+            return existing
     requested_provider = (provider or settings.checkout_provider or "mock").lower()
     if requested_provider not in {"mock", "local", "stripe", "link"}:
         raise HTTPException(status_code=422, detail="unsupported checkout provider")
@@ -512,7 +568,76 @@ def checkout(
         ps.provider_session_id = provider_session_id
         ps.checkout_url = hosted_url
     session.add(ps); session.commit(); session.refresh(ps)
+    return ps
+
+
+@app.post("/api/v1/quotes/{quote_id}/checkout", response_model=PaymentSessionRead)
+def checkout(
+    quote_id: str,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    q = session.get(Quote, quote_id)
+    if not q: raise HTTPException(404, "quote not found")
+    _enforce_bot_scope(credential, q.bot_id)
+    ps = _create_checkout_for_quote(q, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings)
     return session_to_read(ps)
+
+
+@app.post("/api/v1/agent-actions", response_model=AgentActionCreateResponse)
+def create_agent_action(
+    payload: AgentActionCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    q = create_quote(payload, session=session, credential=credential)
+    stored_quote = session.get(Quote, q.id)
+    if not stored_quote:
+        raise HTTPException(500, "agent action quote was not persisted")
+    ps = _create_checkout_for_quote(stored_quote, idempotency_key=idempotency_key or stored_quote.request_hash, provider=provider, session=session, settings=settings)
+    return create_paid_action_response(quote=stored_quote, payment_session=ps)
+
+
+@app.post("/api/v1/agent-actions/{action_id}/consume", response_model=AgentActionExecutionEnvelope)
+def consume_agent_action(action_id: str, payload: AgentActionConsumeRequest, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    q = session.get(Quote, action_id)
+    if not q:
+        raise HTTPException(404, "agent action not found")
+    _enforce_bot_scope(credential, q.bot_id)
+    paid_session = session.exec(select(PaymentSession).where(PaymentSession.quote_id == q.id, PaymentSession.status == "paid")).first()
+    if not paid_session:
+        raise HTTPException(status_code=409, detail="agent action is not paid")
+    grant = session.get(Grant, payload.payment_token)
+    if not grant or grant.quote_id != q.id:
+        raise HTTPException(403, "payment_token is not valid for this action")
+    presentation = payload.presentation or GrantPresentation(bot_id=q.bot_id, external_user_id=q.external_user_id, request_hash=q.request_hash)
+    grant = _load_valid_grant(grant.id, presentation, session, settings)
+    if grant.quote_id != q.id:
+        raise HTTPException(403, "payment_token is not valid for this action")
+    if not _mark_grant_consumed(grant.id, session):
+        raise HTTPException(409, "payment_token already consumed")
+    session.refresh(grant)
+    return execution_envelope_for_action(quote=q, grant=grant)
+
+
+@app.post("/api/v1/agent-actions/{action_id}/start", response_model=AgentActionExecutionEnvelope)
+def start_agent_action(action_id: str, payload: AgentActionConsumeRequest, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    return consume_agent_action(action_id, payload, session=session, settings=settings, credential=credential)
+
+
+@app.post("/api/v1/agent-actions/{action_id}/complete", response_model=AgentActionCompleteResponse)
+def complete_agent_action(action_id: str, payload: FulfillmentCreate, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    event = record_fulfillment(action_id, payload, session=session, credential=credential)
+    stored = session.get(FulfillmentEvent, event.id)
+    if not stored:
+        raise HTTPException(500, "agent action fulfillment was not persisted")
+    return action_result_response(stored)
 
 
 @app.get("/api/v1/payment-sessions/{session_id}", response_model=PaymentSessionRead)
