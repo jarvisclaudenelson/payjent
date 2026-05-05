@@ -153,7 +153,7 @@ def on_later_check(user_id: str, pending_id: str):
     post_to_user(user_id, result.text)
 ```
 
-`resume_when_paid` calls the bot-authenticated agent action status endpoint, discovers the unconsumed `payment_token` only after payment, then consumes it with the stored presentation. The manual `resume_after_payment(..., payment_token=...)` path remains for custom integrations. This is polling today; a production webhook/callback convenience can be layered on later.
+`resume_when_paid` calls the bot-authenticated agent action status endpoint, discovers the unconsumed `payment_token` only after payment, then consumes it with the stored presentation. The manual `resume_after_payment(..., payment_token=...)` path remains for custom integrations. Production runtimes can also pass `callback_url` so Payjent sends a signed, token-free `agent_action.ready` webhook; the callback handler should verify the signature and then call `resume_when_paid` with bot auth.
 
 For a no-network local walkthrough, run:
 

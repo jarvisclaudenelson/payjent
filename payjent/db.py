@@ -80,9 +80,14 @@ WORKOS_UNUSABLE_PASSWORD_HASH = "workos_unusable_password_hash"
 engine = make_engine()
 
 
-def migrate_sqlite_quote_callback_column(db_engine: Engine) -> None:
-    """Add callback_url to existing SQLite quote tables."""
-    if db_engine.dialect.name != "sqlite":
+def migrate_quote_callback_column(db_engine: Engine) -> None:
+    """Add callback_url to existing quote tables for pre-live deployments.
+
+    Payjent is still pre-live and does not have Alembic migrations yet. Keep this
+    additive compatibility shim narrow so existing SQLite/Postgres deployments
+    can accept the new optional callback_url column after upgrade.
+    """
+    if db_engine.dialect.name not in {"sqlite", "postgresql"}:
         return
     inspector = inspect(db_engine)
     if "quote" not in inspector.get_table_names():
@@ -93,10 +98,15 @@ def migrate_sqlite_quote_callback_column(db_engine: Engine) -> None:
             connection.execute(text("ALTER TABLE quote ADD COLUMN callback_url TEXT"))
 
 
+# Backwards-compatible alias for tests/imports that referenced the original SQLite-only shim.
+def migrate_sqlite_quote_callback_column(db_engine: Engine) -> None:
+    migrate_quote_callback_column(db_engine)
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
     migrate_sqlite_account_auth_columns(engine)
-    migrate_sqlite_quote_callback_column(engine)
+    migrate_quote_callback_column(engine)
 
 
 def get_session() -> Generator[Session, None, None]:

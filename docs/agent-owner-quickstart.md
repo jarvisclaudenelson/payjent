@@ -157,7 +157,7 @@ def payjent_callback(headers: dict[str, str], payload: dict):
     bridge.mark_fulfilled(payload["action_id"], "fulfilled", {"result_id": result.id})
 ```
 
-Use a dedicated webhook secret in production if configured; local demos use Payjent's development signing secret so the flow works without extra credentials.
+Use Payjent's configured signing secret, or a dedicated webhook secret in your own agent runtime if you proxy/rotate verification separately; local demos use Payjent's development signing secret so the flow works without extra credentials.
 
 ## 6. Run the owner smokes
 
