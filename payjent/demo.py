@@ -5,6 +5,7 @@ Commands:
   python -m payjent.demo run-flow
   python -m payjent.demo link-purchase
   python -m payjent.demo paid-action
+  python -m payjent.demo pay-sh-action
   python -m payjent.demo agent-prompt
   python -m payjent.demo reset-db
 """
@@ -601,6 +602,33 @@ def run_paid_action_with_client(client: Any, *, bot_id: str, bot_key: str, opera
     return {"action": action, "payment": paid, "started": started, "result_text": result_text, "completed": completed}
 
 
+def run_pay_sh_action_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
+    """Create a Payjent-gated pay.sh action and return the post-payment envelope."""
+    bot_headers = {"X-Payjent-Bot-Key": bot_key}
+    operator_headers = {"X-Payjent-Bot-Key": operator_key}
+    action_payload = {
+        "bot_id": bot_id,
+        "external_user_id": DEFAULT_EXTERNAL_USER_ID,
+        "request_summary": "Pay.sh demo: call premium weather forecast API",
+        "request_hash": "demo-pay-sh-action-hash-1",
+        "amount_minor": 800,
+        "currency": "USD",
+        "cost_breakdown": [{"label": "Payjent gate for downstream pay.sh API call", "amount_minor": 800}],
+        "service_url": "https://api.weather.ai/forecast",
+        "method": "POST",
+        "body": {"city": "San Francisco", "units": "metric"},
+        "description": "Premium weather forecast via downstream pay.sh runtime",
+    }
+    action = _raise_for_demo_response(client.post("/api/v1/premium-actions/pay-sh", json=action_payload, headers=bot_headers), "create pay.sh premium action")
+    paid = _raise_for_demo_response(client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers), "operator mock pay")
+    presentation = {"bot_id": bot_id, "external_user_id": action_payload["external_user_id"], "request_hash": action_payload["request_hash"]}
+    started = _raise_for_demo_response(
+        client.post(f"/api/v1/agent-actions/{action['action_id']}/consume", json={"payment_token": paid["grant"]["id"], "presentation": presentation}, headers=bot_headers),
+        "consume pay.sh premium action token",
+    )
+    return {"action": action, "payment": paid, "started": started}
+
+
 def print_paid_action_summary(result: dict[str, Any]) -> None:
     action = result["action"]
     print("Payjent paid agent action demo completed.")
@@ -615,6 +643,18 @@ def print_paid_action_summary(result: dict[str, Any]) -> None:
     print(f"execution_envelope={result['started']['execution_envelope']}")
     print(f"result_text={result['result_text']}")
     print(f"final_status={result['completed']['status']}")
+
+
+def print_pay_sh_action_summary(result: dict[str, Any]) -> None:
+    envelope = result["started"]["execution_envelope"]
+    print("Payjent pay.sh premium action demo completed.")
+    print("FLOW: create pay.sh premium action -> Payjent mock pay -> consume payment_token -> external runtime receives command preview")
+    print(f"action_id={result['action']['action_id']}")
+    print(f"payment_session_id={result['action']['payment_session_id']}")
+    print(f"provider={envelope['provider']}")
+    print(f"settlement={envelope['settlement']}")
+    print(f"command_preview={envelope['command_preview']}")
+    print("dev_note=Payjent gates the paid action; this local demo does not execute paycurl or verify pay.sh settlement.")
 
 
 def print_agent_prompt_summary(result: dict[str, Any]) -> None:
@@ -733,6 +773,11 @@ def build_parser() -> argparse.ArgumentParser:
     paid_action.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     paid_action.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
+    pay_sh_action = sub.add_parser("pay-sh-action", help="run a local Payjent-gated pay.sh premium action demo without executing paycurl")
+    pay_sh_action.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
+    pay_sh_action.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    pay_sh_action.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
     discord = sub.add_parser("discord-aggregator", help="run Discord-style one payment prompt covering mock Stripe funding and fake x402 spend")
     discord.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
     discord.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
@@ -823,6 +868,25 @@ def main(argv: list[str] | None = None) -> int:
                 operator_key = args.operator_key or credentials.operator_key
                 result = run_paid_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_paid_action_summary(result)
+        return 0
+    if args.command == "pay-sh-action":
+        if "PAYJENT_DATABASE_URL" in os.environ:
+            init_db()
+            credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
+            bot_key = args.bot_key or credentials.bot_key
+            operator_key = args.operator_key or credentials.operator_key
+            with TestClient(app) as client:
+                result = run_pay_sh_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        else:
+            with _isolated_demo_session() as (client, temp_engine):
+                credentials = None
+                if not args.bot_key or not args.operator_key:
+                    with Session(temp_engine) as session:
+                        credentials = seed_credentials(session=session, bot_id=args.bot_id)
+                bot_key = args.bot_key or credentials.bot_key
+                operator_key = args.operator_key or credentials.operator_key
+                result = run_pay_sh_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        print_pay_sh_action_summary(result)
         return 0
     if args.command == "discord-aggregator":
         if "PAYJENT_DATABASE_URL" in os.environ:

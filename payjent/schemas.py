@@ -138,6 +138,23 @@ class AgentActionCreate(QuoteCreate):
     """
 
 
+class PayShPremiumActionCreate(BaseModel):
+    bot_id: str
+    external_user_id: str
+    request_summary: str
+    request_hash: str | None = None
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    cost_breakdown: list[CostItem]
+    service_url: str | None = None
+    service_fqn: str | None = None
+    resource: str | None = None
+    method: str = "POST"
+    body: dict[str, Any] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    description: str | None = None
+
+
 class PaymentPrompt(BaseModel):
     action_id: str
     payment_url: str | None = None
@@ -157,6 +174,12 @@ class AgentActionCreateResponse(BaseModel):
     request_hash: str
     payment_prompt: PaymentPrompt
     message: str
+
+
+class PayShPremiumActionCreateResponse(AgentActionCreateResponse):
+    provider: Literal["pay_sh"] = "pay_sh"
+    premium_provider: Literal["pay_sh"] = "pay_sh"
+    command_preview: str
 
 
 class AgentActionConsumeRequest(BaseModel):

@@ -54,6 +54,18 @@ python -m payjent.demo paid-action
 
 This calls `/api/v1/agent-actions` to create a quote and checkout in one bot-authenticated request, prints `action_id`, `payment_url`, and a user-facing payment prompt, completes local dev mock payment, consumes the returned `payment_token` for that exact action/request hash, resumes the stored execution envelope, and records completion. MVP note: `action_id` is currently an alias for the underlying `quote_id` so the existing quote/grant request-hash binding is preserved without a migration.
 
+## Pay.sh premium action provider
+
+Payjent can scaffold a downstream pay.sh premium action without replacing Payjent's payment gate. A bot calls `POST /api/v1/premium-actions/pay-sh` with the usual paid action fields plus either `service_url` or `service_fqn` + `resource`, optional `method`, `body`, `headers`, and `description`. Payjent stores a normalized execution envelope with `provider=pay_sh`, `kind=premium_api_call`, `command_preview` such as `paycurl https://api.weather.ai/forecast`, setup guidance (`brew install pay`, `pay setup`, `pay skills update`, `pay skills endpoints`), and `settlement=external_pay_sh_runtime`.
+
+After the Payjent `payment_token` is consumed through `/api/v1/agent-actions/{action_id}/consume` or `/start`, the bot receives that pay.sh envelope and can run it in an external pay.sh/paycurl runtime. Payjent gates the paid agent action; pay.sh remains the downstream premium API runtime. The local scaffold does not execute `paycurl`, require pay.sh CLI installation/secrets, resolve pay.sh skill gateways, or verify live pay.sh settlement.
+
+```bash
+python -m payjent.demo pay-sh-action
+```
+
+The demo creates a Payjent-gated pay.sh action, performs local operator mock-pay, consumes the grant, and prints the normalized `command_preview` only.
+
 To demo the first end-to-end local agent UX with no env keys, running server, Discord token, Stripe, Link, or network access, run:
 
 ```bash

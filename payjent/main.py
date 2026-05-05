@@ -50,6 +50,7 @@ from .providers.link import (
 from .providers.link import retrieve_link_status as retrieve_link_provider_status
 from .providers.link import validate_credential_type
 from .providers.mock import complete_mock_payment
+from .providers.paysh import build_execution_envelope as build_paysh_execution_envelope
 from .providers.stripe import (
     create_stripe_checkout_session,
     parse_stripe_event,
@@ -75,6 +76,8 @@ from .schemas import (
     LinkPollResponse,
     MockPayResponse,
     PaymentSessionRead,
+    PayShPremiumActionCreate,
+    PayShPremiumActionCreateResponse,
     QuoteCreate,
     QuoteRead,
     RailConnectionRead,
@@ -602,6 +605,49 @@ def create_agent_action(
         raise HTTPException(500, "agent action quote was not persisted")
     ps = _create_checkout_for_quote(stored_quote, idempotency_key=idempotency_key or stored_quote.request_hash, provider=provider, session=session, settings=settings)
     return create_paid_action_response(quote=stored_quote, payment_session=ps)
+
+
+@app.post("/api/v1/premium-actions/pay-sh", response_model=PayShPremiumActionCreateResponse)
+def create_pay_sh_premium_action(
+    payload: PayShPremiumActionCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    try:
+        envelope = build_paysh_execution_envelope(
+            service_url=payload.service_url,
+            service_fqn=payload.service_fqn,
+            resource=payload.resource,
+            method=payload.method,
+            body=payload.body,
+            headers=payload.headers,
+            description=payload.description or payload.request_summary,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    action_payload = AgentActionCreate(
+        bot_id=payload.bot_id,
+        external_user_id=payload.external_user_id,
+        request_summary=payload.request_summary,
+        request_hash=payload.request_hash,
+        amount_minor=payload.amount_minor,
+        currency=payload.currency,
+        cost_breakdown=payload.cost_breakdown,
+        execution_envelope=envelope,
+    )
+    action = create_agent_action(
+        action_payload,
+        idempotency_key=idempotency_key,
+        provider=provider,
+        session=session,
+        settings=settings,
+        credential=credential,
+    )
+    data = action if isinstance(action, dict) else action.model_dump()
+    return {**data, "provider": "pay_sh", "premium_provider": "pay_sh", "command_preview": envelope["command_preview"]}
 
 
 @app.post("/api/v1/agent-actions/{action_id}/consume", response_model=AgentActionExecutionEnvelope)
