@@ -66,38 +66,41 @@ python -m payjent.demo pay-sh-action
 
 The demo creates a Payjent-gated pay.sh action, performs local operator mock-pay, consumes the grant, and prints the normalized `command_preview` only.
 
-## Hook up C3PO/community agent
+## Hook up any agent to Payjent
 
-Give C3PO these Payjent settings (store real values in your secret manager):
+Any agent owner can add a Payjent payment gate around premium pay.sh work with the generic bridge in `payjent.agent_bridge`. C3PO is just one possible caller; the API surface is agent-neutral.
+
+Give your agent these Payjent settings (store real values in your secret manager):
 
 ```bash
 export PAYJENT_BASE_URL="https://payjent.example.com"
 export PAYJENT_BOT_KEY="payjent_bot_key_..."
-export PAYJENT_BOT_ID="c3po-community"
+export PAYJENT_BOT_ID="my-agent"      # or export AGENT_ID="my-agent" and map it to bot_id
 ```
 
-Install/import the Payjent SDK and bridge, then create one bridge during C3PO startup:
+Install/import the Payjent SDK and bridge, then create one bridge during agent startup:
 
 ```python
 import os
+from payjent.agent_bridge import AgentPayjentBridge, JsonFilePendingPremiumRequestStore
 from payjent.sdk import PayjentClient
-from payjent.c3po_adapter import C3POPayjentBridge, JsonFilePendingPremiumRequestStore
 
 payjent = PayjentClient(os.environ["PAYJENT_BASE_URL"], api_key=os.environ["PAYJENT_BOT_KEY"])
-bridge = C3POPayjentBridge(
+agent_id = os.getenv("PAYJENT_BOT_ID") or os.environ["AGENT_ID"]
+bridge = AgentPayjentBridge(
     payjent,
-    bot_id=os.environ["PAYJENT_BOT_ID"],
-    store=JsonFilePendingPremiumRequestStore("./state/payjent-c3po-pending.json"),
+    bot_id=agent_id,
+    store=JsonFilePendingPremiumRequestStore("./state/payjent-agent-pending.json"),
 )
 ```
 
-Community ask handler pseudo-code:
+Agent ask handler pseudo-code:
 
 ```python
-def on_community_ask(user_id: str, ask: str):
+def on_agent_ask(user_id: str, ask: str):
     pending, payment_message = bridge.request_pay_sh_data(
-        community_user_id=user_id,
-        summary="Premium pay.sh forecast for Lisbon",
+        agent_user_id=user_id,
+        request_summary="Premium pay.sh forecast for Lisbon",
         amount_minor=800,
         service_url="https://api.weather.ai/forecast",
         method="POST",
@@ -105,41 +108,41 @@ def on_community_ask(user_id: str, ask: str):
         description="premium weather data",
     )
     post_to_user(user_id, payment_message)
-    # Persist pending.action_id if your chat runtime needs to correlate callbacks.
+    # Persist pending.action_id if your chat/runtime needs to correlate callbacks.
 ```
 
-The default payment prompt text is community-facing and looks like:
+The default payment prompt text is user-facing and looks like:
 
 ```text
 Payment required for premium pay.sh data: Premium pay.sh forecast for Lisbon
 Pay here: https://payjent.example.com/pay/ps_...
 Action: q_...
-After payment, return the payment token so C3PO can resume the stored request.
+After payment, return the payment token so your agent can resume the stored request.
 ```
 
 Resume handler pseudo-code:
 
 ```python
-def on_payment_token(user_id: str, action_id: str, payment_token: str):
+def on_payment_token(user_id: str, pending_id: str, payment_token: str):
     resumed = bridge.resume_after_payment(
-        action_id=action_id,
-        community_user_id=user_id,
+        pending_id=pending_id,
+        agent_user_id=user_id,
         payment_token=payment_token,
     )
     envelope = resumed["execution_envelope"]
-    # C3PO executes this externally in its pay.sh/paycurl runtime; Payjent never runs it.
-    result = c3po_pay_sh_runtime.execute(envelope)
-    bridge.mark_fulfilled(action_id, "fulfilled", {"result_id": result.id})
+    # Your agent executes this externally in its pay.sh/paycurl runtime; Payjent never runs it.
+    result = agent_pay_sh_runtime.execute(envelope)
+    bridge.mark_fulfilled(pending_id, "fulfilled", {"result_id": result.id})
     post_to_user(user_id, result.text)
 ```
 
 For a no-network local walkthrough, run:
 
 ```bash
-python -m payjent.demo c3po-pay-sh
+python -m payjent.demo agent-pay-sh
 ```
 
-Caveat: Payjent gates payment and returns a stored pay.sh execution envelope/`command_preview`; pay.sh execution and settlement happen in the C3PO runtime. This scaffold does not verify live pay.sh settlement or execute `paycurl`.
+The older `python -m payjent.demo c3po-pay-sh` command remains as a compatibility alias. Caveat: Payjent gates payment and returns a stored pay.sh execution envelope/`command_preview`; pay.sh execution and settlement happen in the integrating agent runtime. This scaffold does not verify live pay.sh settlement or execute `paycurl`.
 
 To demo the first end-to-end local agent UX with no env keys, running server, Discord token, Stripe, Link, or network access, run:
 

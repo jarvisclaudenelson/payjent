@@ -1,19 +1,20 @@
 import pytest
 
-from payjent.c3po_adapter import C3POPayjentBridge, MemoryPendingPremiumRequestStore
+from payjent.agent_bridge import AgentPayjentBridge, MemoryPendingPremiumRequestStore
+from payjent.c3po_adapter import C3POPayjentBridge
 from payjent.sdk import PayjentClient
 
 
 def _bridge(client):
     sdk = PayjentClient("http://testserver", api_key="test-bot-key", client=client)
     store = MemoryPendingPremiumRequestStore()
-    return C3POPayjentBridge(sdk, bot_id="bot-1", store=store, public_base_url="http://testserver"), store
+    return AgentPayjentBridge(sdk, bot_id="bot-1", store=store, public_base_url="http://testserver"), store
 
 
 def _request(bridge):
     return bridge.request_pay_sh_data(
-        community_user_id="user-1",
-        summary="premium forecast via C3PO",
+        agent_user_id="user-1",
+        request_summary="premium forecast via an agent",
         amount_minor=450,
         service_url="https://api.weather.ai/forecast",
         method="POST",
@@ -32,6 +33,7 @@ def test_request_pay_sh_data_returns_payment_prompt_and_stores_pending(client):
     assert pending.command_preview.startswith("paycurl -X POST https://api.weather.ai/forecast")
     assert "Lisbon" in pending.command_preview
     assert "Payment required" in message
+    assert "your agent can resume" in message
     assert pending.action_id in message
     assert store.get(pending.action_id) == pending
 
@@ -42,11 +44,11 @@ def test_resume_rejects_wrong_user_hash_or_missing_token(client, operator_header
     paid = client.post(f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay", headers=operator_headers).json()
 
     with pytest.raises(ValueError):
-        bridge.resume_after_payment(action_id=pending.action_id, community_user_id="user-1", payment_token="")
+        bridge.resume_after_payment(pending_id=pending.action_id, agent_user_id="user-1", payment_token="")
     with pytest.raises(PermissionError):
-        bridge.resume_after_payment(action_id=pending.action_id, community_user_id="wrong-user", payment_token=paid["grant"]["id"])
+        bridge.resume_after_payment(pending_id=pending.action_id, agent_user_id="wrong-user", payment_token=paid["grant"]["id"])
     with pytest.raises(PermissionError):
-        bridge.resume_after_payment(action_id=pending.action_id, community_user_id="user-1", payment_token=paid["grant"]["id"], request_hash="wrong")
+        bridge.resume_after_payment(pending_id=pending.action_id, agent_user_id="user-1", payment_token=paid["grant"]["id"], request_hash="wrong")
 
 
 def test_successful_resume_returns_pay_sh_command_preview_and_mark_fulfilled(client, operator_headers):
@@ -54,7 +56,7 @@ def test_successful_resume_returns_pay_sh_command_preview_and_mark_fulfilled(cli
     pending, _ = _request(bridge)
     paid = client.post(f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay", headers=operator_headers).json()
 
-    resumed = bridge.resume_after_payment(action_id=pending.action_id, community_user_id="user-1", payment_token=paid["grant"]["id"])
+    resumed = bridge.resume_after_payment(pending_id=pending.action_id, agent_user_id="user-1", payment_token=paid["grant"]["id"])
 
     envelope = resumed["execution_envelope"]
     assert envelope["provider"] == "pay_sh"
@@ -66,3 +68,17 @@ def test_successful_resume_returns_pay_sh_command_preview_and_mark_fulfilled(cli
     assert fulfilled.status == "fulfilled"
     assert fulfilled.metadata["result"] == "ok"
     assert store.get(pending.action_id).fulfilled_at
+
+
+def test_c3po_adapter_remains_compatibility_alias(client):
+    sdk = PayjentClient("http://testserver", api_key="test-bot-key", client=client)
+    bridge = C3POPayjentBridge(sdk, bot_id="bot-1", store=MemoryPendingPremiumRequestStore(), public_base_url="http://testserver")
+    pending, message = bridge.request_pay_sh_data(
+        community_user_id="user-1",
+        summary="legacy C3PO-compatible request",
+        amount_minor=450,
+        service_url="https://api.weather.ai/forecast",
+    )
+    assert pending.community_user_id == "user-1"
+    assert pending.summary == "legacy C3PO-compatible request"
+    assert "your agent can resume" in message

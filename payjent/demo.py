@@ -35,7 +35,7 @@ from .bot_adapter import (
     PendingRequest,
     request_hash_for,
 )
-from .c3po_adapter import C3POPayjentBridge, MemoryPendingPremiumRequestStore
+from .agent_bridge import AgentPayjentBridge, MemoryPendingPremiumRequestStore
 from .config import Settings, get_settings
 from .db import engine, get_session, init_db, make_engine
 from .main import app
@@ -630,32 +630,32 @@ def run_pay_sh_action_with_client(client: Any, *, bot_id: str, bot_key: str, ope
     return {"action": action, "payment": paid, "started": started}
 
 
-def run_c3po_pay_sh_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
-    """Simulate C3PO: community ask -> Payjent prompt -> mock pay -> resume pay.sh envelope -> fulfill."""
+def run_agent_pay_sh_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
+    """Simulate any agent: user ask -> Payjent prompt -> mock pay -> resume pay.sh envelope -> fulfill."""
     bot_client = PayjentClient("http://testserver", api_key=bot_key, client=client)
-    bridge = C3POPayjentBridge(bot_client, bot_id=bot_id, store=MemoryPendingPremiumRequestStore(), public_base_url="http://testserver")
-    community_ask = "C3PO, fetch premium Lisbon weather data from pay.sh."
+    bridge = AgentPayjentBridge(bot_client, bot_id=bot_id, store=MemoryPendingPremiumRequestStore(), public_base_url="http://testserver")
+    agent_ask = "Agent, fetch premium Lisbon weather data from pay.sh."
     pending, prompt = bridge.request_pay_sh_data(
-        community_user_id=DEFAULT_EXTERNAL_USER_ID,
-        summary="C3PO premium pay.sh lookup: Lisbon weather",
+        agent_user_id=DEFAULT_EXTERNAL_USER_ID,
+        request_summary="Agent premium pay.sh lookup: Lisbon weather",
         amount_minor=800,
         cost_breakdown=[{"label": "Payjent gate for downstream pay.sh API call", "amount_minor": 800}],
         service_url="https://api.weather.ai/forecast",
         method="POST",
         body={"city": "Lisbon", "units": "metric"},
-        description="Premium weather data via C3PO pay.sh runtime",
+        description="Premium weather data via external agent pay.sh runtime",
     )
     paid = _raise_for_demo_response(client.post(f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay", headers={"X-Payjent-Bot-Key": operator_key}), "operator mock pay")
-    resumed = bridge.resume_after_payment(action_id=pending.action_id, community_user_id=DEFAULT_EXTERNAL_USER_ID, payment_token=paid["grant"]["id"])
-    fulfilled = bridge.mark_fulfilled(pending.action_id, "fulfilled", {"demo": "c3po-pay-sh", "executed_by": "external C3PO pay.sh runtime"})
-    return {"community_ask": community_ask, "pending": pending, "prompt": prompt, "payment": paid, "resumed": resumed, "fulfilled": fulfilled}
+    resumed = bridge.resume_after_payment(action_id=pending.action_id, agent_user_id=DEFAULT_EXTERNAL_USER_ID, payment_token=paid["grant"]["id"])
+    fulfilled = bridge.mark_fulfilled(pending.action_id, "fulfilled", {"demo": "agent-pay-sh", "executed_by": "external agent pay.sh runtime"})
+    return {"agent_ask": agent_ask, "pending": pending, "prompt": prompt, "payment": paid, "resumed": resumed, "fulfilled": fulfilled}
 
 
-def print_c3po_pay_sh_summary(result: dict[str, Any]) -> None:
+def print_agent_pay_sh_summary(result: dict[str, Any]) -> None:
     envelope = result["resumed"]["execution_envelope"]
-    print("Payjent C3PO pay.sh bridge demo completed.")
-    print(f"COMMUNITY_ASK: {result['community_ask']}")
-    print("C3PO_PAYMENT_PROMPT:")
+    print("Payjent generic agent pay.sh bridge demo completed.")
+    print(f"AGENT_ASK: {result['agent_ask']}")
+    print("AGENT_PAYMENT_PROMPT:")
     print(result["prompt"])
     print(f"mock_payment_token={result['payment']['grant']['id']}")
     print(f"resumed_status={result['resumed']['status']}")
@@ -663,7 +663,7 @@ def print_c3po_pay_sh_summary(result: dict[str, Any]) -> None:
     print(f"resumed_settlement={envelope['settlement']}")
     print(f"resumed_command_preview={envelope['command_preview']}")
     print(f"fulfilled_status={result['fulfilled'].status}")
-    print("dev_note=Payjent gates payment and returns the stored pay.sh envelope; C3PO must execute/settle pay.sh externally.")
+    print("dev_note=Payjent gates payment and returns the stored pay.sh envelope; the integrating agent must execute/settle pay.sh externally.")
 
 
 def print_paid_action_summary(result: dict[str, Any]) -> None:
@@ -815,7 +815,12 @@ def build_parser() -> argparse.ArgumentParser:
     pay_sh_action.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     pay_sh_action.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
-    c3po_pay_sh = sub.add_parser("c3po-pay-sh", help="run a local C3PO/community-agent Payjent + pay.sh prompt/resume demo")
+    agent_pay_sh = sub.add_parser("agent-pay-sh", help="run a local generic-agent Payjent + pay.sh prompt/resume demo")
+    agent_pay_sh.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
+    agent_pay_sh.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    agent_pay_sh.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
+    c3po_pay_sh = sub.add_parser("c3po-pay-sh", help="compatibility alias for agent-pay-sh")
     c3po_pay_sh.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
     c3po_pay_sh.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     c3po_pay_sh.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
@@ -930,14 +935,14 @@ def main(argv: list[str] | None = None) -> int:
                 result = run_pay_sh_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_pay_sh_action_summary(result)
         return 0
-    if args.command == "c3po-pay-sh":
+    if args.command in {"agent-pay-sh", "c3po-pay-sh"}:
         if "PAYJENT_DATABASE_URL" in os.environ:
             init_db()
             credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
             bot_key = args.bot_key or credentials.bot_key
             operator_key = args.operator_key or credentials.operator_key
             with TestClient(app) as client:
-                result = run_c3po_pay_sh_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+                result = run_agent_pay_sh_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         else:
             with _isolated_demo_session() as (client, temp_engine):
                 credentials = None
@@ -946,8 +951,8 @@ def main(argv: list[str] | None = None) -> int:
                         credentials = seed_credentials(session=session, bot_id=args.bot_id)
                 bot_key = args.bot_key or credentials.bot_key
                 operator_key = args.operator_key or credentials.operator_key
-                result = run_c3po_pay_sh_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
-        print_c3po_pay_sh_summary(result)
+                result = run_agent_pay_sh_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        print_agent_pay_sh_summary(result)
         return 0
     if args.command == "discord-aggregator":
         if "PAYJENT_DATABASE_URL" in os.environ:
