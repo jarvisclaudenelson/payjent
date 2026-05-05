@@ -168,3 +168,43 @@ def test_agent_action_complete_records_fulfillment(client, quote_payload, bot_he
     assert data["action_id"] == action["action_id"]
     assert data["status"] == "fulfilled"
     assert data["metadata"]["result"] == "ok"
+
+
+def test_agent_action_status_requires_bot_auth_and_scope(client, engine, quote_payload, bot_headers):
+    from sqlmodel import Session
+    from payjent.auth import create_bot_credential
+    from payjent.config import get_settings
+
+    action = _create_action(client, quote_payload, bot_headers).json()
+    assert client.get(f"/api/v1/agent-actions/{action['action_id']}").status_code in {401, 403}
+    with Session(engine) as session:
+        create_bot_credential(session, "bot-2", "wrong-bot-key", get_settings().signing_secret)
+    wrong = client.get(f"/api/v1/agent-actions/{action['action_id']}", headers={"Authorization": "Bearer wrong-bot-key"})
+    assert wrong.status_code == 403
+
+
+def test_agent_action_status_token_lifecycle(client, quote_payload, bot_headers, operator_headers):
+    action = _create_action(client, quote_payload, bot_headers).json()
+    unpaid = client.get(f"/api/v1/agent-actions/{action['action_id']}", headers=bot_headers).json()
+    assert unpaid["payment_status"] == "checkout_created"
+    assert unpaid["status"] == "awaiting_payment"
+    assert unpaid["payment_token"] is None
+    assert unpaid["payment_token_status"] == "unissued"
+
+    paid = client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers).json()
+    ready = client.get(f"/api/v1/agent-actions/{action['action_id']}", headers=bot_headers).json()
+    assert ready["payment_status"] == "paid"
+    assert ready["status"] == "ready"
+    assert ready["payment_token"] == paid["grant"]["id"]
+    assert ready["payment_token_status"] == "available"
+
+    consumed = client.post(
+        f"/api/v1/agent-actions/{action['action_id']}/consume",
+        json={"payment_token": ready["payment_token"], "presentation": _presentation(quote_payload)},
+        headers=bot_headers,
+    )
+    assert consumed.status_code == 200
+    after = client.get(f"/api/v1/agent-actions/{action['action_id']}", headers=bot_headers).json()
+    assert after["status"] == "consumed"
+    assert after["payment_token"] is None
+    assert after["payment_token_status"] == "consumed"

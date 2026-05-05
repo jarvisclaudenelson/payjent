@@ -87,6 +87,13 @@ class PayjentClient:
         """Create a Payjent-gated pay.sh action; Payjent does not execute paycurl."""
         return self._request("POST", "/api/v1/premium-actions/pay-sh", headers=self._headers(), json=payload)
 
+    def get_agent_action_status(self, action_id: str) -> dict[str, Any]:
+        """Fetch bot-scoped action/payment readiness, including an unconsumed token when paid."""
+        return self._request("GET", f"/api/v1/agent-actions/{action_id}", headers=self._headers())
+
+    def get_agent_action(self, action_id: str) -> dict[str, Any]:
+        return self.get_agent_action_status(action_id)
+
     def consume_agent_action(
         self,
         action_id: str,

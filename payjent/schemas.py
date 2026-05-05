@@ -176,6 +176,21 @@ class AgentActionCreateResponse(BaseModel):
     message: str
 
 
+class AgentActionStatusResponse(BaseModel):
+    action_id: str
+    quote_id: str
+    payment_session_id: str | None = None
+    payment_status: str | None = None
+    quote_status: str
+    status: str
+    request_hash: str
+    external_user_id: str
+    amount_minor: int
+    currency: str
+    payment_token: str | None = None
+    payment_token_status: Literal["unissued", "available", "consumed"] = "unissued"
+
+
 class PayShPremiumActionCreateResponse(AgentActionCreateResponse):
     provider: Literal["pay_sh"] = "pay_sh"
     premium_provider: Literal["pay_sh"] = "pay_sh"

@@ -33,7 +33,7 @@ def test_request_pay_sh_data_returns_payment_prompt_and_stores_pending(client):
     assert pending.command_preview.startswith("paycurl -X POST https://api.weather.ai/forecast")
     assert "Lisbon" in pending.command_preview
     assert "Payment required" in message
-    assert "your agent can resume" in message
+    assert "your agent can poll Payjent" in message
     assert pending.action_id in message
     assert store.get(pending.action_id) == pending
 
@@ -51,18 +51,26 @@ def test_resume_rejects_wrong_user_hash_or_missing_token(client, operator_header
         bridge.resume_after_payment(pending_id=pending.action_id, agent_user_id="user-1", payment_token=paid["grant"]["id"], request_hash="wrong")
 
 
-def test_successful_resume_returns_pay_sh_command_preview_and_mark_fulfilled(client, operator_headers):
+def test_successful_resume_when_paid_polls_token_consumes_and_mark_fulfilled(client, operator_headers):
     bridge, store = _bridge(client)
     pending, _ = _request(bridge)
-    paid = client.post(f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay", headers=operator_headers).json()
 
-    resumed = bridge.resume_after_payment(pending_id=pending.action_id, agent_user_id="user-1", payment_token=paid["grant"]["id"])
+    unpaid = bridge.resume_when_paid(pending_id=pending.action_id, agent_user_id="user-1", timeout_seconds=0)
+    assert unpaid["status"] == "awaiting_payment"
+    assert unpaid["payment_token"] is None
+
+    client.post(f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay", headers=operator_headers)
+    resumed = bridge.resume_when_paid(pending_id=pending.action_id, agent_user_id="user-1", timeout_seconds=0)
 
     envelope = resumed["execution_envelope"]
     assert envelope["provider"] == "pay_sh"
     assert envelope["settlement"] == "external_pay_sh_runtime"
     assert envelope["command_preview"] == pending.command_preview
     assert store.get(pending.action_id).status == "consumed"
+
+    consumed = bridge.check_payment(pending.action_id)
+    assert consumed["payment_token"] is None
+    assert consumed["payment_token_status"] == "consumed"
 
     fulfilled = bridge.mark_fulfilled(pending.action_id, "fulfilled", {"result": "ok"})
     assert fulfilled.status == "fulfilled"
@@ -81,4 +89,4 @@ def test_c3po_adapter_remains_compatibility_alias(client):
     )
     assert pending.community_user_id == "user-1"
     assert pending.summary == "legacy C3PO-compatible request"
-    assert "your agent can resume" in message
+    assert "your agent can poll Payjent" in message

@@ -117,18 +117,20 @@ The default payment prompt text is user-facing and looks like:
 Payment required for premium pay.sh data: Premium pay.sh forecast for Lisbon
 Pay here: https://payjent.example.com/pay/ps_...
 Action: q_...
-After payment, return the payment token so your agent can resume the stored request.
+After payment, your agent can poll Payjent and resume this stored request automatically.
 ```
 
-Resume handler pseudo-code:
+Resume handler pseudo-code (recommended polling/status flow; no community user token paste required):
 
 ```python
-def on_payment_token(user_id: str, pending_id: str, payment_token: str):
-    resumed = bridge.resume_after_payment(
+def on_later_check(user_id: str, pending_id: str):
+    resumed = bridge.resume_when_paid(
         pending_id=pending_id,
         agent_user_id=user_id,
-        payment_token=payment_token,
+        timeout_seconds=0,  # single check; use >0 with poll_interval for short polling
     )
+    if resumed.get("status") == "awaiting_payment":
+        return  # keep waiting, or ask the user to finish checkout
     envelope = resumed["execution_envelope"]
     # Your agent executes this externally in its pay.sh/paycurl runtime; Payjent never runs it.
     result = agent_pay_sh_runtime.execute(envelope)
@@ -136,10 +138,12 @@ def on_payment_token(user_id: str, pending_id: str, payment_token: str):
     post_to_user(user_id, result.text)
 ```
 
+`resume_when_paid` calls the bot-authenticated agent action status endpoint, discovers the unconsumed `payment_token` only after payment, then consumes it with the stored presentation. The manual `resume_after_payment(..., payment_token=...)` path remains for custom integrations. This is polling today; a production webhook/callback convenience can be layered on later.
+
 For a no-network local walkthrough, run:
 
 ```bash
-python -m payjent.demo agent-pay-sh
+python -m payjent.demo agent-pay-sh-poll
 ```
 
 The older `python -m payjent.demo c3po-pay-sh` command remains as a compatibility alias. Caveat: Payjent gates payment and returns a stored pay.sh execution envelope/`command_preview`; pay.sh execution and settlement happen in the integrating agent runtime. This scaffold does not verify live pay.sh settlement or execute `paycurl`.

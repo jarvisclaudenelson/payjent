@@ -67,6 +67,7 @@ from .schemas import (
     AgentActionCreate,
     AgentActionCreateResponse,
     AgentActionExecutionEnvelope,
+    AgentActionStatusResponse,
     FulfillmentCreate,
     FulfillmentRead,
     GrantPresentation,
@@ -648,6 +649,40 @@ def create_pay_sh_premium_action(
     )
     data = action if isinstance(action, dict) else action.model_dump()
     return {**data, "provider": "pay_sh", "premium_provider": "pay_sh", "command_preview": envelope["command_preview"]}
+
+
+@app.get("/api/v1/agent-actions/{action_id}", response_model=AgentActionStatusResponse)
+def get_agent_action_status(action_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    q = session.get(Quote, action_id)
+    if not q:
+        raise HTTPException(404, "agent action not found")
+    _enforce_bot_scope(credential, q.bot_id)
+    payment_session = session.exec(select(PaymentSession).where(PaymentSession.quote_id == q.id).order_by(PaymentSession.created_at.desc())).first()
+    grants = session.exec(select(Grant).where(Grant.quote_id == q.id).order_by(Grant.created_at.desc())).all()
+    available_grant = next((grant for grant in grants if grant.consumed_at is None), None)
+    consumed_grant = next((grant for grant in grants if grant.consumed_at is not None), None)
+    payment_token = available_grant.id if available_grant and payment_session and payment_session.status == "paid" else None
+    token_status = "available" if payment_token else "consumed" if consumed_grant else "unissued"
+    status = "ready" if payment_token else "consumed" if token_status == "consumed" else "awaiting_payment"
+    return {
+        "action_id": q.id,
+        "quote_id": q.id,
+        "payment_session_id": payment_session.id if payment_session else None,
+        "payment_status": payment_session.status if payment_session else None,
+        "quote_status": q.status,
+        "status": status,
+        "request_hash": q.request_hash,
+        "external_user_id": q.external_user_id,
+        "amount_minor": q.amount_minor,
+        "currency": q.currency,
+        "payment_token": payment_token,
+        "payment_token_status": token_status,
+    }
+
+
+@app.get("/api/v1/agent-actions/{action_id}/status", response_model=AgentActionStatusResponse)
+def get_agent_action_status_alias(action_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    return get_agent_action_status(action_id, session=session, credential=credential)
 
 
 @app.post("/api/v1/agent-actions/{action_id}/consume", response_model=AgentActionExecutionEnvelope)

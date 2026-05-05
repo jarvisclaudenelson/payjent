@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -204,8 +205,48 @@ class AgentPayjentBridge:
             f"Payment required for premium pay.sh data: {pending.request_summary}\n"
             f"Pay here: {pending.payment_url}\n"
             f"Action: {pending.action_id}\n"
-            f"After payment, return the payment token so your agent can resume the stored request."
+            f"After payment, your agent can poll Payjent and resume this stored request automatically."
         )
+
+    def check_payment(self, pending_id: str) -> dict[str, Any]:
+        pending = self._require_pending(pending_id)
+        status = self.client.get_agent_action_status(pending.action_id)
+        if status.get("external_user_id") != pending.agent_user_id:
+            raise PermissionError("pending request user mismatch")
+        if status.get("request_hash") != pending.request_hash:
+            raise PermissionError("pending request hash mismatch")
+        pending.status = status.get("status", pending.status)
+        self.store.save(pending)
+        return {"pending": pending, **status}
+
+    def resume_when_paid(
+        self,
+        *,
+        pending_id: str | None = None,
+        action_id: str | None = None,
+        agent_user_id: str | None = None,
+        community_user_id: str | None = None,
+        timeout_seconds: float = 0,
+        poll_interval: float = 2.0,
+    ) -> dict[str, Any]:
+        pending_id = pending_id or action_id
+        agent_user_id = agent_user_id or community_user_id
+        if not pending_id:
+            raise ValueError("pending_id is required")
+        if not agent_user_id:
+            raise ValueError("agent_user_id is required")
+        pending = self._require_pending(pending_id)
+        if agent_user_id != pending.agent_user_id:
+            raise PermissionError("pending request user mismatch")
+        deadline = time.monotonic() + max(timeout_seconds, 0)
+        while True:
+            status = self.check_payment(pending_id)
+            payment_token = status.get("payment_token")
+            if payment_token:
+                return self.resume_after_payment(pending_id=pending_id, agent_user_id=agent_user_id, payment_token=payment_token)
+            if timeout_seconds <= 0 or time.monotonic() >= deadline:
+                return status
+            time.sleep(max(poll_interval, 0.1))
 
     def resume_after_payment(
         self,

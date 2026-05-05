@@ -645,19 +645,25 @@ def run_agent_pay_sh_with_client(client: Any, *, bot_id: str, bot_key: str, oper
         body={"city": "Lisbon", "units": "metric"},
         description="Premium weather data via external agent pay.sh runtime",
     )
+    unpaid_poll = bridge.check_payment(pending.action_id)
     paid = _raise_for_demo_response(client.post(f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay", headers={"X-Payjent-Bot-Key": operator_key}), "operator mock pay")
-    resumed = bridge.resume_after_payment(action_id=pending.action_id, agent_user_id=DEFAULT_EXTERNAL_USER_ID, payment_token=paid["grant"]["id"])
-    fulfilled = bridge.mark_fulfilled(pending.action_id, "fulfilled", {"demo": "agent-pay-sh", "executed_by": "external agent pay.sh runtime"})
-    return {"agent_ask": agent_ask, "pending": pending, "prompt": prompt, "payment": paid, "resumed": resumed, "fulfilled": fulfilled}
+    paid_poll = bridge.check_payment(pending.action_id)
+    resumed = bridge.resume_when_paid(pending_id=pending.action_id, agent_user_id=DEFAULT_EXTERNAL_USER_ID, timeout_seconds=0)
+    fulfilled = bridge.mark_fulfilled(pending.action_id, "fulfilled", {"demo": "agent-pay-sh-poll", "executed_by": "external agent pay.sh runtime"})
+    return {"agent_ask": agent_ask, "pending": pending, "prompt": prompt, "unpaid_poll": unpaid_poll, "paid_poll": paid_poll, "payment": paid, "resumed": resumed, "fulfilled": fulfilled}
 
 
 def print_agent_pay_sh_summary(result: dict[str, Any]) -> None:
     envelope = result["resumed"]["execution_envelope"]
     print("Payjent generic agent pay.sh bridge demo completed.")
+    print("FLOW: community ask -> payment prompt -> unpaid poll -> mock pay -> token discovered by bot-auth poll -> resume_when_paid -> fulfill")
     print(f"AGENT_ASK: {result['agent_ask']}")
     print("AGENT_PAYMENT_PROMPT:")
     print(result["prompt"])
-    print(f"mock_payment_token={result['payment']['grant']['id']}")
+    print(f"unpaid_poll_status={result['unpaid_poll']['status']}")
+    print(f"unpaid_poll_payment_token={result['unpaid_poll']['payment_token']}")
+    print(f"paid_poll_status={result['paid_poll']['status']}")
+    print(f"paid_poll_discovered_token={result['paid_poll']['payment_token']}")
     print(f"resumed_status={result['resumed']['status']}")
     print(f"resumed_provider={envelope['provider']}")
     print(f"resumed_settlement={envelope['settlement']}")
@@ -820,6 +826,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent_pay_sh.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     agent_pay_sh.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
+    agent_pay_sh_poll = sub.add_parser("agent-pay-sh-poll", help="run generic-agent Payjent + pay.sh demo using bot-auth payment polling")
+    agent_pay_sh_poll.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
+    agent_pay_sh_poll.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    agent_pay_sh_poll.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
     c3po_pay_sh = sub.add_parser("c3po-pay-sh", help="compatibility alias for agent-pay-sh")
     c3po_pay_sh.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
     c3po_pay_sh.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
@@ -935,7 +946,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = run_pay_sh_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_pay_sh_action_summary(result)
         return 0
-    if args.command in {"agent-pay-sh", "c3po-pay-sh"}:
+    if args.command in {"agent-pay-sh", "agent-pay-sh-poll", "c3po-pay-sh"}:
         if "PAYJENT_DATABASE_URL" in os.environ:
             init_db()
             credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
