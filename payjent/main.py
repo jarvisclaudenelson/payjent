@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import hmac
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
@@ -74,6 +75,8 @@ from .schemas import (
     FulfillmentRead,
     GrantPresentation,
     GrantVerifyResponse,
+    HostedSmokeBootstrapRequest,
+    HostedSmokeBootstrapResponse,
     LinkCredentialApproval,
     LinkCredentialRequest,
     LinkPollResponse,
@@ -278,6 +281,67 @@ def quote_to_read(q: Quote) -> QuoteRead:
 
 def session_to_read(s: PaymentSession) -> PaymentSessionRead:
     return PaymentSessionRead.model_validate(s, from_attributes=True)
+
+
+def _extract_bootstrap_token(authorization: str | None, x_payjent_bootstrap_token: str | None) -> str | None:
+    if x_payjent_bootstrap_token:
+        return x_payjent_bootstrap_token
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            return token
+    return None
+
+
+def require_bootstrap_token(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_payjent_bootstrap_token: str | None = Header(default=None, alias="X-Payjent-Bootstrap-Token"),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    expected = settings.bootstrap_token
+    if not expected:
+        raise HTTPException(status_code=404, detail="bootstrap disabled")
+    supplied = _extract_bootstrap_token(authorization, x_payjent_bootstrap_token)
+    if not supplied or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="invalid bootstrap token")
+
+
+@app.post("/api/v1/bootstrap/hosted-smoke", response_model=HostedSmokeBootstrapResponse)
+def hosted_smoke_bootstrap(
+    payload: HostedSmokeBootstrapRequest,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    _authorized: None = Depends(require_bootstrap_token),
+):
+    bot_id = payload.bot_id.strip()
+    operator_id = payload.operator_id.strip()
+    if not bot_id or not operator_id:
+        raise HTTPException(status_code=422, detail="bot_id and operator_id are required")
+    callback_url = _validate_callback_url(payload.callback_url, settings)
+    agent = session.exec(select(AgentProfile).where(AgentProfile.bot_id == bot_id)).first()
+    if not agent:
+        agent = AgentProfile(
+            id=f"agent_{uuid4().hex}",
+            bot_id=bot_id,
+            name=payload.agent_name,
+            platform=payload.platform,
+            callback_url=callback_url,
+            default_currency=payload.default_currency.upper(),
+        )
+        session.add(agent)
+        session.commit()
+        session.refresh(agent)
+    bot_key = generate_api_key()
+    operator_key = generate_api_key()
+    create_bot_credential(session, bot_id, bot_key, settings.signing_secret, role="bot")
+    create_bot_credential(session, operator_id, operator_key, settings.signing_secret, role="operator")
+    return HostedSmokeBootstrapResponse(
+        bot_id=bot_id,
+        operator_id=operator_id,
+        agent=_agent_to_read(agent, session),
+        bot_api_key=bot_key,
+        operator_api_key=operator_key,
+    )
 
 
 @app.post("/api/v1/agents/register", response_model=AgentRegisterResponse)

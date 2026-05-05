@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     workos_redirect_uri: str | None = None
     grant_ttl_seconds: int = 900
     allow_unsafe_db_reset: bool = False
+    bootstrap_token: str | None = None
 
     @property
     def is_production(self) -> bool:

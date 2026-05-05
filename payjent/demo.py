@@ -89,6 +89,40 @@ def print_seed_exports(credentials: DemoCredentials) -> None:
     print(f"export PAYJENT_OPERATOR_KEY={credentials.operator_key!r}")
 
 
+def hosted_smoke_bootstrap_with_client(
+    client: Any,
+    *,
+    bootstrap_token: str,
+    bot_id: str,
+    operator_id: str,
+    callback_url: str | None = None,
+) -> DemoCredentials:
+    payload = {"bot_id": bot_id, "operator_id": operator_id}
+    if callback_url:
+        payload["callback_url"] = callback_url
+    response = client.post(
+        "/api/v1/bootstrap/hosted-smoke",
+        json=payload,
+        headers={"X-Payjent-Bootstrap-Token": bootstrap_token},
+    )
+    data = _raise_for_demo_response(response, "hosted smoke bootstrap")
+    return DemoCredentials(
+        bot_id=data["bot_id"],
+        operator_id=data["operator_id"],
+        bot_key=data["bot_api_key"],
+        operator_key=data["operator_api_key"],
+    )
+
+
+def print_hosted_smoke_bootstrap_exports(credentials: DemoCredentials, *, base_url: str) -> None:
+    print("Bootstrapped Payjent hosted smoke credentials. Plaintext keys are shown once; store them securely.", file=sys.stderr)
+    print("# Existing agents are reused; new credentials are minted on each bootstrap because Payjent stores only hashes.")
+    print(f"export PAYJENT_BASE_URL={base_url.rstrip('/')!r}")
+    print(f"export PAYJENT_BOT_ID={credentials.bot_id!r}")
+    print(f"export PAYJENT_BOT_KEY={credentials.bot_key!r}")
+    print(f"export PAYJENT_OPERATOR_KEY={credentials.operator_key!r}")
+
+
 def _demo_quote_payload(bot_id: str) -> dict[str, Any]:
     return {
         "bot_id": bot_id,
@@ -1059,6 +1093,16 @@ def build_parser() -> argparse.ArgumentParser:
     hosted_smoke.add_argument("--callback-url", default=os.getenv("PAYJENT_CALLBACK_URL"), help="optional public HTTPS agent callback receiver for hosted webhook delivery")
     hosted_smoke.add_argument("--in-process", action="store_true", help="safe local test fallback using TestClient and in-process callback capture")
 
+    hosted_bootstrap = sub.add_parser("hosted-smoke-bootstrap", help="bootstrap staging/test credentials for hosted-agent-webhook-smoke")
+    hosted_bootstrap.add_argument("--base-url", default=os.getenv("PAYJENT_BASE_URL", "https://payjent.vercel.app"))
+    hosted_bootstrap.add_argument("--bootstrap-token", default=os.getenv("PAYJENT_BOOTSTRAP_TOKEN"))
+    hosted_bootstrap.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
+    hosted_bootstrap.add_argument("--operator-id", default=os.getenv("PAYJENT_OPERATOR_ID", DEFAULT_OPERATOR_ID))
+    hosted_bootstrap.add_argument("--callback-url", default=os.getenv("PAYJENT_CALLBACK_URL"))
+    hosted_bootstrap.add_argument("--in-process", action="store_true", help="test helper: call the app in-process with PAYJENT_BOOTSTRAP_TOKEN configured")
+    hosted_bootstrap.add_argument("--run-smoke", action="store_true", help="immediately run hosted-agent-webhook-smoke with the returned keys without printing them")
+    hosted_bootstrap.add_argument("--print-exports", action="store_true", help="print shell exports containing one-time plaintext keys; default unless --run-smoke is used")
+
     c3po_pay_sh = sub.add_parser("c3po-pay-sh", help="compatibility alias for agent-pay-sh")
     c3po_pay_sh.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
     c3po_pay_sh.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
@@ -1244,6 +1288,61 @@ def main(argv: list[str] | None = None) -> int:
                     in_process_callback=False,
                 )
         print_hosted_agent_webhook_smoke_summary(result)
+        return 0
+    if args.command == "hosted-smoke-bootstrap":
+        if not args.bootstrap_token:
+            raise SystemExit("PAYJENT_BOOTSTRAP_TOKEN is required for hosted-smoke-bootstrap.")
+        base_url = args.base_url.rstrip("/")
+        if args.in_process or base_url == "http://testserver":
+            with _isolated_demo_session() as (client, _temp_engine):
+                previous = app.dependency_overrides.get(get_settings)
+                app.dependency_overrides[get_settings] = lambda: Settings(bootstrap_token=args.bootstrap_token)
+                try:
+                    credentials = hosted_smoke_bootstrap_with_client(
+                        client,
+                        bootstrap_token=args.bootstrap_token,
+                        bot_id=args.bot_id,
+                        operator_id=args.operator_id,
+                        callback_url=args.callback_url,
+                    )
+                finally:
+                    if previous is None:
+                        app.dependency_overrides.pop(get_settings, None)
+                    else:
+                        app.dependency_overrides[get_settings] = previous
+                if args.run_smoke:
+                    result = run_hosted_agent_webhook_smoke_with_client(
+                        client,
+                        base_url="http://testserver",
+                        bot_id=credentials.bot_id,
+                        bot_key=credentials.bot_key,
+                        operator_key=credentials.operator_key,
+                        callback_url=args.callback_url,
+                        in_process_callback=True,
+                    )
+        else:
+            with httpx.Client(base_url=base_url, timeout=20.0) as client:
+                credentials = hosted_smoke_bootstrap_with_client(
+                    client,
+                    bootstrap_token=args.bootstrap_token,
+                    bot_id=args.bot_id,
+                    operator_id=args.operator_id,
+                    callback_url=args.callback_url,
+                )
+                if args.run_smoke:
+                    result = run_hosted_agent_webhook_smoke_with_client(
+                        client,
+                        base_url=base_url,
+                        bot_id=credentials.bot_id,
+                        bot_key=credentials.bot_key,
+                        operator_key=credentials.operator_key,
+                        callback_url=args.callback_url,
+                        in_process_callback=False,
+                    )
+        if args.run_smoke:
+            print_hosted_agent_webhook_smoke_summary(result)
+        if args.print_exports or not args.run_smoke:
+            print_hosted_smoke_bootstrap_exports(credentials, base_url=base_url)
         return 0
     if args.command == "discord-aggregator":
         if "PAYJENT_DATABASE_URL" in os.environ:

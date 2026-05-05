@@ -177,17 +177,21 @@ Hosted/base-URL smoke against a running Payjent deployment:
 
 ```bash
 export PAYJENT_BASE_URL="https://payjent.vercel.app"   # or your staging Payjent URL
-export PAYJENT_BOT_ID="agent_<your_agent_id>"
-export PAYJENT_BOT_KEY="payjent_<redacted_bot_key>"
-export PAYJENT_OPERATOR_KEY="payjent_<redacted_operator_key>"  # test/staging operator only
+export PAYJENT_BOOTSTRAP_TOKEN="$PAYJENT_OPERATOR_PROVIDED_VALUE"
+export PAYJENT_BOT_ID="agent-smoke-1"
 
 # Optional: public HTTPS callback receiver that records/verifies the signed webhook.
 export PAYJENT_CALLBACK_URL="https://your-agent.example.com/payjent/callback"
 
+# Authenticated bootstrap; prints one-time plaintext shell exports. Store them securely.
+python -m payjent.demo hosted-smoke-bootstrap
+
 python -m payjent.demo hosted-agent-webhook-smoke
-# or explicitly:
-python -m payjent.demo hosted-agent-webhook-smoke --base-url "$PAYJENT_BASE_URL" --callback-url "$PAYJENT_CALLBACK_URL"
+# or bootstrap and immediately run without printing raw keys:
+python -m payjent.demo hosted-smoke-bootstrap --run-smoke
 ```
+
+The hosted bootstrap endpoint is disabled unless the Payjent server has `PAYJENT_BOOTSTRAP_TOKEN` configured. It accepts the `X-Payjent-Bootstrap-Token` header or a Bearer authorization value, compares in constant time, reuses an existing agent profile for the requested `bot_id`, and mints fresh bot/operator keys every call because only hashes are stored.
 
 The polling smoke proves: create premium pay.sh action, generate payment link/message, unpaid poll with no token, local/test mock payment, bot-auth poll discovers readiness, resume request, inspect the pay.sh command preview, and mark fulfilled. Output redacts any grant/payment token as `grant_...`.
 

@@ -67,6 +67,25 @@ class AgentRegisterResponse(BaseModel):
     key_warning: str = "Store bot_api_key now; Payjent only stores a hash and will not show it again."
 
 
+class HostedSmokeBootstrapRequest(BaseModel):
+    bot_id: str = Field(min_length=1)
+    operator_id: str = Field(default="operator-smoke", min_length=1)
+    agent_name: str = Field(default="Payjent hosted smoke agent", min_length=1)
+    platform: str = Field(default="generic-agent", min_length=1)
+    callback_url: str | None = None
+    default_currency: str = Field(default="USD", min_length=3, max_length=3)
+
+
+class HostedSmokeBootstrapResponse(BaseModel):
+    bot_id: str
+    operator_id: str
+    agent: AgentRead
+    bot_api_key: str
+    operator_api_key: str
+    behavior: str = "Existing agent profiles are reused, but new bot/operator credentials are minted every call because Payjent stores only hashes and cannot recover prior plaintext keys."
+    key_warning: str = "Plaintext keys are returned once from this authenticated bootstrap action; store them securely. Payjent stores only hashes."
+
+
 class StripeConnectStartResponse(BaseModel):
     mode: str
     account_id: str
