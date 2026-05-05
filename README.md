@@ -13,11 +13,13 @@ If you own an agent and want to gate a premium action, start here:
 ```bash
 cp .env.agent.example .env.agent
 python -m payjent.demo agent-owner-quickstart
+python -m payjent.demo agent-webhook-resume
 # after `pip install -e .`, the console script works too:
 payjent agent-owner-quickstart
+payjent agent-webhook-resume
 ```
 
-Then follow [`docs/agent-owner-quickstart.md`](docs/agent-owner-quickstart.md). The quickstart is generic for any agent owner: your agent creates a Payjent-gated pay.sh action with `AgentPayjentBridge` + `PayjentClient`, sends the user a public-safe payment message, polls Payjent with bot auth, resumes the stored envelope after payment, executes/settles pay.sh externally in your runtime, and calls `mark_fulfilled`. Public users never paste grant ids or payment tokens in the default flow.
+Then follow [`docs/agent-owner-quickstart.md`](docs/agent-owner-quickstart.md). The quickstart is generic for any agent owner: your agent creates a Payjent-gated pay.sh action with `AgentPayjentBridge` + `PayjentClient`, sends the user a public-safe payment message, polls Payjent with bot auth or receives a signed callback webhook, resumes the stored envelope after payment, executes/settles pay.sh externally in your runtime, and calls `mark_fulfilled`. Public users never paste grant ids or payment tokens in the default flow, and callback payloads do not include grant/payment tokens.
 
 ## Local setup
 

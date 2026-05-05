@@ -108,12 +108,67 @@ Security invariants:
 - The resumed work uses Payjent's stored envelope, not fresh post-payment user text.
 - Payjent does not claim live pay.sh settlement; your agent's pay.sh runtime handles execution/settlement externally.
 
-## 5. Run the owner smoke
+## 5. Polling vs webhook resume
+
+Polling is the safest default: your agent calls `check_payment` / `resume_when_paid` with bot auth until Payjent reports readiness.
+
+For production runtimes that can receive HTTPS callbacks, pass a `callback_url` when creating the action:
+
+```python
+pending, payment_message = bridge.request_pay_sh_data(
+    agent_user_id=user_id,
+    request_summary=f"Premium pay.sh forecast for {city}",
+    amount_minor=800,
+    cost_breakdown=[{"label": "Premium pay.sh data", "amount_minor": 800}],
+    service_url="https://api.weather.ai/forecast",
+    method="POST",
+    body={"city": city, "units": "metric"},
+    callback_url="https://your-agent.example.com/payjent/callback",
+)
+```
+
+When payment becomes ready, Payjent sends a signed webhook with:
+
+- `X-Payjent-Timestamp`
+- `X-Payjent-Signature`
+
+The payload identifies the paid action and payment session but intentionally does **not** include a grant id or `payment_token`. Your callback handler verifies the signature, then calls `resume_when_paid` with bot auth:
+
+```python
+from payjent.sdk import verify_agent_action_webhook
+
+def payjent_callback(headers: dict[str, str], payload: dict):
+    ok = verify_agent_action_webhook(
+        payload,
+        headers["X-Payjent-Timestamp"],
+        headers["X-Payjent-Signature"],
+        webhook_secret=os.environ["PAYJENT_WEBHOOK_SECRET"],
+    )
+    if not ok:
+        raise PermissionError("invalid Payjent webhook signature")
+
+    resumed = bridge.resume_when_paid(
+        pending_id=payload["action_id"],
+        agent_user_id=payload["external_user_id"],
+        timeout_seconds=0,
+    )
+    pay_sh_envelope = resumed["execution_envelope"]
+    result = agent_pay_sh_runtime.execute(pay_sh_envelope)
+    bridge.mark_fulfilled(payload["action_id"], "fulfilled", {"result_id": result.id})
+```
+
+Use a dedicated webhook secret in production if configured; local demos use Payjent's development signing secret so the flow works without extra credentials.
+
+## 6. Run the owner smokes
 
 ```bash
 python -m payjent.demo agent-owner-quickstart
+python -m payjent.demo agent-webhook-resume
 # or, after installing the package:
 payjent agent-owner-quickstart
+payjent agent-webhook-resume
 ```
 
-The smoke proves: create premium pay.sh action, generate payment link/message, unpaid poll with no token, local/test mock payment, bot-auth poll discovers readiness, resume request, inspect the pay.sh command preview, and mark fulfilled. Output redacts any grant/payment token as `grant_...`.
+The polling smoke proves: create premium pay.sh action, generate payment link/message, unpaid poll with no token, local/test mock payment, bot-auth poll discovers readiness, resume request, inspect the pay.sh command preview, and mark fulfilled. Output redacts any grant/payment token as `grant_...`.
+
+The webhook smoke proves: register `callback_url`, receive a signed callback after local/test payment, verify the signature, confirm the callback payload contains no grant/payment token, then resume with bot auth and mark fulfilled.

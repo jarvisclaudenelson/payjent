@@ -4,6 +4,8 @@ from typing import Any
 
 import httpx
 
+from .signing import verify_webhook_signature
+
 
 class PayjentClient:
     """Small synchronous helper for bot integrations."""
@@ -65,6 +67,7 @@ class PayjentClient:
         currency: str,
         cost_breakdown: list[dict[str, Any]],
         execution_envelope: dict[str, Any],
+        callback_url: str | None = None,
     ) -> dict[str, Any]:
         """Create a Payjent-gated agent action and checkout prompt."""
         return self._request(
@@ -80,6 +83,7 @@ class PayjentClient:
                 "currency": currency,
                 "cost_breakdown": cost_breakdown,
                 "execution_envelope": execution_envelope,
+                "callback_url": callback_url,
             },
         )
 
@@ -151,6 +155,11 @@ class PayjentClient:
             headers=self._headers(),
             json={"status": status, "metadata": metadata or {}},
         )
+
+
+def verify_agent_action_webhook(payload: dict[str, Any], timestamp: str, signature: str, secret: str, tolerance_seconds: int = 300) -> bool:
+    """Verify Payjent outbound webhook HMAC headers for agent runtimes."""
+    return verify_webhook_signature(payload, timestamp, signature, secret, tolerance_seconds=tolerance_seconds)
 
 
 def create_quote(client: PayjentClient, **kwargs: Any) -> dict[str, Any]:

@@ -18,6 +18,7 @@ class Quote(SQLModel, table=True):
     currency: str
     cost_breakdown: list[dict[str, Any]] = Field(sa_column=Column(JSON))
     execution_envelope: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    callback_url: str | None = Field(default=None)
     quote_hash: str
     status: str = "quoted"
     created_at: datetime = Field(default_factory=now_utc)
@@ -126,4 +127,18 @@ class FulfillmentEvent(SQLModel, table=True):
     quote_id: str = Field(index=True)
     status: str
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class WebhookDeliveryAttempt(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    quote_id: str = Field(index=True)
+    action_id: str = Field(index=True)
+    payment_session_id: str = Field(index=True)
+    callback_url: str
+    event_type: str = Field(default="agent_action.ready", index=True)
+    status: str = Field(index=True)
+    http_status: int | None = None
+    error: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=now_utc)

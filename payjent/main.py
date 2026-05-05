@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
@@ -40,6 +41,7 @@ from .models import (
     Quote,
     RailConnection,
     SpendLedgerEntry,
+    WebhookDeliveryAttempt,
 )
 from .money import quote_hash, validate_breakdown
 from .providers.base import issue_receipt_and_grant
@@ -88,7 +90,7 @@ from .schemas import (
     StripeConnectStartResponse,
     X402ConfigureRequest,
 )
-from .signing import verify_signature
+from .signing import PAYJENT_SIGNATURE_HEADER, PAYJENT_TIMESTAMP_HEADER, sign_webhook_payload, verify_signature
 
 
 @asynccontextmanager
@@ -135,6 +137,19 @@ def _is_operator(credential: BotCredential) -> bool:
 def _enforce_bot_scope(credential: BotCredential, bot_id: str) -> None:
     if not _is_operator(credential) and credential.bot_id != bot_id:
         raise HTTPException(status_code=403, detail="credential not authorized for bot_id")
+
+
+def _validate_callback_url(callback_url: str | None, settings: Settings) -> str | None:
+    if not callback_url:
+        return None
+    parsed = urlparse(callback_url)
+    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+        raise HTTPException(status_code=422, detail="callback_url must be an absolute http(s) URL")
+    if parsed.scheme == "http":
+        allowed_local = parsed.hostname in {"testserver", "127.0.0.1", "localhost"}
+        if settings.is_production or not allowed_local:
+            raise HTTPException(status_code=422, detail="callback_url must use https outside local/test")
+    return callback_url
 
 
 @app.get("/pay/{payment_session_id}", response_class=HTMLResponse)
@@ -501,7 +516,7 @@ def _enforce_stripe_checkout_guardrails(settings: Settings) -> None:
 
 
 @app.post("/api/v1/quotes", response_model=QuoteRead)
-def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
     _enforce_bot_scope(credential, payload.bot_id)
     try:
         validate_breakdown(payload.amount_minor, payload.cost_breakdown)
@@ -522,6 +537,7 @@ def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), 
         "currency": payload.currency.upper(),
         "cost_breakdown": [i.model_dump() for i in payload.cost_breakdown],
         "execution_envelope": payload.execution_envelope,
+        "callback_url": _validate_callback_url(getattr(payload, "callback_url", None), settings),
     }
     q = Quote(id=f"quote_{uuid4().hex}", quote_hash=quote_hash(canonical), **canonical)
     session.add(q); session.commit(); session.refresh(q)
@@ -600,7 +616,7 @@ def create_agent_action(
     settings: Settings = Depends(get_settings),
     credential: BotCredential = Depends(require_bot_credential),
 ):
-    q = create_quote(payload, session=session, credential=credential)
+    q = create_quote(payload, session=session, settings=settings, credential=credential)
     stored_quote = session.get(Quote, q.id)
     if not stored_quote:
         raise HTTPException(500, "agent action quote was not persisted")
@@ -638,6 +654,7 @@ def create_pay_sh_premium_action(
         currency=payload.currency,
         cost_breakdown=payload.cost_breakdown,
         execution_envelope=envelope,
+        callback_url=payload.callback_url,
     )
     action = create_agent_action(
         action_payload,
@@ -727,6 +744,43 @@ def get_payment_session(session_id: str, session: Session = Depends(get_session)
     return session_to_read(ps)
 
 
+def _deliver_agent_action_callback(session: Session, q: Quote, ps: PaymentSession, settings: Settings, provider: str) -> WebhookDeliveryAttempt | None:
+    if not q.callback_url:
+        return None
+    payload = {
+        "event_type": "agent_action.ready",
+        "action_id": q.id,
+        "quote_id": q.id,
+        "payment_session_id": ps.id,
+        "bot_id": q.bot_id,
+        "external_user_id": q.external_user_id,
+        "status": "ready",
+        "payment_status": ps.status,
+        "provider": provider,
+        "provider_session_id": ps.provider_session_id,
+        "amount_minor": q.amount_minor,
+        "currency": q.currency,
+        "request_hash": q.request_hash,
+    }
+    timestamp, signature = sign_webhook_payload(payload, settings.signing_secret)
+    attempt = WebhookDeliveryAttempt(
+        id=f"wh_{uuid4().hex}", quote_id=q.id, action_id=q.id, payment_session_id=ps.id,
+        callback_url=q.callback_url, status="pending", payload=payload,
+    )
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.post(q.callback_url, json=payload, headers={PAYJENT_TIMESTAMP_HEADER: timestamp, PAYJENT_SIGNATURE_HEADER: signature})
+        attempt.http_status = response.status_code
+        attempt.status = "success" if 200 <= response.status_code < 300 else "failed"
+        if attempt.status == "failed":
+            attempt.error = response.text[:500]
+    except Exception as exc:
+        attempt.status = "failed"
+        attempt.error = str(exc)[:500]
+    session.add(attempt); session.commit(); session.refresh(attempt)
+    return attempt
+
+
 def _issued_response(ps: PaymentSession, receipt, grant):
     return {"payment_session": session_to_read(ps), "receipt": {"payload": receipt.payload, "signature": receipt.signature}, "grant": {"id": grant.id, "payload": grant.payload, "signature": grant.signature}}
 
@@ -735,9 +789,11 @@ def _issue_paid_session(session: Session, ps: PaymentSession, settings: Settings
     q = session.get(Quote, ps.quote_id)
     if not q: raise HTTPException(404, "quote not found")
     try:
-        return issue_receipt_and_grant(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds, provider=provider)
+        receipt, grant = issue_receipt_and_grant(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds, provider=provider)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    _deliver_agent_action_callback(session, q, ps, settings, provider)
+    return receipt, grant
 
 
 @app.post("/api/v1/payment-sessions/{session_id}/mock-pay", response_model=MockPayResponse)
@@ -750,6 +806,7 @@ def mock_pay(session_id: str, session: Session = Depends(get_session), settings:
     if not q: raise HTTPException(404, "quote not found")
     if ps.status == "paid": raise HTTPException(409, "payment session already paid")
     receipt, grant = complete_mock_payment(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds)
+    _deliver_agent_action_callback(session, q, ps, settings, "mock")
     return _issued_response(ps, receipt, grant)
 
 

@@ -40,7 +40,7 @@ from .config import Settings, get_settings
 from .db import engine, get_session, init_db, make_engine
 from .main import app
 from .providers.link import LinkApproval
-from .sdk import PayjentClient
+from .sdk import PayjentClient, verify_agent_action_webhook
 
 DEFAULT_BOT_ID = "discord-bot-1"
 DEFAULT_OPERATOR_ID = "operator-1"
@@ -653,6 +653,50 @@ def run_agent_pay_sh_with_client(client: Any, *, bot_id: str, bot_key: str, oper
     return {"agent_ask": agent_ask, "pending": pending, "prompt": prompt, "unpaid_poll": unpaid_poll, "paid_poll": paid_poll, "payment": paid, "resumed": resumed, "fulfilled": fulfilled}
 
 
+def run_agent_webhook_resume_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
+    """Local callback resume demo: signed webhook -> verify -> resume_when_paid."""
+    import payjent.main as main_module
+
+    received: list[dict[str, Any]] = []
+    bot_client = PayjentClient("http://testserver", api_key=bot_key, client=client)
+    bridge = AgentPayjentBridge(bot_client, bot_id=bot_id, store=MemoryPendingPremiumRequestStore(), public_base_url="http://testserver")
+
+    class DemoResponse:
+        status_code = 204
+        text = ""
+
+    class DemoWebhookClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None: pass
+        def __enter__(self): return self
+        def __exit__(self, *args: Any) -> None: pass
+        def post(self, url: str, json: dict[str, Any], headers: dict[str, str]):
+            ok = verify_agent_action_webhook(json, headers["X-Payjent-Timestamp"], headers["X-Payjent-Signature"], get_settings().signing_secret)
+            assert ok, "demo webhook signature verification failed"
+            assert "payment_token" not in json and "grant" not in json
+            received.append({"url": url, "payload": json, "headers": headers})
+            return DemoResponse()
+
+    original_client = main_module.httpx.Client
+    main_module.httpx.Client = DemoWebhookClient
+    try:
+        pending, prompt = bridge.request_pay_sh_data(
+            agent_user_id=DEFAULT_EXTERNAL_USER_ID,
+            request_summary="Agent webhook resume demo: premium weather",
+            amount_minor=800,
+            cost_breakdown=[{"label": "Payjent gate", "amount_minor": 800}],
+            service_url="https://api.weather.ai/forecast",
+            method="POST",
+            body={"city": "Lisbon"},
+            callback_url="http://testserver/agent/callback",
+        )
+        paid = _raise_for_demo_response(client.post(f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay", headers={"X-Payjent-Bot-Key": operator_key}), "operator mock pay")
+    finally:
+        main_module.httpx.Client = original_client
+    resumed = bridge.resume_when_paid(pending_id=pending.action_id, agent_user_id=DEFAULT_EXTERNAL_USER_ID, timeout_seconds=0)
+    fulfilled = bridge.mark_fulfilled(pending.action_id, "fulfilled", {"demo": "agent-webhook-resume", "pay_sh_executed_externally": True})
+    return {"pending": pending, "prompt": prompt, "payment": paid, "callback": received[0], "resumed": resumed, "fulfilled": fulfilled}
+
+
 def _redact_grant_token(token: Any) -> str | None:
     if token is None:
         return None
@@ -686,6 +730,28 @@ def print_agent_pay_sh_summary(result: dict[str, Any], *, quickstart: bool = Fal
     print(f"fulfilled_status={result['fulfilled'].status}")
     print("security_note=Public users never paste grant ids/payment tokens in the default flow; the agent polls Payjent with bot auth.")
     print("dev_note=Payjent gates payment and returns the stored pay.sh envelope; the integrating agent must execute/settle pay.sh externally.")
+
+
+def print_agent_webhook_resume_summary(result: dict[str, Any]) -> None:
+    envelope = result["resumed"]["execution_envelope"]
+    payload = result["callback"]["payload"]
+    print("Payjent agent webhook resume smoke completed.")
+    print("FLOW: create premium pay.sh action with callback_url -> local mock pay -> signed webhook delivered -> agent verifies signature -> resume_when_paid -> external pay.sh runtime placeholder -> mark_fulfilled")
+    print(f"callback_url={result['callback']['url']}")
+    print(f"callback_event={payload['event_type']}")
+    print(f"callback_status={payload['status']}")
+    print(f"callback_action_id={payload['action_id']}")
+    print(f"callback_contains_payment_token={'payment_token' in payload}")
+    print(f"callback_contains_grant={'grant' in payload}")
+    print("callback_signature_verified=True")
+    print(f"resumed_status={result['resumed']['status']}")
+    print(f"resumed_provider={envelope['provider']}")
+    print(f"resumed_settlement={envelope['settlement']}")
+    print(f"resumed_command_preview={envelope['command_preview']}")
+    print("external_pay_sh_execution=integrating_agent_runtime")
+    print(f"fulfilled_status={result['fulfilled'].status}")
+    print("security_note=Webhook payloads do not include grant ids/payment tokens; the agent still uses bot-auth resume_when_paid to consume payment readiness.")
+    print("dev_note=Payjent notifies the agent runtime; the integrating agent still executes/settles pay.sh externally.")
 
 
 def print_paid_action_summary(result: dict[str, Any]) -> None:
@@ -852,6 +918,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent_owner_quickstart.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     agent_owner_quickstart.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
+    agent_webhook_resume = sub.add_parser("agent-webhook-resume", help="run generic-agent signed webhook resume smoke")
+    agent_webhook_resume.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
+    agent_webhook_resume.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    agent_webhook_resume.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
     c3po_pay_sh = sub.add_parser("c3po-pay-sh", help="compatibility alias for agent-pay-sh")
     c3po_pay_sh.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
     c3po_pay_sh.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
@@ -985,6 +1056,25 @@ def main(argv: list[str] | None = None) -> int:
                 operator_key = args.operator_key or credentials.operator_key
                 result = run_agent_pay_sh_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_agent_pay_sh_summary(result, quickstart=args.command == "agent-owner-quickstart")
+        return 0
+    if args.command == "agent-webhook-resume":
+        if "PAYJENT_DATABASE_URL" in os.environ:
+            init_db()
+            credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
+            bot_key = args.bot_key or credentials.bot_key
+            operator_key = args.operator_key or credentials.operator_key
+            with TestClient(app) as client:
+                result = run_agent_webhook_resume_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        else:
+            with _isolated_demo_session() as (client, temp_engine):
+                credentials = None
+                if not args.bot_key or not args.operator_key:
+                    with Session(temp_engine) as session:
+                        credentials = seed_credentials(session=session, bot_id=args.bot_id)
+                bot_key = args.bot_key or credentials.bot_key
+                operator_key = args.operator_key or credentials.operator_key
+                result = run_agent_webhook_resume_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        print_agent_webhook_resume_summary(result)
         return 0
     if args.command == "discord-aggregator":
         if "PAYJENT_DATABASE_URL" in os.environ:

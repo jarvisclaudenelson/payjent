@@ -319,6 +319,34 @@ def test_demo_agent_owner_quickstart_cli_returns_success_and_redacts_tokens(tmp_
     assert not re.search(r"grant_[A-Za-z0-9]{8,}", completed.stdout)
 
 
+def test_demo_agent_webhook_resume_cli_returns_success_and_redacts_tokens(tmp_path):
+    import os
+    import re
+    import subprocess
+    import sys
+
+    db_url = f"sqlite:///{tmp_path / 'agent-webhook-resume.db'}"
+    env = {**os.environ, "PAYJENT_DATABASE_URL": db_url, "PYTHONPATH": os.getcwd()}
+    completed = subprocess.run(
+        [sys.executable, "-m", "payjent.demo", "agent-webhook-resume"],
+        cwd=os.getcwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Payjent agent webhook resume smoke completed." in completed.stdout
+    assert "signed webhook delivered" in completed.stdout
+    assert "callback_signature_verified=True" in completed.stdout
+    assert "callback_contains_payment_token=False" in completed.stdout
+    assert "callback_contains_grant=False" in completed.stdout
+    assert "resumed_provider=pay_sh" in completed.stdout
+    assert "fulfilled_status=fulfilled" in completed.stdout
+    assert "Webhook payloads do not include grant ids/payment tokens" in completed.stdout
+    assert not re.search(r"grant_[A-Za-z0-9]{8,}", completed.stdout)
+
+
 def test_app_lifespan_has_no_fastapi_on_event_deprecation_warning(engine):
     def override_session():
         with Session(engine) as session:

@@ -17,6 +17,7 @@ class QuoteCreate(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
     cost_breakdown: list[CostItem]
     execution_envelope: dict[str, Any] = Field(default_factory=dict)
+    callback_url: str | None = None
 
 
 class QuoteRead(BaseModel):
@@ -153,6 +154,7 @@ class PayShPremiumActionCreate(BaseModel):
     body: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     description: str | None = None
+    callback_url: str | None = None
 
 
 class PaymentPrompt(BaseModel):

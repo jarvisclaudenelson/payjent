@@ -148,6 +148,7 @@ class AgentPayjentBridge:
         body: Any = None,
         headers: dict[str, str] | None = None,
         description: str | None = None,
+        callback_url: str | None = None,
         request_hash: str | None = None,
         community_user_id: str | None = None,
         summary: str | None = None,
@@ -178,6 +179,7 @@ class AgentPayjentBridge:
             "body": body,
             "headers": headers,
             "description": description,
+            "callback_url": callback_url,
             **extra,
         }
         action = self.client.create_pay_sh_premium_action(**{k: v for k, v in payload.items() if v is not None})

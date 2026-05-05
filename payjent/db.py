@@ -80,9 +80,23 @@ WORKOS_UNUSABLE_PASSWORD_HASH = "workos_unusable_password_hash"
 engine = make_engine()
 
 
+def migrate_sqlite_quote_callback_column(db_engine: Engine) -> None:
+    """Add callback_url to existing SQLite quote tables."""
+    if db_engine.dialect.name != "sqlite":
+        return
+    inspector = inspect(db_engine)
+    if "quote" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("quote")}
+    if "callback_url" not in columns:
+        with db_engine.begin() as connection:
+            connection.execute(text("ALTER TABLE quote ADD COLUMN callback_url TEXT"))
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
     migrate_sqlite_account_auth_columns(engine)
+    migrate_sqlite_quote_callback_column(engine)
 
 
 def get_session() -> Generator[Session, None, None]:
