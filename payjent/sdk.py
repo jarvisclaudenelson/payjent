@@ -54,6 +54,58 @@ class PayjentClient:
             },
         )
 
+    def create_agent_action(
+        self,
+        *,
+        bot_id: str,
+        external_user_id: str,
+        request_summary: str,
+        request_hash: str,
+        amount_minor: int,
+        currency: str,
+        cost_breakdown: list[dict[str, Any]],
+        execution_envelope: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a Payjent-gated agent action and checkout prompt."""
+        return self._request(
+            "POST",
+            "/api/v1/agent-actions",
+            headers=self._headers(),
+            json={
+                "bot_id": bot_id,
+                "external_user_id": external_user_id,
+                "request_summary": request_summary,
+                "request_hash": request_hash,
+                "amount_minor": amount_minor,
+                "currency": currency,
+                "cost_breakdown": cost_breakdown,
+                "execution_envelope": execution_envelope,
+            },
+        )
+
+    def create_pay_sh_premium_action(self, **payload: Any) -> dict[str, Any]:
+        """Create a Payjent-gated pay.sh action; Payjent does not execute paycurl."""
+        return self._request("POST", "/api/v1/premium-actions/pay-sh", headers=self._headers(), json=payload)
+
+    def consume_agent_action(
+        self,
+        action_id: str,
+        payment_token: str,
+        presentation: dict[str, Any] | None = None,
+        **presentation_fields: Any,
+    ) -> dict[str, Any]:
+        """Consume/start a paid action and return its stored execution envelope."""
+        payload = {"payment_token": payment_token, "presentation": presentation or presentation_fields}
+        return self._request("POST", f"/api/v1/agent-actions/{action_id}/consume", headers=self._headers(), json=payload)
+
+    def complete_agent_action(self, action_id: str, status: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/v1/agent-actions/{action_id}/complete",
+            headers=self._headers(),
+            json={"status": status, "metadata": metadata or {}},
+        )
+
     def get_quote(self, quote_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/v1/quotes/{quote_id}")
 
@@ -128,3 +180,25 @@ def capture_spend(client: PayjentClient, spend_id: str, **payload: Any) -> dict[
 
 def record_fulfillment(client: PayjentClient, quote_id: str, status: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     return client.record_fulfillment(quote_id, status, metadata)
+
+
+def create_agent_action(client: PayjentClient, **kwargs: Any) -> dict[str, Any]:
+    return client.create_agent_action(**kwargs)
+
+
+def create_pay_sh_premium_action(client: PayjentClient, **payload: Any) -> dict[str, Any]:
+    return client.create_pay_sh_premium_action(**payload)
+
+
+def consume_agent_action(
+    client: PayjentClient,
+    action_id: str,
+    payment_token: str,
+    presentation: dict[str, Any] | None = None,
+    **presentation_fields: Any,
+) -> dict[str, Any]:
+    return client.consume_agent_action(action_id, payment_token, presentation, **presentation_fields)
+
+
+def complete_agent_action(client: PayjentClient, action_id: str, status: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    return client.complete_agent_action(action_id, status, metadata)
