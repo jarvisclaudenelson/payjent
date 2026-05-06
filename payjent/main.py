@@ -235,13 +235,15 @@ def _payment_readiness(settings: Settings) -> dict:
     stripe_webhook_configured = bool(settings.stripe_webhook_secret)
     public_base_url_configured = bool(settings.public_base_url)
     database_configured = bool(settings.database_url)
+    production_persistent_database_configured = settings.production_persistent_database_configured if settings.is_production else database_configured
     return {
-        "active_payment_ready": provider == "stripe" and stripe_secret_configured and stripe_webhook_configured and public_base_url_configured and database_configured,
+        "active_payment_ready": provider == "stripe" and stripe_secret_configured and stripe_webhook_configured and public_base_url_configured and production_persistent_database_configured,
         "checkout_provider": provider,
         "stripe_secret_configured": stripe_secret_configured,
         "stripe_webhook_configured": stripe_webhook_configured,
         "public_base_url_configured": public_base_url_configured,
         "database_configured": database_configured,
+        "production_persistent_database_configured": production_persistent_database_configured,
     }
 
 
@@ -309,7 +311,7 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
     checkout_cta = ""
     if ps.provider == "mock" and ps.status != "paid":
         checkout_cta = f"""<section><h2>Complete payment</h2><p>This checkout can be completed from the browser without exposing operator credentials, payment tokens, or raw grant IDs.</p><form method="post" action="/pay/{_html_escape(ps.id)}/mock-pay"><button class="btn" type="submit">Approve and pay {_html_escape(_format_money(q.amount_minor, q.currency))}</button></form><p class="fine">Payjent will issue a single-use grant for the exact stored request after approval.</p></section>"""
-    elif ps.provider == "stripe" and ps.status != "paid" and ps.checkout_url and ps.checkout_url.startswith(("https://", "http://")):
+    elif ps.provider == "stripe" and ps.status != "paid" and ps.checkout_url and ps.checkout_url.startswith("https://"):
         checkout_cta = f"""<section><h2>Complete secure payment</h2><p>Continue to Stripe hosted checkout to pay securely. Payjent will resume the exact stored agent action after Stripe confirms payment.</p><p><a class="btn" href="{_html_escape(ps.checkout_url)}" rel="noopener noreferrer">Continue to secure payment</a></p><p class="fine">Payjent does not show raw grants, payment tokens, or credentials on this page.</p></section>"""
     return f"""<!doctype html><html><head><title>Payjent checkout · Approve paid agent action</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Human approval document</div><h1>Approve this exact paid action?</h1><p class='muted'>Key question: should this agent resume this exact paid action after payment?</p></section><div class='grid'><div class='card'><h3>Agent request</h3><p>{_html_escape(q.request_summary)}</p><p class='fine'>External user: <code>{_html_escape(q.external_user_id)}</code><br>Request hash: <code>{_html_escape(q.request_hash)}</code></p></div><div class='card'><h3>Amount</h3><div class='stat'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div><ul>{breakdown}</ul></div><div class='card'><h3>Status</h3><p><b>{_html_escape(status_words)}</b></p><p class='fine'>Payment session: <code>{_html_escape(ps.id)}</code><br>Payment provider/status: {_html_escape(ps.provider)} / {_html_escape(ps.status)}<br>Grant state: {_html_escape(_grant_state(grant))}</p></div><div class='card'><h3>What resumes after payment</h3><p>{resumes}</p><p class='fine'>Approval creates a one-time grant bound to this stored request. Raw grant and payment tokens are not shown on this page.</p></div></div><section><h2>Approval terms</h2><ul><li>Human approval is required before Payjent marks this action ready.</li><li>The grant is single-use and tied to the exact request hash above.</li><li>Downstream rails may still impose their own authorization, settlement, availability, or rejection behavior; Payjent records the checkpoint and does not guarantee a third-party rail outcome.</li><li>Fulfillment events recorded so far: {len(fulfillment)}.</li></ul><p><a class='btn' href="/status/{_html_escape(ps.id)}">View status</a></p></section>{checkout_cta}</main></body></html>"""
 
@@ -1229,8 +1231,14 @@ def _create_checkout_for_quote(
     requested_provider = (provider or settings.checkout_provider or "mock").lower()
     if requested_provider not in {"mock", "local", "stripe", "link"}:
         raise HTTPException(status_code=422, detail="unsupported checkout provider")
-    if settings.is_production and not settings.dev_mode and requested_provider in {"mock", "local"} and not settings.hosted_smoke_test_rail_enabled:
-        raise HTTPException(status_code=503, detail="active checkout provider not configured")
+    if settings.is_production and requested_provider in {"mock", "local"}:
+        safe_internal_hosted_smoke = (
+            settings.hosted_smoke_test_rail_enabled
+            and q.external_user_id == "hosted-smoke-user"
+            and q.request_summary.startswith("Payjent hosted smoke:")
+        )
+        if not safe_internal_hosted_smoke:
+            raise HTTPException(status_code=503, detail="active checkout provider not configured")
     session_id = f"ps_{uuid4().hex}"
     ps = PaymentSession(
         id=session_id,
@@ -1551,6 +1559,31 @@ def crypto_mark_paid(session_id: str, session: Session = Depends(get_session), s
     return _issued_response(ps, receipt, grant)
 
 
+def _stripe_event_amount_currency(event_type: str | None, data_object: dict) -> tuple[int | None, str | None]:
+    if event_type == "checkout.session.completed":
+        amount = data_object.get("amount_total")
+    else:
+        amount = data_object.get("amount_received", data_object.get("amount"))
+    currency = data_object.get("currency")
+    return amount, currency.upper() if isinstance(currency, str) else None
+
+
+def _validate_stripe_paid_event(session: Session, ps: PaymentSession, data_object: dict, event_type: str | None) -> None:
+    if ps.provider != "stripe":
+        raise HTTPException(status_code=409, detail="payment session provider is not stripe")
+    provider_event_id = data_object.get("id")
+    if provider_event_id and ps.provider_session_id and provider_event_id != ps.provider_session_id:
+        raise HTTPException(status_code=409, detail="Stripe provider_session_id mismatch")
+    q = session.get(Quote, ps.quote_id)
+    if not q:
+        raise HTTPException(404, "quote not found")
+    amount_minor, currency = _stripe_event_amount_currency(event_type, data_object)
+    if amount_minor is not None and int(amount_minor) != q.amount_minor:
+        raise HTTPException(status_code=409, detail="Stripe amount mismatch")
+    if currency is not None and currency != q.currency.upper():
+        raise HTTPException(status_code=409, detail="Stripe currency mismatch")
+
+
 @app.post("/api/v1/webhooks/stripe")
 async def stripe_webhook(request: Request, stripe_signature: str | None = Header(default=None, alias="Stripe-Signature"), session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
     raw_body = await request.body()
@@ -1573,6 +1606,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         raise HTTPException(404 if (session_id or provider_session_id) else 400, "payment session not found" if (session_id or provider_session_id) else "missing payment_session_id")
     if ps.status == "paid":
         return {"received": True, "processed": False, "reason": "payment session already paid", "payment_session": session_to_read(ps)}
+    _validate_stripe_paid_event(session, ps, data_object, event_type)
     receipt, grant = _issue_paid_session(session, ps, settings, provider="stripe")
     return {"received": True, "processed": True, **_issued_response(ps, receipt, grant)}
 

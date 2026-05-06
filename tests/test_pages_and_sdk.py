@@ -74,21 +74,18 @@ def test_browser_mock_pay_post_action_pays_and_redirects_without_tokens(client, 
         assert not re.search(r"eyJ[A-Za-z0-9_-]+", html)
 
 
-def test_browser_mock_pay_cta_available_when_runtime_env_is_production(client, quote_payload, bot_headers):
+def test_browser_mock_pay_cta_unavailable_when_runtime_env_is_production(client, quote_payload, bot_headers):
     settings = get_settings()
     original_env = settings.env
     original_mock_provider_enabled = settings.mock_provider_enabled
     try:
         settings.env = "production"
         settings.mock_provider_enabled = False
-        _quote, payment_session = _create_checkout(client, quote_payload, bot_headers)
+        quote = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+        response = client.post(f"/api/v1/quotes/{quote['id']}/checkout", headers=bot_headers)
 
-        pay_page = client.get(f"/pay/{payment_session['id']}")
-        response = client.post(f"/pay/{payment_session['id']}/mock-pay", follow_redirects=False)
-
-        assert "Approve and pay 2.50 USD" in pay_page.text
-        assert response.status_code in {302, 303}
-        assert client.get(f"/api/v1/payment-sessions/{payment_session['id']}").json()["status"] == "paid"
+        assert response.status_code == 503
+        assert response.json()["detail"] == "active checkout provider not configured"
     finally:
         settings.env = original_env
         settings.mock_provider_enabled = original_mock_provider_enabled

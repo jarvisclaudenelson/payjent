@@ -38,11 +38,12 @@ def test_stripe_webhook_rejects_missing_or_invalid_signature_when_secret_configu
     assert invalid.json()["detail"] == "invalid Stripe signature"
 
 
-def test_stripe_webhook_marks_paid_and_duplicate_is_idempotent(client, quote_payload, bot_headers):
+def test_stripe_webhook_marks_paid_and_duplicate_is_idempotent(client, quote_payload, bot_headers, monkeypatch):
     secret = "whsec_test"
-    app.dependency_overrides[get_settings] = lambda: Settings(stripe_webhook_secret=secret)
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret)
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_paid", "https://checkout.stripe.test/session"))
     _, ps = _checkout(client, quote_payload, bot_headers)
-    body = json.dumps({"type": "checkout.session.completed", "data": {"object": {"payment_session_id": ps["id"]}}}, separators=(",", ":")).encode()
+    body = json.dumps({"type": "checkout.session.completed", "data": {"object": {"id": "cs_test_paid", "payment_session_id": ps["id"], "amount_total": quote_payload["amount_minor"], "currency": quote_payload["currency"].lower()}}}, separators=(",", ":")).encode()
     headers = {"content-type": "application/json", "Stripe-Signature": _stripe_signature(body, secret)}
 
     paid = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
@@ -156,7 +157,6 @@ def test_agent_action_stripe_provider_returns_hosted_payment_prompt(client, quot
 def test_production_mock_and_local_checkout_fail_closed(client, engine, quote_payload):
     settings = Settings(
         env="production",
-        dev_mode=False,
         signing_secret="prod-signing-secret-for-test",
         checkout_provider="mock",
         public_base_url="https://payjent.example",
@@ -215,6 +215,7 @@ def test_payment_readiness_reports_booleans_without_secret_values(client):
         "stripe_webhook_configured": True,
         "public_base_url_configured": True,
         "database_configured": True,
+        "production_persistent_database_configured": True,
     }
     body = response.text
     assert "sk_test_do_not_leak" not in body
@@ -284,7 +285,7 @@ def test_stripe_webhook_can_map_provider_session_id(client, quote_payload, bot_h
     monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_map", "https://checkout.stripe.test/session"))
     q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
     ps = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers).json()
-    body = json.dumps({"type": "checkout.session.completed", "data": {"object": {"id": "cs_test_map", "payment_status": "paid"}}}, separators=(",", ":")).encode()
+    body = json.dumps({"type": "checkout.session.completed", "data": {"object": {"id": "cs_test_map", "payment_status": "paid", "amount_total": quote_payload["amount_minor"], "currency": quote_payload["currency"].lower()}}}, separators=(",", ":")).encode()
     headers = {"content-type": "application/json", "Stripe-Signature": _stripe_signature(body, secret)}
 
     paid = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
@@ -322,3 +323,100 @@ def test_crypto_mark_paid_requires_operator_and_uses_shared_issuance(client, quo
 
     duplicate = client.post(f"/api/v1/payment-sessions/{ps['id']}/crypto/mark-paid", headers=operator_headers)
     assert duplicate.status_code == 409
+
+
+def test_production_agent_action_mock_provider_fails_even_with_default_dev_mode(client, engine, quote_payload):
+    settings = Settings(
+        env="production",
+        signing_secret="prod-signing-secret-for-test",
+        checkout_provider="mock",
+        public_base_url="https://payjent.example",
+    )
+    api_key = "prod-agent-action-mock-fails-key"
+    with Session(engine) as session:
+        create_bot_credential(session, "bot-1", api_key, settings.signing_secret)
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    response = client.post("/api/v1/agent-actions", json=quote_payload, headers={"Authorization": f"Bearer {api_key}"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "active checkout provider not configured"
+
+
+def test_production_readiness_default_sqlite_is_not_active_payment_ready(client):
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        env="production",
+        checkout_provider="stripe",
+        stripe_secret_key="sk_test_fake",
+        stripe_webhook_secret="whsec_test",
+        public_base_url="https://payjent.example",
+    )
+
+    response = client.get("/api/v1/payment-readiness")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["database_configured"] is True
+    assert data["production_persistent_database_configured"] is False
+    assert data["active_payment_ready"] is False
+    assert "sqlite:///" not in response.text
+
+
+def test_stripe_webhook_rejects_non_stripe_session_without_issuing_grant(client, quote_payload, bot_headers):
+    secret = "whsec_test"
+    app.dependency_overrides[get_settings] = lambda: Settings(stripe_webhook_secret=secret)
+    _, ps = _checkout(client, quote_payload, bot_headers)
+    body = json.dumps({"type": "payment_intent.succeeded", "data": {"object": {"metadata": {"payment_session_id": ps["id"]}, "amount_received": quote_payload["amount_minor"], "currency": quote_payload["currency"].lower()}}}, separators=(",", ":")).encode()
+
+    response = client.post("/api/v1/webhooks/stripe", content=body, headers={"content-type": "application/json", "Stripe-Signature": _stripe_signature(body, secret)})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "payment session provider is not stripe"
+    unchanged = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
+    assert unchanged["status"] == "checkout_created"
+    assert unchanged["receipt_id"] is None
+
+
+def test_stripe_webhook_rejects_provider_session_amount_and_currency_mismatches(client, quote_payload, bot_headers, monkeypatch):
+    secret = "whsec_test"
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret)
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_expected", "https://checkout.stripe.test/session"))
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+    ps = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers).json()
+
+    cases = [
+        ({"id": "cs_test_wrong", "metadata": {"payment_session_id": ps["id"]}, "amount_total": quote_payload["amount_minor"], "currency": quote_payload["currency"].lower()}, "Stripe provider_session_id mismatch"),
+        ({"id": "cs_test_expected", "metadata": {"payment_session_id": ps["id"]}, "amount_total": quote_payload["amount_minor"] + 1, "currency": quote_payload["currency"].lower()}, "Stripe amount mismatch"),
+        ({"id": "cs_test_expected", "metadata": {"payment_session_id": ps["id"]}, "amount_total": quote_payload["amount_minor"], "currency": "eur"}, "Stripe currency mismatch"),
+    ]
+    for obj, detail in cases:
+        body = json.dumps({"type": "checkout.session.completed", "data": {"object": obj}}, separators=(",", ":")).encode()
+        response = client.post("/api/v1/webhooks/stripe", content=body, headers={"content-type": "application/json", "Stripe-Signature": _stripe_signature(body, secret)})
+        assert response.status_code == 409
+        assert response.json()["detail"] == detail
+
+    unchanged = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
+    assert unchanged["status"] == "checkout_created"
+    assert unchanged["receipt_id"] is None
+
+
+def test_stripe_pay_page_requires_https_checkout_url(client, quote_payload, bot_headers, monkeypatch, engine):
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        checkout_provider="stripe",
+        stripe_secret_key="sk_test_fake",
+        public_base_url="https://payjent.example",
+    )
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_http", "https://checkout.stripe.test/page"))
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+    ps = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers).json()
+    with Session(engine) as session:
+        stored = session.get(PaymentSession, ps["id"])
+        stored.checkout_url = "http://checkout.stripe.test/insecure"
+        session.add(stored)
+        session.commit()
+
+    response = client.get(f"/pay/{ps['id']}")
+
+    assert response.status_code == 200
+    assert "Continue to secure payment" not in response.text
+    assert "http://checkout.stripe.test/insecure" not in response.text

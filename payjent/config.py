@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     def effective_mock_provider_enabled(self) -> bool:
         return self.dev_mode and self.mock_provider_enabled and not self.is_production
 
+    @property
+    def production_persistent_database_configured(self) -> bool:
+        if not self.database_url:
+            return False
+        normalized = self.database_url.strip().lower()
+        if normalized in {"sqlite:///./payjent.db", "sqlite:///payjent.db", "sqlite:///:memory:", "sqlite://"}:
+            return False
+        return not normalized.startswith("sqlite:")
+
     def validate_runtime_guardrails(self) -> None:
         """Fail closed for unsafe production configuration before serving traffic."""
         if not self.is_production:
