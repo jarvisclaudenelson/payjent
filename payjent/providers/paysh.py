@@ -60,6 +60,7 @@ def build_execution_envelope(
     body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     description: str | None = None,
+    payjent_fulfillment_callback: bool = False,
     payjent_managed_execution: bool = False,
 ) -> dict[str, Any]:
     """Normalize a pay.sh premium API call envelope for a paid agent action."""
@@ -70,6 +71,7 @@ def build_execution_envelope(
         method = "POST"
     normalized_headers = dict(headers or {})
     normalized_body = dict(body or {})
+    fulfillment_callback = bool(payjent_fulfillment_callback or payjent_managed_execution)
     envelope = {
         "provider": PROVIDER,
         "kind": KIND,
@@ -90,6 +92,7 @@ def build_execution_envelope(
         ),
         "setup_hint": SETUP_HINT,
         "settlement": SETTLEMENT,
-        "payjent_managed_execution": bool(payjent_managed_execution),
+        "payjent_fulfillment_callback": fulfillment_callback,
+        "payjent_managed_execution": fulfillment_callback,
     }
     return envelope

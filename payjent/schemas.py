@@ -200,7 +200,14 @@ class PayShPremiumActionCreate(BaseModel):
     body: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     description: str | None = None
-    payjent_managed_execution: bool = False
+    payjent_fulfillment_callback: bool = Field(
+        default=False,
+        description="Preferred flag: ask Payjent to perform the verified post-payment fulfillment callback/handoff to the downstream executor.",
+    )
+    payjent_managed_execution: bool = Field(
+        default=False,
+        description="Legacy alias for payjent_fulfillment_callback; retained for backwards compatibility.",
+    )
     callback_url: str | None = None
 
 

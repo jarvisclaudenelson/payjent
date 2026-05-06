@@ -11,7 +11,7 @@ def _stripe_signature(body: bytes, secret: str, timestamp: str = "1700000000") -
     return f"t={timestamp},v1={digest}"
 
 
-def _create_action(client, bot_headers, service_url="https://downstream.example/run", headers=None, body=None, method="POST"):
+def _create_action(client, bot_headers, service_url="https://downstream.example/run", headers=None, body=None, method="POST", flag="payjent_fulfillment_callback"):
     return client.post(
         "/api/v1/premium-actions/pay-sh",
         headers=bot_headers,
@@ -27,7 +27,7 @@ def _create_action(client, bot_headers, service_url="https://downstream.example/
             "method": method,
             "body": body or {"task": "run"},
             "headers": headers or {"Accept": "application/json", "Authorization": "Bearer leak", "X-Api-Key": "leak", "Cookie": "leak"},
-            "payjent_managed_execution": True,
+            flag: True,
         },
     ).json()
 
@@ -120,7 +120,7 @@ def test_production_requires_managed_execution_allowlist(client, bot_headers, mo
     assert "ALLOWED_HOSTS" in response.json()["detail"]
 
 
-def test_production_allowed_managed_execution_host_creates_checkout(client, bot_headers, monkeypatch):
+def test_production_allowed_fulfillment_callback_host_creates_checkout(client, bot_headers, monkeypatch):
     app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test", managed_execution_allowed_hosts="downstream.example")
     monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_allowed", "https://checkout.stripe.test/session"))
 
@@ -128,6 +128,16 @@ def test_production_allowed_managed_execution_host_creates_checkout(client, bot_
 
     assert action["payment_session_id"].startswith("ps_")
     assert action["payment_url"] == "https://checkout.stripe.test/session"
+
+
+def test_legacy_managed_execution_alias_still_creates_checkout(client, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test", managed_execution_allowed_hosts="downstream.example")
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_legacy", "https://checkout.stripe.test/legacy"))
+
+    action = _create_action(client, bot_headers, flag="payjent_managed_execution")
+
+    assert action["payment_session_id"].startswith("ps_")
+    assert action["payment_url"] == "https://checkout.stripe.test/legacy"
 
 
 def test_generic_quote_checkout_rejects_unallowlisted_managed_execution_before_stripe(client, bot_headers, monkeypatch):
@@ -160,7 +170,7 @@ def test_generic_quote_checkout_rejects_unallowlisted_managed_execution_before_s
     assert "ALLOWED_HOSTS" in response.json()["detail"]
 
 
-def test_generic_quote_checkout_allows_allowlisted_managed_execution(client, bot_headers, monkeypatch):
+def test_generic_quote_checkout_allows_allowlisted_fulfillment_callback(client, bot_headers, monkeypatch):
     app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test", managed_execution_allowed_hosts="downstream.example")
     calls = []
 
@@ -184,7 +194,7 @@ def test_generic_quote_checkout_allows_allowlisted_managed_execution(client, bot
                 "service_url": "https://downstream.example/run",
                 "method": "POST",
                 "body": {"task": "run"},
-                "payjent_managed_execution": True,
+                "payjent_fulfillment_callback": True,
             },
         },
     )

@@ -152,7 +152,7 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
-        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external action envelope gated by Payjent only after obtaining an exact provider/merchant quote. If payjent_managed_execution=true, Payjent validates the target before checkout and will POST an allowlisted, sanitized JSON body once after Stripe confirms payment; otherwise agents poll/resume normally.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external action envelope gated by Payjent only after obtaining an exact provider/merchant quote. If payjent_fulfillment_callback=true, Payjent validates the callback target before checkout and performs one verified, allowlisted, sanitized post-payment handoff callback to the downstream executor after Stripe confirms payment; payjent_managed_execution remains a legacy alias. Otherwise agents poll/resume normally and perform fulfillment outside Payjent.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
@@ -1313,6 +1313,7 @@ def create_pay_sh_premium_action(
             body=payload.body,
             headers=payload.headers,
             description=payload.description or payload.request_summary,
+            payjent_fulfillment_callback=payload.payjent_fulfillment_callback,
             payjent_managed_execution=payload.payjent_managed_execution,
         )
         _validate_managed_execution_envelope(envelope, settings)
@@ -1496,9 +1497,9 @@ def _managed_execution_host_allowed(url: str | None, settings: Settings) -> tupl
     host = parsed.hostname.strip().lower().rstrip(".")
     allowed_hosts = settings.managed_execution_allowed_host_set
     if allowed_hosts:
-        return (True, None) if host in allowed_hosts else (False, "service_url hostname is not allowed for managed execution")
+        return (True, None) if host in allowed_hosts else (False, "service_url hostname is not allowed for fulfillment callback")
     if settings.is_production:
-        return False, "PAYJENT_MANAGED_EXECUTION_ALLOWED_HOSTS must include service_url hostname in production"
+        return False, "PAYJENT_MANAGED_EXECUTION_ALLOWED_HOSTS must include fulfillment callback/executor service_url hostname in production"
     return _safe_public_https_url(url)
 
 
@@ -1519,8 +1520,14 @@ def _reserved_downstream_body_key_path(value, path: str = "body") -> str | None:
     return None
 
 
+def _fulfillment_callback_requested(envelope: dict | None) -> bool:
+    if not envelope:
+        return False
+    return bool(envelope.get("payjent_fulfillment_callback") or envelope.get("payjent_managed_execution"))
+
+
 def _validate_managed_execution_envelope(envelope: dict | None, settings: Settings) -> None:
-    if not envelope or not envelope.get("payjent_managed_execution"):
+    if not _fulfillment_callback_requested(envelope):
         return
     if (envelope.get("method") or "POST").upper() != "POST":
         raise HTTPException(status_code=422, detail="only POST downstream execution is supported")
@@ -1529,7 +1536,7 @@ def _validate_managed_execution_envelope(envelope: dict | None, settings: Settin
         raise HTTPException(status_code=422, detail=reason)
     reserved_path = _reserved_downstream_body_key_path(envelope.get("body") or {})
     if reserved_path:
-        raise HTTPException(status_code=422, detail=f"managed execution body may not include reserved Payjent field: {reserved_path}")
+        raise HTTPException(status_code=422, detail=f"fulfillment callback body may not include reserved Payjent field: {reserved_path}")
 
 
 def _sanitized_downstream_headers(headers: dict | None) -> dict[str, str]:
@@ -1554,7 +1561,7 @@ def _record_downstream_event(session: Session, q: Quote, status: str, metadata: 
 
 def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSession, grant: Grant, provider: str, settings: Settings) -> FulfillmentEvent | None:
     envelope = q.execution_envelope or {}
-    if not envelope.get("payjent_managed_execution"):
+    if not _fulfillment_callback_requested(envelope):
         return None
     existing = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id)).all()
     for event in existing:
@@ -1562,7 +1569,7 @@ def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSess
         if meta.get("type") == "payjent_downstream_execution" and meta.get("payment_session_id") == ps.id:
             return event
     if provider == "mock":
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "managed downstream execution is disabled for mock payments"})
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "fulfillment callback handoff is disabled for mock payments"})
     if (envelope.get("method") or "POST").upper() != "POST":
         return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "only POST downstream execution is supported"})
     service_url = envelope.get("service_url")

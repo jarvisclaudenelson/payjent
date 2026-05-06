@@ -17,9 +17,9 @@ When a user asks you for premium work, Payjent lets you:
 5. Execute the downstream premium action in your own runtime.
 6. Mark the Payjent action fulfilled.
 
-Payjent can also run a narrow managed HTTP downstream bridge for premium actions that explicitly set `payjent_managed_execution=true`. Payjent validates the target before it creates checkout; production deployments must set `PAYJENT_MANAGED_EXECUTION_ALLOWED_HOSTS` to the permitted downstream hostnames. After Stripe confirms payment, Payjent sends one sanitized `POST` to the stored `service_url` using the stored body only if it contains no reserved Payjent grant/payment/receipt/token fields, plus a small outbound header allowlist. Payjent records a fulfillment event and still preserves callback/polling flows. Mock/local payments do not run managed downstream execution in production.
+Payjent can also perform a narrow verified fulfillment callback / execution handoff for premium actions that explicitly set `payjent_fulfillment_callback=true` (`payjent_managed_execution=true` remains a legacy alias). Payjent validates the callback target before it creates checkout; production deployments must set `PAYJENT_MANAGED_EXECUTION_ALLOWED_HOSTS` to the permitted fulfillment callback/executor hostnames. After Stripe confirms payment, Payjent sends one sanitized `POST` handoff callback to the stored `service_url` using the stored body only if it contains no reserved Payjent grant/payment/receipt/token fields, plus a small outbound header allowlist. The downstream provider/executor performs the premium action; Payjent records a fulfillment event and still preserves callback/polling flows. Mock/local payments do not run fulfillment callbacks in production.
 
-Payjent is **not** a pay.sh settlement provider. For pay.sh/paycurl work without `payjent_managed_execution=true`, Payjent authorizes and resumes the request; you execute pay.sh externally after Payjent says the action is paid.
+Payjent is **not** a pay.sh settlement provider or the premium action executor. For pay.sh/paycurl work without `payjent_fulfillment_callback=true`, Payjent authorizes and resumes the request; you execute pay.sh externally after Payjent says the action is paid.
 
 ## Discovery flow: learn available paid tools
 
@@ -106,7 +106,7 @@ Create a paid action with:
 - downstream provider metadata, such as `provider=pay_sh`
 - the target service or resource
 - method/body if applicable
-- for Payjent-managed execution after Stripe payment only: `payjent_managed_execution=true`, a `POST` `service_url` whose hostname is allowed by the Payjent deployment, no reserved Payjent grant/payment/receipt/token fields anywhere in the body, and only supported outbound headers (`Content-Type`, `Accept`, `Idempotency-Key`, `X-Request-Id`, `X-Payjent-Action-Id`)
+- for a Payjent verified fulfillment callback / execution handoff after Stripe payment only: `payjent_fulfillment_callback=true` (`payjent_managed_execution=true` legacy alias), a `POST` `service_url` whose hostname is allowed by the Payjent deployment, no reserved Payjent grant/payment/receipt/token fields anywhere in the body, and only supported outbound headers (`Content-Type`, `Accept`, `Idempotency-Key`, `X-Request-Id`, `X-Payjent-Action-Id`)
 
 For pay.sh-style actions, the action should produce an execution envelope with:
 
@@ -120,7 +120,7 @@ Send only the returned Payjent `payment_prompt`/`payment_url` and a short explan
 
 Good user message:
 
-> Payment is required for this premium action. Pay here: `<Payjent payment link>`. After payment, I will resume automatically and run the requested premium action.
+> Payment is required for this premium action. Pay here: `<Payjent payment link>`. After payment, I will resume with the verified fulfillment handoff for the requested premium action.
 
 Do not send grant ids. Do not ask the user to paste a payment token.
 

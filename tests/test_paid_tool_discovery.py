@@ -32,8 +32,13 @@ def test_public_manifest_returns_safe_tool_discovery(client):
     assert "do not use placeholder" in manifest_text
     assert "if the exact price is unknown, do not create the paid action" in manifest_text
     create_tool = next(tool for tool in data["tools"] if tool["name"] == "payjent.create_paid_action")
+    pay_sh_tool = next(tool for tool in data["tools"] if tool["name"] == "payjent.create_pay_sh_premium_action")
     assert create_tool["pricing_policy"]["rule"] == "exact_provider_quote_required"
     assert create_tool["amount_requirements"]["fail_closed_if_unknown"] is True
+    assert "payjent_fulfillment_callback" in pay_sh_tool["description"]
+    assert "legacy alias" in pay_sh_tool["description"]
+    assert "managed execution" not in pay_sh_tool["description"].lower()
+    assert "performs the premium action" not in manifest_text
     _no_secret_words(data)
 
 
