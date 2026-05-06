@@ -874,13 +874,16 @@ async def dashboard_create_agent_install_link(request: Request, session: Session
     if isinstance(account, RedirectResponse):
         return account
     content_type = request.headers.get("content-type", "")
-    form = await (request.json() if "application/json" in content_type else _form_fields(request))
+    wants_json = "application/json" in content_type
+    form = await (request.json() if wants_json else _form_fields(request))
     agent_id = (form.get("agent_id") or "").strip()
     ttl_seconds = int(form.get("ttl_seconds") or 900)
     agent = session.get(AgentProfile, agent_id)
     if not agent or agent.owner_id != account.id:
         raise HTTPException(404, "agent not found")
     link, install_url = _create_install_link(agent, account, request, session, settings, ttl_seconds)
+    if not wants_json:
+        return HTMLResponse(_install_link_display_html(account, agent, install_url, link.expires_at, False))
     return JSONResponse({
         "install_link_id": link.id,
         "install_url": install_url,

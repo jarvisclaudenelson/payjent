@@ -44,6 +44,21 @@ def test_dashboard_creates_one_time_agent_install_link(client, engine):
         assert link.consumed_at is None
 
 
+def test_dashboard_install_link_form_post_returns_html_display_not_raw_json(client):
+    agent_id = _register_owner_and_agent(client)
+    response = client.post(
+        "/dashboard/agents/install-links",
+        data={"agent_id": agent_id, "ttl_seconds": "900"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "One-time Agent Install Link" in response.text
+    assert "Primary safe setup" in response.text
+    assert "http://testserver/agent-install/" in response.text
+    assert not response.text.lstrip().startswith("{")
+    assert '"install_url"' not in response.text
+
+
 def test_dashboard_register_primary_flow_does_not_show_or_create_raw_credential(client, engine):
     client.post("/auth/register", data={"email": "owner@example.com", "password": "correc...tery"}, follow_redirects=False)
     response = client.post(
