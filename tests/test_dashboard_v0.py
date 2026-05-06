@@ -4,7 +4,7 @@ from payjent.auth import hash_api_key
 from payjent.config import Settings, get_settings
 from payjent.db import get_session
 from payjent.main import app
-from payjent.models import Account, AgentProfile, BotCredential, RailConnection
+from payjent.models import Account, AgentProfile, BotCredential, PaymentSession, Quote, RailConnection, SpendLedgerEntry
 
 
 def _register(client, operator_headers):
@@ -94,13 +94,41 @@ def test_dashboard_and_agent_detail_render_key_copy(client, operator_headers):
     assert client.post("/auth/register", data={"email": "dev@example.com", "password": "correct horse battery staple"}, follow_redirects=False).status_code == 303
     overview = client.get("/dashboard")
     assert overview.status_code == 200
-    for copy in ["Payjent dashboard v0", "Agent registration", "Stripe Connect", "x402", "integration snippets"]:
+    for copy in ["Payment operations", "Agent registration", "Stripe Connect", "x402", "integration snippets"]:
         assert copy.lower().split()[0] in overview.text.lower()
 
     detail = client.get(f"/dashboard/agents/{agent['id']}")
     assert detail.status_code == 200
     for copy in ["Stripe Connect", "x402 rail configuration", "Integration snippet", "Recent payments / spend ledger", "discord-aggregator-stripe-smoke"]:
         assert copy in detail.text
+
+
+def test_root_landing_is_public_and_dashboard_shows_how_paid_currency_safe(client, engine):
+    landing = client.get("/")
+    assert landing.status_code == 200
+    assert "Payment-gate agent actions" in landing.text
+    assert "Register your agent" in landing.text
+
+    assert client.post("/auth/register", data={"email": "dev@example.com", "password": "correct horse battery staple"}, follow_redirects=False).status_code == 303
+    with Session(engine) as session:
+        q_usd = Quote(id="quote_usd", bot_id="bot-1", external_user_id="user-1", request_summary="USD paid action", request_hash="hash-usd", amount_minor=150, currency="USD", cost_breakdown=[{"label": "work", "amount_minor": 150}], quote_hash="qh-usd", status="paid")
+        q_eur = Quote(id="quote_eur", bot_id="bot-1", external_user_id="user-2", request_summary="EUR paid action", request_hash="hash-eur", amount_minor=250, currency="EUR", cost_breakdown=[{"label": "work", "amount_minor": 250}], quote_hash="qh-eur", status="fulfilled")
+        session.add(q_usd)
+        session.add(q_eur)
+        session.add(PaymentSession(id="ps_mock", quote_id="quote_usd", provider="mock", status="paid"))
+        session.add(PaymentSession(id="ps_stripe", quote_id="quote_eur", provider="stripe", status="checkout_created"))
+        session.add(SpendLedgerEntry(id="spend_eur", grant_id="grant_eur", quote_id="quote_eur", operation_id="op-eur", tool="weather", vendor="meteo", rail="link", amount_minor=75, currency="EUR", reason="Need premium forecast", status="authorized"))
+        session.commit()
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "How paid: mock / paid" in dashboard.text
+    assert "How paid: stripe / checkout_created" in dashboard.text
+    assert "1.50 USD" in dashboard.text
+    assert "2.50 EUR" in dashboard.text
+    assert "Grouped by currency" in dashboard.text
+    assert "4.00 USD" not in dashboard.text
+    assert "dashboard sample" not in dashboard.text
 
 
 def test_production_dashboard_pages_fail_closed_without_metadata(client, operator_headers):
