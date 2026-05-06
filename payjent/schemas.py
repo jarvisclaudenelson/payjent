@@ -200,6 +200,7 @@ class PayShPremiumActionCreate(BaseModel):
     body: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     description: str | None = None
+    payjent_managed_execution: bool = False
     callback_url: str | None = None
 
 
@@ -237,6 +238,7 @@ class AgentActionStatusResponse(BaseModel):
     currency: str
     payment_token: str | None = None
     payment_token_status: Literal["unissued", "available", "consumed"] = "unissued"
+    fulfillment_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PayShPremiumActionCreateResponse(AgentActionCreateResponse):

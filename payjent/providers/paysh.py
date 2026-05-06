@@ -60,6 +60,7 @@ def build_execution_envelope(
     body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     description: str | None = None,
+    payjent_managed_execution: bool = False,
 ) -> dict[str, Any]:
     """Normalize a pay.sh premium API call envelope for a paid agent action."""
 
@@ -89,5 +90,6 @@ def build_execution_envelope(
         ),
         "setup_hint": SETUP_HINT,
         "settlement": SETTLEMENT,
+        "payjent_managed_execution": bool(payjent_managed_execution),
     }
     return envelope

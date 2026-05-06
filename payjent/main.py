@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hmac
+import ipaddress
 from secrets import token_urlsafe
+import socket
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 from pathlib import Path
@@ -150,7 +152,7 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
-        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external pay.sh action envelope gated by Payjent only after obtaining an exact provider/merchant quote.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external action envelope gated by Payjent only after obtaining an exact provider/merchant quote. If payjent_managed_execution=true and service_url is a safe public HTTPS URL, Payjent will POST the sanitized body once after Stripe confirms payment; otherwise agents poll/resume normally.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
@@ -1309,6 +1311,7 @@ def create_pay_sh_premium_action(
             body=payload.body,
             headers=payload.headers,
             description=payload.description or payload.request_summary,
+            payjent_managed_execution=payload.payjent_managed_execution,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1347,6 +1350,7 @@ def get_agent_action_status(action_id: str, session: Session = Depends(get_sessi
     consumed_grant = next((grant for grant in grants if grant.consumed_at is not None), None)
     payment_token = available_grant.id if available_grant and payment_session and payment_session.status == "paid" else None
     token_status = "available" if payment_token else "consumed" if consumed_grant else "unissued"
+    fulfillment_events = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id).order_by(FulfillmentEvent.created_at.desc())).all()
     status = "ready" if payment_token else "consumed" if token_status == "consumed" else "awaiting_payment"
     return {
         "action_id": q.id,
@@ -1361,6 +1365,7 @@ def get_agent_action_status(action_id: str, session: Session = Depends(get_sessi
         "currency": q.currency,
         "payment_token": payment_token,
         "payment_token_status": token_status,
+        "fulfillment_events": [{"id": ev.id, "status": ev.status, "metadata": ev.metadata_json, "created_at": ev.created_at.isoformat()} for ev in fulfillment_events],
     }
 
 
@@ -1448,6 +1453,86 @@ def _deliver_agent_action_callback(session: Session, q: Quote, ps: PaymentSessio
     return attempt
 
 
+_SECRET_HEADER_MARKERS = ("authorization", "cookie", "token", "secret", "key", "credential")
+_INTERNAL_HOSTS = {"localhost", "localhost.localdomain", "metadata.google.internal"}
+
+
+def _safe_public_https_url(url: str | None) -> tuple[bool, str | None]:
+    parsed = urlparse(url or "")
+    if parsed.scheme.lower() != "https":
+        return False, "service_url must use https"
+    if not parsed.hostname:
+        return False, "service_url missing hostname"
+    host = parsed.hostname.strip().lower().rstrip(".")
+    if host in _INTERNAL_HOSTS or host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
+        return False, "service_url hostname is internal"
+    try:
+        ips = set()
+        try:
+            ips.add(ipaddress.ip_address(host))
+        except ValueError:
+            for info in socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM):
+                ips.add(ipaddress.ip_address(info[4][0]))
+        if any(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified for ip in ips):
+            return False, "service_url resolves to a non-public address"
+    except socket.gaierror:
+        return False, "service_url hostname did not resolve"
+    except ValueError:
+        return False, "service_url hostname resolution failed"
+    return True, None
+
+
+def _sanitized_downstream_headers(headers: dict | None) -> dict[str, str]:
+    safe: dict[str, str] = {}
+    for name, value in (headers or {}).items():
+        lower = str(name).lower()
+        if any(marker in lower for marker in _SECRET_HEADER_MARKERS):
+            continue
+        safe[str(name)] = str(value)
+    return safe
+
+
+def _record_downstream_event(session: Session, q: Quote, status: str, metadata: dict) -> FulfillmentEvent:
+    event = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status=status, metadata_json={"type": "payjent_downstream_execution", **metadata})
+    if status == "executed":
+        q.status = "executed"
+    elif q.status not in {"executed", "completed"}:
+        q.status = "execution_failed"
+    session.add(q); session.add(event); session.commit(); session.refresh(event)
+    return event
+
+
+def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSession, grant: Grant, provider: str) -> FulfillmentEvent | None:
+    envelope = q.execution_envelope or {}
+    if not envelope.get("payjent_managed_execution"):
+        return None
+    existing = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id)).all()
+    for event in existing:
+        meta = event.metadata_json or {}
+        if meta.get("type") == "payjent_downstream_execution" and meta.get("payment_session_id") == ps.id:
+            return event
+    if provider == "mock":
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "managed downstream execution is disabled for mock payments"})
+    if (envelope.get("method") or "POST").upper() != "POST":
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "only POST downstream execution is supported"})
+    service_url = envelope.get("service_url")
+    ok, reason = _safe_public_https_url(service_url)
+    if not ok:
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": reason})
+    body = dict(envelope.get("body") or {})
+    for forbidden in ("payment_token", "grant_id", "grant", "receipt"):
+        body.pop(forbidden, None)
+    headers = _sanitized_downstream_headers(envelope.get("headers") or {})
+    headers.setdefault("Content-Type", "application/json")
+    try:
+        with httpx.Client(timeout=5.0, follow_redirects=False) as client:
+            response = client.post(service_url, json=body, headers=headers)
+        status = "executed" if 200 <= response.status_code < 300 else "failed"
+        return _record_downstream_event(session, q, status, {"payment_session_id": ps.id, "http_status": response.status_code, "service_host": urlparse(service_url).hostname})
+    except Exception as exc:
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "error": str(exc)[:500], "service_host": urlparse(service_url).hostname})
+
+
 def _issued_response(ps: PaymentSession, receipt, grant):
     return {"payment_session": session_to_read(ps), "receipt": {"payload": receipt.payload, "signature": receipt.signature}, "grant": {"id": grant.id, "payload": grant.payload, "signature": grant.signature}}
 
@@ -1460,6 +1545,7 @@ def _issue_paid_session(session: Session, ps: PaymentSession, settings: Settings
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     _deliver_agent_action_callback(session, q, ps, settings, provider)
+    _execute_managed_downstream_once(session, q, ps, grant, provider)
     return receipt, grant
 
 

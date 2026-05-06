@@ -17,7 +17,9 @@ When a user asks you for premium work, Payjent lets you:
 5. Execute the downstream premium action in your own runtime.
 6. Mark the Payjent action fulfilled.
 
-Payjent is **not** the downstream premium API runtime. For pay.sh/paycurl work, Payjent authorizes and resumes the request; you execute pay.sh externally after Payjent says the action is paid.
+Payjent can also run a narrow managed HTTP downstream bridge for premium actions that explicitly set `payjent_managed_execution=true` and provide a safe public `https://` `service_url`. In that mode, after Stripe confirms payment Payjent sends one sanitized `POST` to the stored `service_url` using the stored `body` and non-secret-looking headers. Payjent does not forward grant ids or payment tokens by default, records a fulfillment event, and still preserves callback/polling flows. Mock/local payments do not run managed downstream execution in production.
+
+Payjent is **not** a pay.sh settlement provider. For pay.sh/paycurl work without `payjent_managed_execution=true`, Payjent authorizes and resumes the request; you execute pay.sh externally after Payjent says the action is paid.
 
 ## Discovery flow: learn available paid tools
 
@@ -104,6 +106,7 @@ Create a paid action with:
 - downstream provider metadata, such as `provider=pay_sh`
 - the target service or resource
 - method/body if applicable
+- for Payjent-managed execution after Stripe payment only: `payjent_managed_execution=true` and a public HTTPS `service_url`; only POST is currently supported and secret-looking headers are stripped
 
 For pay.sh-style actions, the action should produce an execution envelope with:
 
