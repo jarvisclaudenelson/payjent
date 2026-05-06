@@ -55,6 +55,14 @@ def test_dashboard_install_link_form_post_returns_html_display_not_raw_json(clie
     assert "One-time Agent Install Link" in response.text
     assert "Primary safe setup" in response.text
     assert "http://testserver/agent-install/" in response.text
+    assert "Copy one-time install link" in response.text
+    assert "data-copy-install-link='http://testserver/agent-install/" in response.text
+    assert "data-copy-install-toast" in response.text
+    assert "Link copied. Give it to the target agent." in response.text
+    assert "navigator.clipboard.writeText" in response.text
+    assert "Readable fallback URL" in response.text
+    assert "Open one-time install link" not in response.text
+    assert "class='btn accent' href='http://testserver/agent-install/" not in response.text
     assert not response.text.lstrip().startswith("{")
     assert '"install_url"' not in response.text
 
