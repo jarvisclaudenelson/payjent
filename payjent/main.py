@@ -112,12 +112,17 @@ app = FastAPI(title="Payjent", lifespan=lifespan)
 DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
 
 
-@app.get("/docs/c3po-payjent-self-setup.md", response_class=FileResponse)
-def c3po_payjent_self_setup_doc():
-    path = DOCS_DIR / "c3po-payjent-self-setup.md"
+@app.get("/docs/agent-payjent-self-setup.md", response_class=FileResponse)
+def agent_payjent_self_setup_doc():
+    path = DOCS_DIR / "agent-payjent-self-setup.md"
     if not path.exists():
         raise HTTPException(404, "document not found")
-    return FileResponse(path, media_type="text/markdown; charset=utf-8", filename="c3po-payjent-self-setup.md")
+    return FileResponse(path, media_type="text/markdown; charset=utf-8", filename="agent-payjent-self-setup.md")
+
+
+@app.get("/docs/c3po-payjent-self-setup.md", response_class=FileResponse)
+def c3po_payjent_self_setup_doc_redirect():
+    return RedirectResponse("/docs/agent-payjent-self-setup.md", status_code=308)
 
 
 @app.get("/")

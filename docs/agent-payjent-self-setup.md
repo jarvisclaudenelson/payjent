@@ -1,8 +1,8 @@
-# C3PO: Teach Yourself to Use Payjent
+# Agent Self-Setup Guide: Teach Yourself to Use Payjent
 
-Audience: C3PO or any agent reading this page directly.
+Audience: any agent reading this page directly.
 
-Canonical URL: `https://payjent.vercel.app/docs/c3po-payjent-self-setup.md`
+Canonical URL: `https://payjent.vercel.app/docs/agent-payjent-self-setup.md`
 
 ## What Payjent is
 
@@ -167,9 +167,8 @@ Use this Payjent deployment unless the operator gives you a different one:
 
 ## Current integration status
 
-Payjent already supports the generic agent bridge and a C3PO compatibility alias. You do not need to know the Python code to follow the protocol, but the implementation names are:
+Payjent already supports the generic agent bridge. You do not need to know the Python code to follow the protocol, but the implementation name is:
 
 - `AgentPayjentBridge`
-- `C3POPayjentBridge`
 
 Use the protocol above as your source of truth.
