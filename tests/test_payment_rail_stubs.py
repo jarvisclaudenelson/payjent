@@ -49,11 +49,15 @@ def test_stripe_webhook_marks_paid_and_duplicate_is_idempotent(client, quote_pay
     paid = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
     assert paid.status_code == 200
     payload = paid.json()
-    assert payload["processed"] is True
-    assert payload["payment_session"]["status"] == "paid"
-    assert payload["payment_session"]["provider"] == "stripe"
-    assert payload["receipt"]["payload"]["provider"] == "stripe"
-    assert payload["grant"]["payload"]["quote_id"] == ps["quote_id"]
+    assert payload == {"received": True, "processed": True}
+    assert "grant" not in paid.text.lower()
+    assert "receipt" not in paid.text.lower()
+    stored = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
+    assert stored["status"] == "paid"
+    assert stored["provider"] == "stripe"
+    status = client.get(f"/api/v1/agent-actions/{ps['quote_id']}", headers=bot_headers).json()
+    assert status["payment_token_status"] == "available"
+    assert status["payment_token"]
 
     duplicate = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
     assert duplicate.status_code == 200
@@ -322,9 +326,10 @@ def test_stripe_webhook_can_map_provider_session_id(client, quote_payload, bot_h
 
     paid = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
     assert paid.status_code == 200
-    assert paid.json()["processed"] is True
-    assert paid.json()["payment_session"]["id"] == ps["id"]
-    assert paid.json()["payment_session"]["status"] == "paid"
+    assert paid.json() == {"received": True, "processed": True}
+    stored = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
+    assert stored["id"] == ps["id"]
+    assert stored["status"] == "paid"
 
 
 def test_stripe_webhook_rejects_unconfigured_secret_without_marking_paid(client, quote_payload, bot_headers):

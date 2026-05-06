@@ -11,7 +11,7 @@ def _stripe_signature(body: bytes, secret: str, timestamp: str = "1700000000") -
     return f"t={timestamp},v1={digest}"
 
 
-def _create_action(client, bot_headers, service_url="https://downstream.example/run", headers=None, body=None):
+def _create_action(client, bot_headers, service_url="https://downstream.example/run", headers=None, body=None, method="POST"):
     return client.post(
         "/api/v1/premium-actions/pay-sh",
         headers=bot_headers,
@@ -24,9 +24,9 @@ def _create_action(client, bot_headers, service_url="https://downstream.example/
             "currency": "USD",
             "cost_breakdown": [{"label": "work", "amount_minor": 250}],
             "service_url": service_url,
-            "method": "POST",
-            "body": body or {"task": "run", "payment_token": "must-not-forward", "grant_id": "grant_leak"},
-            "headers": headers or {"X-Safe": "ok", "Authorization": "Bearer leak", "X-Api-Key": "leak"},
+            "method": method,
+            "body": body or {"task": "run"},
+            "headers": headers or {"Accept": "application/json", "Authorization": "Bearer leak", "X-Api-Key": "leak", "Cookie": "leak"},
             "payjent_managed_execution": True,
         },
     ).json()
@@ -41,7 +41,7 @@ def _paid_body(payment_session_id, amount=250, currency="usd"):
 
 def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot_headers, monkeypatch):
     secret = "whsec_test"
-    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret)
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret, managed_execution_allowed_hosts="downstream.example")
     monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_downstream", "https://checkout.stripe.test/session"))
     monkeypatch.setattr(main_module, "_safe_public_https_url", lambda url: (True, None))
     calls = []
@@ -67,6 +67,8 @@ def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot
     duplicate = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
 
     assert paid.status_code == 200
+    assert paid.json() == {"received": True, "processed": True}
+    assert "grant" not in paid.text.lower()
     assert duplicate.status_code == 200
     assert len(calls) == 1
     assert calls[0]["url"] == "https://downstream.example/run"
@@ -81,16 +83,66 @@ def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot
     assert status["fulfillment_events"][0]["metadata"]["type"] == "payjent_downstream_execution"
 
 
-def test_unsafe_service_url_fails_closed_and_does_not_execute(client, bot_headers, monkeypatch):
+def test_unsafe_service_url_rejected_before_checkout(client, bot_headers, monkeypatch):
     secret = "whsec_test"
-    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret)
-    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_downstream", "https://checkout.stripe.test/session"))
-    action = _create_action(client, bot_headers, service_url="http://localhost/run")
-    body = _paid_body(action["payment_session_id"])
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret, managed_execution_allowed_hosts="downstream.example")
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: (_ for _ in ()).throw(AssertionError("checkout should not be created")))
 
-    paid = client.post("/api/v1/webhooks/stripe", content=body, headers={"content-type": "application/json", "Stripe-Signature": _stripe_signature(body, secret)})
+    response = client.post(
+        "/api/v1/premium-actions/pay-sh",
+        headers=bot_headers,
+        json={
+            "bot_id": "bot-1", "external_user_id": "user-1", "request_summary": "run", "request_hash": "bad-url",
+            "amount_minor": 250, "currency": "USD", "cost_breakdown": [{"label": "work", "amount_minor": 250}],
+            "service_url": "http://localhost/run", "method": "POST", "body": {"task": "run"}, "payjent_managed_execution": True,
+        },
+    )
 
-    assert paid.status_code == 200
-    status = client.get(f"/api/v1/agent-actions/{action['action_id']}", headers=bot_headers).json()
-    assert status["fulfillment_events"][0]["status"] == "failed"
-    assert "https" in status["fulfillment_events"][0]["metadata"]["reason"]
+    assert response.status_code == 422
+    assert "https" in response.json()["detail"]
+
+
+def test_production_requires_managed_execution_allowlist(client, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test")
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: (_ for _ in ()).throw(AssertionError("checkout should not be created")))
+
+    response = client.post(
+        "/api/v1/premium-actions/pay-sh",
+        headers=bot_headers,
+        json={
+            "bot_id": "bot-1", "external_user_id": "user-1", "request_summary": "run", "request_hash": "prod-no-allow",
+            "amount_minor": 250, "currency": "USD", "cost_breakdown": [{"label": "work", "amount_minor": 250}],
+            "service_url": "https://downstream.example/run", "method": "POST", "body": {"task": "run"}, "payjent_managed_execution": True,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "ALLOWED_HOSTS" in response.json()["detail"]
+
+
+def test_production_allowed_managed_execution_host_creates_checkout(client, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test", managed_execution_allowed_hosts="downstream.example")
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_allowed", "https://checkout.stripe.test/session"))
+
+    action = _create_action(client, bot_headers)
+
+    assert action["payment_session_id"].startswith("ps_")
+    assert action["payment_url"] == "https://checkout.stripe.test/session"
+
+
+def test_nested_reserved_body_token_rejected_before_checkout(client, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test", managed_execution_allowed_hosts="downstream.example")
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: (_ for _ in ()).throw(AssertionError("checkout should not be created")))
+
+    response = client.post(
+        "/api/v1/premium-actions/pay-sh",
+        headers=bot_headers,
+        json={
+            "bot_id": "bot-1", "external_user_id": "user-1", "request_summary": "run", "request_hash": "nested-token",
+            "amount_minor": 250, "currency": "USD", "cost_breakdown": [{"label": "work", "amount_minor": 250}],
+            "service_url": "https://downstream.example/run", "method": "POST", "body": {"task": {"token": "leak"}}, "payjent_managed_execution": True,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "body.task.token" in response.json()["detail"]

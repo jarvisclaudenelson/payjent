@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     allow_unsafe_db_reset: bool = False
     bootstrap_token: str | None = None
     hosted_smoke_test_rail_enabled: bool = False
+    managed_execution_allowed_hosts: str = ""
 
     @property
     def is_production(self) -> bool:
@@ -35,6 +36,10 @@ class Settings(BaseSettings):
     @property
     def effective_mock_provider_enabled(self) -> bool:
         return self.dev_mode and self.mock_provider_enabled and not self.is_production
+
+    @property
+    def managed_execution_allowed_host_set(self) -> set[str]:
+        return {host.strip().lower().rstrip(".") for host in self.managed_execution_allowed_hosts.split(",") if host.strip()}
 
     @property
     def production_persistent_database_configured(self) -> bool:

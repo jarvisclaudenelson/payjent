@@ -152,7 +152,7 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
-        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external action envelope gated by Payjent only after obtaining an exact provider/merchant quote. If payjent_managed_execution=true and service_url is a safe public HTTPS URL, Payjent will POST the sanitized body once after Stripe confirms payment; otherwise agents poll/resume normally.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external action envelope gated by Payjent only after obtaining an exact provider/merchant quote. If payjent_managed_execution=true, Payjent validates the target before checkout and will POST an allowlisted, sanitized JSON body once after Stripe confirms payment; otherwise agents poll/resume normally.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
@@ -1285,6 +1285,7 @@ def create_agent_action(
     settings: Settings = Depends(get_settings),
     credential: BotCredential = Depends(require_bot_credential),
 ):
+    _validate_managed_execution_envelope(payload.execution_envelope, settings)
     q = create_quote(payload, session=session, settings=settings, credential=credential)
     stored_quote = session.get(Quote, q.id)
     if not stored_quote:
@@ -1313,6 +1314,7 @@ def create_pay_sh_premium_action(
             description=payload.description or payload.request_summary,
             payjent_managed_execution=payload.payjent_managed_execution,
         )
+        _validate_managed_execution_envelope(envelope, settings)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     action_payload = AgentActionCreate(
@@ -1455,6 +1457,8 @@ def _deliver_agent_action_callback(session: Session, q: Quote, ps: PaymentSessio
 
 _SECRET_HEADER_MARKERS = ("authorization", "cookie", "token", "secret", "key", "credential")
 _INTERNAL_HOSTS = {"localhost", "localhost.localdomain", "metadata.google.internal"}
+_RESERVED_DOWNSTREAM_BODY_KEYS = {"grant", "grant_id", "payment", "payment_token", "receipt", "token"}
+_ALLOWED_DOWNSTREAM_HEADERS = {"content-type", "accept", "idempotency-key", "x-request-id", "x-payjent-action-id"}
 
 
 def _safe_public_https_url(url: str | None) -> tuple[bool, str | None]:
@@ -1482,11 +1486,56 @@ def _safe_public_https_url(url: str | None) -> tuple[bool, str | None]:
     return True, None
 
 
+def _managed_execution_host_allowed(url: str | None, settings: Settings) -> tuple[bool, str | None]:
+    parsed = urlparse(url or "")
+    if parsed.scheme.lower() != "https":
+        return False, "service_url must use https"
+    if not parsed.hostname:
+        return False, "service_url missing hostname"
+    host = parsed.hostname.strip().lower().rstrip(".")
+    allowed_hosts = settings.managed_execution_allowed_host_set
+    if allowed_hosts:
+        return (True, None) if host in allowed_hosts else (False, "service_url hostname is not allowed for managed execution")
+    if settings.is_production:
+        return False, "PAYJENT_MANAGED_EXECUTION_ALLOWED_HOSTS must include service_url hostname in production"
+    return _safe_public_https_url(url)
+
+
+def _reserved_downstream_body_key_path(value, path: str = "body") -> str | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if str(key).lower() in _RESERVED_DOWNSTREAM_BODY_KEYS:
+                return child_path
+            found = _reserved_downstream_body_key_path(child, child_path)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found = _reserved_downstream_body_key_path(child, f"{path}[{index}]")
+            if found:
+                return found
+    return None
+
+
+def _validate_managed_execution_envelope(envelope: dict | None, settings: Settings) -> None:
+    if not envelope or not envelope.get("payjent_managed_execution"):
+        return
+    if (envelope.get("method") or "POST").upper() != "POST":
+        raise HTTPException(status_code=422, detail="only POST downstream execution is supported")
+    ok, reason = _managed_execution_host_allowed(envelope.get("service_url"), settings)
+    if not ok:
+        raise HTTPException(status_code=422, detail=reason)
+    reserved_path = _reserved_downstream_body_key_path(envelope.get("body") or {})
+    if reserved_path:
+        raise HTTPException(status_code=422, detail=f"managed execution body may not include reserved Payjent field: {reserved_path}")
+
+
 def _sanitized_downstream_headers(headers: dict | None) -> dict[str, str]:
     safe: dict[str, str] = {}
     for name, value in (headers or {}).items():
         lower = str(name).lower()
-        if any(marker in lower for marker in _SECRET_HEADER_MARKERS):
+        if lower not in _ALLOWED_DOWNSTREAM_HEADERS:
             continue
         safe[str(name)] = str(value)
     return safe
@@ -1502,7 +1551,7 @@ def _record_downstream_event(session: Session, q: Quote, status: str, metadata: 
     return event
 
 
-def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSession, grant: Grant, provider: str) -> FulfillmentEvent | None:
+def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSession, grant: Grant, provider: str, settings: Settings) -> FulfillmentEvent | None:
     envelope = q.execution_envelope or {}
     if not envelope.get("payjent_managed_execution"):
         return None
@@ -1516,12 +1565,13 @@ def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSess
     if (envelope.get("method") or "POST").upper() != "POST":
         return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "only POST downstream execution is supported"})
     service_url = envelope.get("service_url")
-    ok, reason = _safe_public_https_url(service_url)
+    ok, reason = _managed_execution_host_allowed(service_url, settings)
     if not ok:
         return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": reason})
     body = dict(envelope.get("body") or {})
-    for forbidden in ("payment_token", "grant_id", "grant", "receipt"):
-        body.pop(forbidden, None)
+    reserved_path = _reserved_downstream_body_key_path(body)
+    if reserved_path:
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": f"reserved Payjent field in downstream body: {reserved_path}"})
     headers = _sanitized_downstream_headers(envelope.get("headers") or {})
     headers.setdefault("Content-Type", "application/json")
     try:
@@ -1545,7 +1595,7 @@ def _issue_paid_session(session: Session, ps: PaymentSession, settings: Settings
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     _deliver_agent_action_callback(session, q, ps, settings, provider)
-    _execute_managed_downstream_once(session, q, ps, grant, provider)
+    _execute_managed_downstream_once(session, q, ps, grant, provider, settings)
     return receipt, grant
 
 
@@ -1699,8 +1749,8 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
     if ps.status == "paid":
         return {"received": True, "processed": False, "reason": "payment session already paid", "payment_session": session_to_read(ps)}
     _validate_stripe_paid_event(session, ps, data_object, event_type)
-    receipt, grant = _issue_paid_session(session, ps, settings, provider="stripe")
-    return {"received": True, "processed": True, **_issued_response(ps, receipt, grant)}
+    _issue_paid_session(session, ps, settings, provider="stripe")
+    return {"received": True, "processed": True}
 
 
 def _load_valid_grant(grant_id: str, presentation: GrantPresentation, session: Session, settings: Settings) -> Grant:

@@ -512,7 +512,8 @@ def run_discord_aggregator_stripe_smoke_with_client(client: Any, *, bot_id: str,
             ),
             "simulate Stripe webhook",
         )
-        grant = webhook["grant"]
+        paid_status = bot_client.get_agent_action_status(pending.id)
+        grant = {"id": paid_status["payment_token"]}
         presentation = {"bot_id": pending.bot_id, "external_user_id": pending.external_user_id, "request_hash": pending.request_hash}
         resume = gate.resume_paid_request(pending.id, grant_id=grant["id"], **presentation)
         x402 = _fake_x402_premium_call(bot_client, grant_id=grant["id"], presentation=presentation, topic=resume["execution_envelope"]["topic"])
