@@ -18,6 +18,10 @@ def test_public_root_renders_landing_page(client):
     assert "prefers-reduced-motion" in root.text
     assert "IntersectionObserver" in root.text
     assert "typing-dots" in root.text
+    assert "transitionTimer=null" in root.text
+    assert "function queueNextScenario()" in root.text
+    assert "if(transitionTimer)return" in root.text
+    assert "setTimeout(()=>reset((si+1)%scenarios.length),1200)" not in root.text
     assert "grant_" not in root.text
     assert "payment_token" not in root.text
     assert "<pre" not in root.text
