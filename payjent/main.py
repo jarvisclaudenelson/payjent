@@ -265,10 +265,23 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
     status_words = "Paid — one-time grant issued; agent will resume automatically" if grant else "Waiting for human approval and payment"
     resumes = _html_escape(q.execution_envelope.get("description") or q.execution_envelope.get("command_preview") or q.request_summary)
     mock_form = ""
-    if settings.effective_mock_provider_enabled and ps.status != "paid":
-        mock_form = f"""<section><h2>Dev mock payment</h2><p>This page does not reveal operator credentials. In local development, complete payment through the authenticated mock-pay API with an operator key kept outside the browser.</p><pre><code>curl -X POST http://localhost:8000/api/v1/payment-sessions/{_html_escape(ps.id)}/mock-pay \
-  -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;'</code></pre></section>"""
+    if ps.provider == "mock" and ps.status != "paid":
+        mock_form = f"""<section><h2>Complete payment</h2><p>This checkout can be completed from the browser without exposing operator credentials, payment tokens, or raw grant IDs.</p><form method="post" action="/pay/{_html_escape(ps.id)}/mock-pay"><button class="btn" type="submit">Approve and pay {_html_escape(_format_money(q.amount_minor, q.currency))}</button></form><p class="fine">Payjent will issue a single-use grant for the exact stored request after approval.</p></section>"""
     return f"""<!doctype html><html><head><title>Payjent checkout · Approve paid agent action</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Human approval document</div><h1>Approve this exact paid action?</h1><p class='muted'>Key question: should this agent resume this exact paid action after payment?</p></section><div class='grid'><div class='card'><h3>Agent request</h3><p>{_html_escape(q.request_summary)}</p><p class='fine'>External user: <code>{_html_escape(q.external_user_id)}</code><br>Request hash: <code>{_html_escape(q.request_hash)}</code></p></div><div class='card'><h3>Amount</h3><div class='stat'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div><ul>{breakdown}</ul></div><div class='card'><h3>Status</h3><p><b>{_html_escape(status_words)}</b></p><p class='fine'>Payment session: <code>{_html_escape(ps.id)}</code><br>Payment provider/status: {_html_escape(ps.provider)} / {_html_escape(ps.status)}<br>Grant state: {_html_escape(_grant_state(grant))}</p></div><div class='card'><h3>What resumes after payment</h3><p>{resumes}</p><p class='fine'>Approval creates a one-time grant bound to this stored request. Raw grant and payment tokens are not shown on this page.</p></div></div><section><h2>Approval terms</h2><ul><li>Human approval is required before Payjent marks this action ready.</li><li>The grant is single-use and tied to the exact request hash above.</li><li>Downstream rails may still impose their own authorization, settlement, availability, or rejection behavior; Payjent records the checkpoint and does not guarantee a third-party rail outcome.</li><li>Fulfillment events recorded so far: {len(fulfillment)}.</li></ul><p><a class='btn' href="/status/{_html_escape(ps.id)}">View status</a></p></section>{mock_form}</main></body></html>"""
+
+
+@app.post("/pay/{payment_session_id}/mock-pay")
+def browser_mock_pay(payment_session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    ps = session.get(PaymentSession, payment_session_id)
+    if not ps or ps.provider != "mock":
+        raise HTTPException(404, "payment session not found")
+    if ps.status != "paid":
+        q = session.get(Quote, ps.quote_id)
+        if not q:
+            raise HTTPException(404, "quote not found")
+        complete_mock_payment(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds)
+        _deliver_agent_action_callback(session, q, ps, settings, "mock")
+    return RedirectResponse(url=f"/pay/{ps.id}", status_code=303)
 
 
 @app.get("/status", response_class=HTMLResponse)
