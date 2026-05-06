@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 
 from payjent.auth import hash_api_key
 from payjent.config import get_settings
-from payjent.models import AgentInstallLink, BotCredential
+from payjent.models import AgentInstallLink, AgentProfile, BotCredential
 
 
 def _register_owner_and_agent(client):
@@ -136,3 +136,90 @@ def test_agent_setup_doc_mentions_install_link_and_forbids_raw_credential_chat(c
     assert "do not ask them for code snippets" in text
     assert "raw credentials" in text
     assert "chat" in text
+
+
+QUOTE_PAYLOAD = {
+    "external_user_id": "user-1",
+    "request_summary": "do a thing",
+    "amount_minor": 100,
+    "currency": "USD",
+    "cost_breakdown": [{"label": "work", "amount_minor": 100}],
+    "execution_envelope": {"action": "test"},
+}
+
+
+def _quote_payload(bot_id: str, request_hash: str) -> dict:
+    return {**QUOTE_PAYLOAD, "bot_id": bot_id, "request_hash": request_hash}
+
+
+def test_dashboard_revoke_credentials_removes_bot_credentials_and_old_key_fails(client, engine):
+    agent_id = _register_owner_and_agent(client)
+    install_url = client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).json()["install_url"]
+    api_key = client.post(install_url).json()["credential"]["value"]
+
+    response = client.post(f"/dashboard/agents/{agent_id}/credentials/revoke")
+    assert response.status_code == 200
+    assert response.json()["credentials_revoked"] == 1
+
+    with Session(engine) as session:
+        assert session.exec(select(BotCredential).where(BotCredential.bot_id == "agent-install-bot")).all() == []
+
+    auth_response = client.post("/api/v1/quotes", json=_quote_payload("agent-install-bot", "hash-after-revoke"), headers={"X-Payjent-Bot-Key": api_key})
+    assert auth_response.status_code == 401
+
+
+def test_dashboard_delete_agent_deactivates_revokes_links_and_hides_from_active_dashboard(client, engine):
+    agent_id = _register_owner_and_agent(client)
+    install_url = client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).json()["install_url"]
+    api_key = client.post(install_url).json()["credential"]["value"]
+    outstanding_url = client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).json()["install_url"]
+
+    response = client.post(f"/dashboard/agents/{agent_id}/delete")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "deleted"
+    assert body["credentials_revoked"] == 1
+    assert body["install_links_invalidated"] >= 1
+
+    with Session(engine) as session:
+        agent = session.get(AgentProfile, agent_id)
+        assert agent.status == "deleted"
+        assert session.exec(select(BotCredential).where(BotCredential.bot_id == "agent-install-bot")).all() == []
+        links = session.exec(select(AgentInstallLink).where(AgentInstallLink.agent_id == agent_id)).all()
+        assert all(link.consumed_at is not None for link in links)
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert f"data-agent-id='{agent_id}'" not in dashboard.text
+    assert f"data-deleted-agent-id='{agent_id}'" in dashboard.text
+    assert "Deleted agents" in dashboard.text
+
+    assert client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).status_code == 409
+    assert client.post(outstanding_url).status_code == 404
+    assert client.post("/api/v1/quotes", json=_quote_payload("agent-install-bot", "hash-after-delete"), headers={"X-Payjent-Bot-Key": api_key}).status_code == 401
+
+
+def test_redeeming_install_link_after_agent_deletion_fails_without_credential(client, engine):
+    agent_id = _register_owner_and_agent(client)
+    install_url = client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).json()["install_url"]
+    with Session(engine) as session:
+        agent = session.get(AgentProfile, agent_id)
+        agent.status = "deleted"
+        session.add(agent)
+        session.commit()
+
+    response = client.post(install_url)
+    assert response.status_code == 404
+    assert "payjent_" not in response.text
+    with Session(engine) as session:
+        assert session.exec(select(BotCredential).where(BotCredential.bot_id == "agent-install-bot")).all() == []
+
+
+def test_cross_owner_dashboard_revoke_and_delete_attempts_fail(client):
+    agent_id = _register_owner_and_agent(client)
+    client.post("/auth/logout")
+    client.post("/auth/register", data={"email": "other@example.com", "password": "correc...tery"}, follow_redirects=False)
+
+    assert client.post(f"/dashboard/agents/{agent_id}/credentials/revoke").status_code == 404
+    assert client.post(f"/dashboard/agents/{agent_id}/delete").status_code == 404
+    assert client.get(f"/dashboard/agents/{agent_id}").status_code == 404

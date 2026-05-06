@@ -597,6 +597,8 @@ def _credential_payload(agent: AgentProfile, api_key: str, request: Request, set
 
 
 def _create_install_link(agent: AgentProfile, account: Account, request: Request, session: Session, settings: Settings, ttl_seconds: int = 900) -> tuple[AgentInstallLink, str]:
+    if agent.status != "active":
+        raise HTTPException(status_code=409, detail="deleted agents cannot create install links")
     ttl_seconds = max(60, min(int(ttl_seconds or 900), 3600))
     token = token_urlsafe(32)
     link = AgentInstallLink(
@@ -609,6 +611,29 @@ def _create_install_link(agent: AgentProfile, account: Account, request: Request
     session.commit()
     session.refresh(link)
     return link, f"{_public_base_url(request, settings)}/agent-install/{token}"
+
+
+def _require_owned_agent(agent_id: str, account: Account, session: Session) -> AgentProfile:
+    agent = session.get(AgentProfile, agent_id)
+    if not agent or agent.owner_id not in {account.id, "local-owner"}:
+        raise HTTPException(404, "agent not found")
+    return agent
+
+
+def _revoke_agent_credentials(session: Session, agent: AgentProfile) -> int:
+    credentials = session.exec(select(BotCredential).where(BotCredential.bot_id == agent.bot_id, BotCredential.role == "bot")).all()
+    for credential in credentials:
+        session.delete(credential)
+    return len(credentials)
+
+
+def _invalidate_agent_install_links(session: Session, agent: AgentProfile) -> int:
+    now = datetime.now(timezone.utc)
+    links = session.exec(select(AgentInstallLink).where(AgentInstallLink.agent_id == agent.id, AgentInstallLink.consumed_at.is_(None))).all()
+    for link in links:
+        link.consumed_at = now
+        session.add(link)
+    return len(links)
 
 
 def _credential_display_html(account: Account, agent: AgentProfile, bot_api_key: str | None, created: bool) -> str:
@@ -812,17 +837,21 @@ def dashboard(request: Request, session: Session = Depends(get_session), setting
     account = _require_dashboard_account(request, session, settings)
     if isinstance(account, RedirectResponse):
         return account
-    agents = session.exec(select(AgentProfile).order_by(AgentProfile.created_at.desc())).all()
+    all_agents = session.exec(select(AgentProfile).where(AgentProfile.owner_id.in_([account.id, "local-owner"])).order_by(AgentProfile.created_at.desc())).all()
+    agents = [a for a in all_agents if a.status == "active"]
+    deleted_agents = [a for a in all_agents if a.status != "active"]
     quotes = session.exec(select(Quote).order_by(Quote.created_at.desc()).limit(20)).all()
     spends = session.exec(select(SpendLedgerEntry).order_by(SpendLedgerEntry.created_at.desc()).limit(20)).all()
     sessions_by_quote = _sessions_by_quote_id(session, [q.id for q in quotes])
     paid_totals = _money_totals_by_currency(quotes, {"paid", "fulfilled", "executing"})
     spend_totals = _money_totals_by_currency(spends, {"authorized", "captured"})
-    cards = "".join(f"<div class='card' data-agent-id='{_html_escape(a.id)}'><span class='pill'>{_html_escape(a.platform)}</span><h3>{_html_escape(a.name)}</h3><p class='muted'><code>{_html_escape(a.bot_id)}</code></p><p><a class='btn' href='/dashboard/agents/{_html_escape(a.id)}'>Open command view</a></p></div>" for a in agents) or "<div class='card'><h3>No agents yet</h3><p class='muted'>Use the Register agent form above. Payjent will generate a short-lived, single-use Agent Install Link instead of showing a raw credential.</p></div>"
+    cards = "".join(f"<div class='card' data-agent-id='{_html_escape(a.id)}'><span class='pill'>{_html_escape(a.platform)}</span><span class='pill ok'>{_html_escape(a.status)}</span><h3>{_html_escape(a.name)}</h3><p class='muted'><code>{_html_escape(a.bot_id)}</code></p><p><a class='btn' href='/dashboard/agents/{_html_escape(a.id)}'>Open command view</a></p></div>" for a in agents) or "<div class='card'><h3>No active agents</h3><p class='muted'>Use the Register agent form above. Payjent will generate a short-lived, single-use Agent Install Link instead of showing a raw credential.</p></div>"
+    deleted_cards = "".join(f"<div class='event' data-deleted-agent-id='{_html_escape(a.id)}'><b>{_html_escape(a.name)}</b> · <code>{_html_escape(a.bot_id)}</code><br><span class='muted'>Status: {_html_escape(a.status)} — credentials revoked; audit history preserved. <a href='/dashboard/agents/{_html_escape(a.id)}'>View history</a></span></div>" for a in deleted_agents)
+    deleted_section = f"<div class='card'><h3>Deleted agents</h3>{deleted_cards}</div>" if deleted_cards else ""
     interactions = "".join(f"<div class='event' data-quote-id='{_html_escape(q.id)}'><b>{_html_escape(q.status)}</b> · {_html_escape(_format_money(q.amount_minor, q.currency))}<br><span class='muted'>{_html_escape(q.request_summary)}</span><br><span class='muted'>How paid: {_html_escape(sessions_by_quote[q.id].provider)} / {_html_escape(sessions_by_quote[q.id].status)}</span></div>" if q.id in sessions_by_quote else f"<div class='event' data-quote-id='{_html_escape(q.id)}'><b>{_html_escape(q.status)}</b> · {_html_escape(_format_money(q.amount_minor, q.currency))}<br><span class='muted'>{_html_escape(q.request_summary)}</span><br><span class='muted'>How paid: no payment session yet</span></div>" for q in quotes[:6]) or "<div class='event'><b>No interactions yet</b><br><span class='muted'>Paid action requests will appear here when your agents create real Payjent quotes.</span></div>"
     spend_events = "".join(f"<div class='event' data-spend-id='{_html_escape(s.id)}'><b>{_html_escape(s.tool)} → {_html_escape(s.vendor)}</b> · {_html_escape(_format_money(s.amount_minor, s.currency))}<br><span class='muted'>{_html_escape(s.reason or 'No reason supplied by agent.')}</span></div>" for s in spends[:6]) or "<div class='event'><b>No downstream spend yet</b><br><span class='muted'>Reason-backed spend ledger entries appear only after an agent consumes a grant and requests spend authorization.</span></div>"
     register_form = """<form method='post' action='/dashboard/agents/register'><label>Agent name</label><input name='name' placeholder='Research assistant' required><label>Platform</label><input name='platform' placeholder='discord, web, slack, cli' required><label>Bot ID</label><input name='bot_id' placeholder='stable-agent-id' required><label>Default currency</label><input name='default_currency' value='USD' maxlength='3' required><label>Callback URL (optional)</label><input name='callback_url' type='url' placeholder='https://agent.example/callback'><button type='submit'>Register agent and create install link</button></form>"""
-    return f"""<!doctype html><html><head><title>Payjent dashboard</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a class='brand' href='/'><span class='brand-mark'>P</span><span>payjent</span></a><span class='muted'>Signed in as <b>{_html_escape(account.email)}</b></span><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><div class='eyebrow'>Payment operations</div><h1>Agent <em>command</em> center</h1><p class='muted'>Register agents, generate one-time Agent Install Links, watch paid action requests, and keep reasoning-backed spend records without exposing raw bot keys or payment tokens.</p><div class='cta-banner'><div><span class='eyebrow'>Primary action</span><h2>Register an <em>agent.</em></h2><p>Create a short-lived Agent Install Link for one agent identity. The raw credential is returned only to the agent during one successful redemption.</p><p><a class='btn accent' href='#register-agent'>Register your agent →</a><a class='btn dark' href='/docs/agent-payjent-self-setup.md'>Read setup guide</a></p></div><div class='runbook mono'><div><b>1</b> Sign in to dashboard</div><div><b>2</b> Register stable bot_id and generate install link</div><div><b>3</b> Agent redeems link once</div><div><b>4</b> Send setup guide to agent</div><div><b>5</b> Configure Stripe Connect, x402, and integration snippets on agent detail</div><div><b>6</b> Confirm approval gate resumes exact action</div></div></div></section><div class='kpi-row'><div class='kpi'><div class='lbl'>Agents</div><div class='stat'>{len(agents)}</div><p class='fine'>Registered identities</p></div><div class='kpi'><div class='lbl'>Paid action volume</div><div class='stat small'>{_format_money_totals(paid_totals)}</div><p class='fine'>Grouped by currency from recent paid / fulfilled quotes.</p></div><div class='kpi'><div class='lbl'>Downstream spend</div><div class='stat small'>{_format_money_totals(spend_totals)}</div><p class='fine'>Authorized or captured ledger</p></div><div class='kpi'><div class='lbl'>Recent requests</div><div class='stat'>{len(quotes)}</div><p class='fine'>Latest action quotes</p></div></div><div class='dash-layout'><section class='panel'><div class='ph'><h3>Agent-owner quickstart</h3><span class='sub'>latest quotes</span></div><div class='pb flat'>{interactions}</div></section><aside class='panel' id='register-agent'><div class='ph'><h3>Register agent</h3><span class='sub'>install link generated</span></div><div class='pb'><p class='muted'>Use this authenticated form. Payjent will generate a short-lived, single-use Agent Install Link. The raw credential is returned only when the agent redeems that link once.</p>{register_form}<p class='fine'>Do not paste raw credentials in chat; share only the install link with the target agent.</p></div></aside><section class='panel'><div class='ph'><h3>Registered agents</h3><span class='sub'>{len(agents)} total</span></div><div class='pb grid compact'>{cards}</div></section><aside class='panel'><div class='ph'><h3>Policy defaults</h3><span class='sub'>workspace</span></div><div class='pb'>{_policy_defaults_html()}</div></aside><section class='panel'><div class='ph'><h3>Spend reasoning trail</h3><span class='sub'>reason → vendor → amount</span></div><div class='pb flat'>{spend_events}</div></section><section class='panel wide'><div class='ph'><h3>Paid-action lifecycle ledger</h3><span class='sub'>quote → payment → grant → fulfillment</span></div><div class='pb'><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{_lifecycle_rows(session, quotes)}</tbody></table></div></section></div></main></body></html>"""
+    return f"""<!doctype html><html><head><title>Payjent dashboard</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a class='brand' href='/'><span class='brand-mark'>P</span><span>payjent</span></a><span class='muted'>Signed in as <b>{_html_escape(account.email)}</b></span><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><div class='eyebrow'>Payment operations</div><h1>Agent <em>command</em> center</h1><p class='muted'>Register agents, generate one-time Agent Install Links, watch paid action requests, and keep reasoning-backed spend records without exposing raw bot keys or payment tokens.</p><div class='cta-banner'><div><span class='eyebrow'>Primary action</span><h2>Register an <em>agent.</em></h2><p>Create a short-lived Agent Install Link for one agent identity. The raw credential is returned only to the agent during one successful redemption.</p><p><a class='btn accent' href='#register-agent'>Register your agent →</a><a class='btn dark' href='/docs/agent-payjent-self-setup.md'>Read setup guide</a></p></div><div class='runbook mono'><div><b>1</b> Sign in to dashboard</div><div><b>2</b> Register stable bot_id and generate install link</div><div><b>3</b> Agent redeems link once</div><div><b>4</b> Send setup guide to agent</div><div><b>5</b> Configure Stripe Connect, x402, and integration snippets on agent detail</div><div><b>6</b> Confirm approval gate resumes exact action</div></div></div></section><div class='kpi-row'><div class='kpi'><div class='lbl'>Agents</div><div class='stat'>{len(agents)}</div><p class='fine'>Registered identities</p></div><div class='kpi'><div class='lbl'>Paid action volume</div><div class='stat small'>{_format_money_totals(paid_totals)}</div><p class='fine'>Grouped by currency from recent paid / fulfilled quotes.</p></div><div class='kpi'><div class='lbl'>Downstream spend</div><div class='stat small'>{_format_money_totals(spend_totals)}</div><p class='fine'>Authorized or captured ledger</p></div><div class='kpi'><div class='lbl'>Recent requests</div><div class='stat'>{len(quotes)}</div><p class='fine'>Latest action quotes</p></div></div><div class='dash-layout'><section class='panel'><div class='ph'><h3>Agent-owner quickstart</h3><span class='sub'>latest quotes</span></div><div class='pb flat'>{interactions}</div></section><aside class='panel' id='register-agent'><div class='ph'><h3>Register agent</h3><span class='sub'>install link generated</span></div><div class='pb'><p class='muted'>Use this authenticated form. Payjent will generate a short-lived, single-use Agent Install Link. The raw credential is returned only when the agent redeems that link once.</p>{register_form}<p class='fine'>Do not paste raw credentials in chat; share only the install link with the target agent.</p></div></aside><section class='panel'><div class='ph'><h3>Registered agents</h3><span class='sub'>{len(agents)} total</span></div><div class='pb grid compact'>{cards}</div>{deleted_section}</section><aside class='panel'><div class='ph'><h3>Policy defaults</h3><span class='sub'>workspace</span></div><div class='pb'>{_policy_defaults_html()}</div></aside><section class='panel'><div class='ph'><h3>Spend reasoning trail</h3><span class='sub'>reason → vendor → amount</span></div><div class='pb flat'>{spend_events}</div></section><section class='panel wide'><div class='ph'><h3>Paid-action lifecycle ledger</h3><span class='sub'>quote → payment → grant → fulfillment</span></div><div class='pb'><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{_lifecycle_rows(session, quotes)}</tbody></table></div></section></div></main></body></html>"""
 
 
 
@@ -868,7 +897,7 @@ def agent_install_landing(token: str, request: Request, session: Session = Depen
     if not link or link.consumed_at or _as_aware_utc(link.expires_at) <= now:
         raise _safe_install_error()
     agent = session.get(AgentProfile, link.agent_id)
-    if not agent:
+    if not agent or agent.status != "active":
         raise _safe_install_error()
     return HTMLResponse(f"""<!doctype html><html><head><title>Payjent agent install</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>One-time Agent Install Link</div><h1>Install Payjent for {_html_escape(agent.name)}</h1><p class='muted'>This private setup link is valid once and expires at {_html_escape(link.expires_at.isoformat())}. Redeem it only from the target agent and store the returned credential privately.</p></section><form method='post'><button type='submit'>Redeem once</button></form><p class='fine'>Payjent will not display raw credentials on this landing page. Do not paste raw credentials, tokens, or env lines in chat.</p></main></body></html>""")
 
@@ -893,7 +922,7 @@ def redeem_agent_install_link(token: str, request: Request, session: Session = D
     if not link:
         raise _safe_install_error()
     agent = session.get(AgentProfile, link.agent_id)
-    if not agent or agent.owner_id != link.owner_id or agent.bot_id != link.bot_id:
+    if not agent or agent.owner_id != link.owner_id or agent.bot_id != link.bot_id or agent.status != "active":
         raise _safe_install_error()
     api_key = generate_api_key()
     create_bot_credential(session, agent.bot_id, api_key, settings.signing_secret, role="bot")
@@ -907,9 +936,7 @@ def dashboard_agent(agent_id: str, request: Request, session: Session = Depends(
     account = _require_dashboard_account(request, session, settings)
     if isinstance(account, RedirectResponse):
         return account
-    agent = session.get(AgentProfile, agent_id)
-    if not agent:
-        raise HTTPException(404, "agent not found")
+    agent = _require_owned_agent(agent_id, account, session)
     rails = session.exec(select(RailConnection).where(RailConnection.agent_id == agent.id)).all()
     rail_cards = "".join(f"<div class='card'><span class='pill {'ok' if r.status in {'connected','enabled'} else 'warn'}'>{_html_escape(r.status)}</span><h3>{_html_escape(r.rail)}</h3><p class='muted'>mode: {_html_escape(r.mode)}</p><pre><code>{_html_escape(r.config_json)}</code></pre></div>" for r in rails) or "<div class='card'><h3>Rails not configured</h3><p class='muted'>Start Stripe Connect and configure x402 with operator-authenticated API calls.</p></div>"
     quotes = session.exec(select(Quote).where(Quote.bot_id == agent.bot_id).order_by(Quote.created_at.desc()).limit(10)).all()
@@ -927,9 +954,12 @@ def dashboard_agent(agent_id: str, request: Request, session: Session = Depends(
     lifecycle = _lifecycle_rows(session, quotes)
     stripe_cmd = f"curl -X POST /api/v1/agents/{agent.id}/stripe-connect/start -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;'"
     x402_cmd = f"curl -X POST /api/v1/agents/{agent.id}/x402/configure -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;' -H 'Content-Type: application/json' -d '{{\"network\":\"base-sepolia\",\"pay_to\":\"0xTEST_PAY_TO\",\"max_per_request_minor\":900,\"max_per_call_minor\":250,\"enabled\":true}}'"
-    credential_form = f"""<form method='post' action='/dashboard/agents/{_html_escape(agent.id)}/credentials'><p class='warnbox'><b>Unsafe manual/admin recovery fallback.</b> Prefer Agent Install Link. Create a raw copy-once credential only if the install-link flow is unavailable and you can place it directly into a private secret store; never paste it in chat.</p><button type='submit'>Create manual recovery credential</button></form>"""
-    install_link_form = f"""<form method='post' action='/dashboard/agents/install-links'><input type='hidden' name='agent_id' value='{_html_escape(agent.id)}'><input type='hidden' name='ttl_seconds' value='900'><p class='muted'>Safest easy setup: generate a short-lived, single-use Agent Install Link for this agent, give that link to the agent, and let it redeem an agent-scoped credential once. Do not paste raw credentials or env lines in chat.</p><button type='submit'>Generate one-time install link</button></form>"""
-    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a href='/dashboard'>← Dashboard</a><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'><div class='card'><h3>Current policy defaults</h3>{_policy_defaults_html(x402_caps)}</div><div class='card'><h3>Smoke-test setup</h3><ol class='checklist'><li>Keep the Payjent agent credential in the agent secret store.</li><li>Give the agent <a href='/docs/agent-payjent-self-setup.md'>the setup guide</a>.</li><li>Run the demo smoke test and confirm payment creates a one-time resumable action.</li></ol></div></div><div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Agent Install Link</h3>{install_link_form}</div><div class='card'><h3>Agent credential</h3>{credential_form}</div><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><h3>Spend ledger entries</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div><div class='card'><h3>Paid-action lifecycle ledger</h3><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{lifecycle}</tbody></table></div></main></body></html>"
+    controls_disabled = agent.status != "active"
+    credential_form = f"""<form method='post' action='/dashboard/agents/{_html_escape(agent.id)}/credentials'><p class='warnbox'><b>Unsafe manual/admin recovery fallback.</b> Prefer Agent Install Link. Create a raw copy-once credential only if the install-link flow is unavailable and you can place it directly into a private secret store; never paste it in chat.</p><button type='submit' {'disabled' if controls_disabled else ''}>Create manual recovery credential</button></form>"""
+    revoke_form = f"""<form method='post' action='/dashboard/agents/{_html_escape(agent.id)}/credentials/revoke'><p class='warnbox'><b>Revoke credentials.</b> Deletes hashed bot credentials for this agent. Existing payment history remains readable; old agent API keys immediately stop authenticating.</p><button type='submit' {'disabled' if controls_disabled else ''}>Revoke credentials</button></form>"""
+    delete_form = f"""<form method='post' action='/dashboard/agents/{_html_escape(agent.id)}/delete'><p class='warnbox'><b>Delete agent.</b> This deactivates the agent instead of hard-deleting it: credentials are revoked, outstanding install links are burned, new install links are blocked, and audit/payment history is preserved.</p><button type='submit' {'disabled' if controls_disabled else ''}>Delete agent</button></form>"""
+    install_link_form = f"""<form method='post' action='/dashboard/agents/install-links'><input type='hidden' name='agent_id' value='{_html_escape(agent.id)}'><input type='hidden' name='ttl_seconds' value='900'><p class='muted'>Safest easy setup: generate a short-lived, single-use Agent Install Link for this agent, give that link to the agent, and let it redeem an agent-scoped credential once. Do not paste raw credentials or env lines in chat.</p><button type='submit' {'disabled' if controls_disabled else ''}>Generate one-time install link</button></form>"""
+    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a href='/dashboard'>← Dashboard</a><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'><div class='card'><h3>Current policy defaults</h3>{_policy_defaults_html(x402_caps)}</div><div class='card'><h3>Smoke-test setup</h3><ol class='checklist'><li>Keep the Payjent agent credential in the agent secret store.</li><li>Give the agent <a href='/docs/agent-payjent-self-setup.md'>the setup guide</a>.</li><li>Run the demo smoke test and confirm payment creates a one-time resumable action.</li></ol></div></div><div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Agent Install Link</h3>{install_link_form}</div><div class='card'><h3>Agent credential</h3>{credential_form}</div><div class='card'><h3>Danger zone</h3>{revoke_form}{delete_form}</div><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><h3>Spend ledger entries</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div><div class='card'><h3>Paid-action lifecycle ledger</h3><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{lifecycle}</tbody></table></div></main></body></html>"
 
 
 @app.post("/dashboard/agents/{agent_id}/credentials", response_class=HTMLResponse)
@@ -937,12 +967,37 @@ def dashboard_create_agent_credential(agent_id: str, request: Request, session: 
     account = _require_dashboard_account(request, session, settings)
     if isinstance(account, RedirectResponse):
         return account
-    agent = session.get(AgentProfile, agent_id)
-    if not agent:
-        raise HTTPException(404, "agent not found")
+    agent = _require_owned_agent(agent_id, account, session)
+    if agent.status != "active":
+        raise HTTPException(status_code=409, detail="deleted agents cannot create credentials")
     generated_key = generate_api_key()
     create_bot_credential(session, agent.bot_id, generated_key, settings.signing_secret, role="bot")
     return HTMLResponse(_credential_display_html(account, agent, generated_key, True))
+
+
+@app.post("/dashboard/agents/{agent_id}/credentials/revoke")
+def dashboard_revoke_agent_credentials(agent_id: str, request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    account = _require_dashboard_account(request, session, settings)
+    if isinstance(account, RedirectResponse):
+        return account
+    agent = _require_owned_agent(agent_id, account, session)
+    revoked = _revoke_agent_credentials(session, agent)
+    session.commit()
+    return JSONResponse({"agent_id": agent.id, "bot_id": agent.bot_id, "credentials_revoked": revoked})
+
+
+@app.post("/dashboard/agents/{agent_id}/delete")
+def dashboard_delete_agent(agent_id: str, request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    account = _require_dashboard_account(request, session, settings)
+    if isinstance(account, RedirectResponse):
+        return account
+    agent = _require_owned_agent(agent_id, account, session)
+    agent.status = "deleted"
+    session.add(agent)
+    revoked = _revoke_agent_credentials(session, agent)
+    invalidated = _invalidate_agent_install_links(session, agent)
+    session.commit()
+    return JSONResponse({"agent_id": agent.id, "bot_id": agent.bot_id, "status": agent.status, "credentials_revoked": revoked, "install_links_invalidated": invalidated})
 
 
 def _enforce_stripe_checkout_guardrails(settings: Settings) -> None:
