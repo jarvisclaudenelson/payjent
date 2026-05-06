@@ -80,6 +80,18 @@ WORKOS_UNUSABLE_PASSWORD_HASH = "workos_unusable_password_hash"
 engine = make_engine()
 
 
+def _add_text_column_if_missing(db_engine: Engine, *, table_name: str, column_name: str) -> None:
+    if db_engine.dialect.name not in {"sqlite", "postgresql"}:
+        return
+    inspector = inspect(db_engine)
+    if table_name not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns(table_name)}
+    if column_name not in columns:
+        with db_engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} TEXT"))
+
+
 def migrate_quote_callback_column(db_engine: Engine) -> None:
     """Add callback_url to existing quote tables for pre-live deployments.
 
@@ -87,15 +99,18 @@ def migrate_quote_callback_column(db_engine: Engine) -> None:
     additive compatibility shim narrow so existing SQLite/Postgres deployments
     can accept the new optional callback_url column after upgrade.
     """
-    if db_engine.dialect.name not in {"sqlite", "postgresql"}:
-        return
-    inspector = inspect(db_engine)
-    if "quote" not in inspector.get_table_names():
-        return
-    columns = {column["name"] for column in inspector.get_columns("quote")}
-    if "callback_url" not in columns:
-        with db_engine.begin() as connection:
-            connection.execute(text("ALTER TABLE quote ADD COLUMN callback_url TEXT"))
+    _add_text_column_if_missing(db_engine, table_name="quote", column_name="callback_url")
+
+
+def migrate_payment_session_provider_columns(db_engine: Engine) -> None:
+    """Add provider/idempotency columns to existing pre-live payment_session tables."""
+    for column_name in ("provider_session_id", "idempotency_key", "receipt_id"):
+        _add_text_column_if_missing(db_engine, table_name="paymentsession", column_name=column_name)
+
+
+def migrate_grant_payment_session_column(db_engine: Engine) -> None:
+    """Add payment_session_id to existing pre-live grant tables."""
+    _add_text_column_if_missing(db_engine, table_name="grant", column_name="payment_session_id")
 
 
 # Backwards-compatible alias for tests/imports that referenced the original SQLite-only shim.
@@ -107,6 +122,8 @@ def init_db() -> None:
     SQLModel.metadata.create_all(engine)
     migrate_sqlite_account_auth_columns(engine)
     migrate_quote_callback_column(engine)
+    migrate_payment_session_provider_columns(engine)
+    migrate_grant_payment_session_column(engine)
 
 
 def get_session() -> Generator[Session, None, None]:
