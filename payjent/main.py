@@ -397,13 +397,14 @@ def hosted_smoke_agent_webhook(
     payment_session_id = action_data["payment_session_id"]
     unpaid = get_agent_action_status(action_id, session=session, credential=bot_credential)
 
-    if not settings.effective_mock_provider_enabled:
-        raise HTTPException(status_code=503, detail="mock/test settlement rail unavailable for hosted smoke")
+    if not (settings.effective_mock_provider_enabled or settings.hosted_smoke_test_rail_enabled):
+        raise HTTPException(status_code=503, detail="hosted smoke test rail unavailable")
     ps = session.get(PaymentSession, payment_session_id)
     q = session.get(Quote, action_id)
     if not ps or not q:
         raise HTTPException(500, "hosted smoke action was not persisted")
-    mock_pay(payment_session_id, session=session, settings=settings, _credential=operator_credential)
+    receipt, grant = complete_mock_payment(session, q, ps, settings.signing_secret, settings.grant_ttl_seconds)
+    _deliver_agent_action_callback(session, q, ps, settings, "mock")
     callback_attempt = session.exec(select(WebhookDeliveryAttempt).where(WebhookDeliveryAttempt.payment_session_id == payment_session_id).order_by(WebhookDeliveryAttempt.created_at.desc())).first()
     paid = get_agent_action_status(action_id, session=session, credential=bot_credential)
     paid_data = paid if isinstance(paid, dict) else paid.model_dump()

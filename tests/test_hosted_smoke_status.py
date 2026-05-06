@@ -26,6 +26,40 @@ def test_hosted_smoke_status_disabled_and_requires_token(client):
         _clear_bootstrap()
 
 
+def test_hosted_smoke_status_production_requires_explicit_test_rail(client):
+    token = "production-smoke-token"
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        env="production",
+        dev_mode=False,
+        public_base_url="https://payjent.example",
+        signing_secret="prod-smoke-signing-secret",
+        bootstrap_token=token,
+    )
+    try:
+        denied = client.post("/api/v1/smoke/agent-webhook", json={}, headers={"X-Payjent-Bootstrap-Token": token})
+        assert denied.status_code == 503
+    finally:
+        _clear_bootstrap()
+
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        env="production",
+        dev_mode=False,
+        public_base_url="https://payjent.example",
+        signing_secret="prod-smoke-signing-secret",
+        bootstrap_token=token,
+        hosted_smoke_test_rail_enabled=True,
+    )
+    try:
+        ok = client.post("/api/v1/smoke/agent-webhook", json={}, headers={"X-Payjent-Bootstrap-Token": token})
+        assert ok.status_code == 200, ok.text
+        data = ok.json()
+        assert data["ok"] is True
+        assert data["operator_mock_pay"] == "test_rail_only"
+        assert data["settlement"] == "external_pay_sh_runtime"
+    finally:
+        _clear_bootstrap()
+
+
 def test_hosted_smoke_status_success_and_redaction(client):
     token = _enable_bootstrap()
     try:

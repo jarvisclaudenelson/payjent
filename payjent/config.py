@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     grant_ttl_seconds: int = 900
     allow_unsafe_db_reset: bool = False
     bootstrap_token: str | None = None
+    hosted_smoke_test_rail_enabled: bool = False
 
     @property
     def is_production(self) -> bool:
