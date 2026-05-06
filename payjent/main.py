@@ -1220,6 +1220,7 @@ def _create_checkout_for_quote(
     session: Session,
     settings: Settings,
 ) -> PaymentSession:
+    _validate_managed_execution_envelope(q.execution_envelope, settings)
     risk = assess_checkout_risk(q.request_summary, q.execution_envelope)
     if not risk.allowed:
         raise HTTPException(status_code=403, detail=f"checkout blocked by risk policy: {risk.reason}")

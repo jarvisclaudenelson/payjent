@@ -130,6 +130,73 @@ def test_production_allowed_managed_execution_host_creates_checkout(client, bot_
     assert action["payment_url"] == "https://checkout.stripe.test/session"
 
 
+def test_generic_quote_checkout_rejects_unallowlisted_managed_execution_before_stripe(client, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test")
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: (_ for _ in ()).throw(AssertionError("checkout should not be created")))
+    quote = client.post(
+        "/api/v1/quotes",
+        headers=bot_headers,
+        json={
+            "bot_id": "bot-1",
+            "external_user_id": "user-1",
+            "request_summary": "generic downstream action",
+            "request_hash": "generic-prod-no-allow",
+            "amount_minor": 250,
+            "currency": "USD",
+            "cost_breakdown": [{"label": "work", "amount_minor": 250}],
+            "execution_envelope": {
+                "service_url": "https://downstream.example/run",
+                "method": "POST",
+                "body": {"task": "run"},
+                "payjent_managed_execution": True,
+            },
+        },
+    )
+    assert quote.status_code == 200
+
+    response = client.post(f"/api/v1/quotes/{quote.json()['id']}/checkout", headers=bot_headers)
+
+    assert response.status_code == 422
+    assert "ALLOWED_HOSTS" in response.json()["detail"]
+
+
+def test_generic_quote_checkout_allows_allowlisted_managed_execution(client, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test", managed_execution_allowed_hosts="downstream.example")
+    calls = []
+
+    def fake_create(*args):
+        calls.append(args)
+        return "cs_generic_allowed", "https://checkout.stripe.test/session"
+
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", fake_create)
+    quote = client.post(
+        "/api/v1/quotes",
+        headers=bot_headers,
+        json={
+            "bot_id": "bot-1",
+            "external_user_id": "user-1",
+            "request_summary": "generic downstream action",
+            "request_hash": "generic-prod-allowed",
+            "amount_minor": 250,
+            "currency": "USD",
+            "cost_breakdown": [{"label": "work", "amount_minor": 250}],
+            "execution_envelope": {
+                "service_url": "https://downstream.example/run",
+                "method": "POST",
+                "body": {"task": "run"},
+                "payjent_managed_execution": True,
+            },
+        },
+    )
+    assert quote.status_code == 200
+
+    response = client.post(f"/api/v1/quotes/{quote.json()['id']}/checkout", headers=bot_headers)
+
+    assert response.status_code == 200
+    assert response.json()["checkout_url"] == "https://checkout.stripe.test/session"
+    assert len(calls) == 1
+
+
 def test_nested_reserved_body_token_rejected_before_checkout(client, bot_headers, monkeypatch):
     app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret="whsec_test", managed_execution_allowed_hosts="downstream.example")
     monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: (_ for _ in ()).throw(AssertionError("checkout should not be created")))
