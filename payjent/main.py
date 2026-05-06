@@ -135,6 +135,61 @@ def docs_index():
     return HTMLResponse("""<!doctype html><html><head><title>Payjent docs</title><meta name='viewport' content='width=device-width,initial-scale=1'></head><body><main style='font-family:system-ui;max-width:760px;margin:48px auto;padding:0 20px'><h1>Payjent agent setup</h1><p>Agent-readable setup guide for integrating paid action approvals.</p><p><a href='/docs/agent-payjent-self-setup.md'>Open /docs/agent-payjent-self-setup.md</a></p></main></body></html>""")
 
 
+def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
+    tools = [
+        {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
+        {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action; discovery is free, execution resumes only after payment."},
+        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external pay.sh action envelope gated by Payjent."},
+        {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
+        {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
+        {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
+        {"name": "payjent.authorize_x402_spend", "endpoint": "/api/v1/grants/{grant_id}/spend-authorizations", "method": "POST", "description": "Authorize request-bound downstream x402 spend after Payjent grant consumption.", "required_rail": "x402"},
+    ]
+    if x402_available is not None:
+        for tool in tools:
+            if tool.get("required_rail") == "x402":
+                tool["available"] = x402_available
+                if not x402_available:
+                    tool["setup_hint"] = "Configure and enable the x402 rail for this agent."
+            else:
+                tool["available"] = True
+    return tools
+
+
+def _safe_rail_config_summary(rail: RailConnection) -> dict:
+    cfg = dict(rail.config_json or {})
+    if rail.rail == "x402":
+        allowed = {"network", "pay_to", "facilitator_url", "max_per_request_minor", "max_per_call_minor", "currency", "enabled"}
+        return {key: cfg[key] for key in allowed if key in cfg}
+    return {}
+
+
+def _discovery_manifest(base_url: str) -> dict:
+    return {
+        "name": "Payjent",
+        "version": "v0",
+        "description": "paid-agent-action control plane",
+        "docs_url": f"{base_url}/docs/agent-payjent-self-setup.md",
+        "authenticated_capabilities_url": f"{base_url}/api/v1/agent-capabilities",
+        "auth": {
+            "header": "X-Payjent-Bot-Key",
+            "credential_install": "Credentials are installed via one-time Agent Install Link and must not be pasted in chat.",
+        },
+        "tools": _tool_descriptors(),
+        "security_invariants": [
+            "request-bound approvals and grants",
+            "paid-before-execute",
+            "no raw grants, credentials, or payment tokens in chat",
+            "exact request resume",
+        ],
+    }
+
+
+@app.get("/.well-known/payjent-tools.json")
+def well_known_payjent_tools(request: Request, settings: Settings = Depends(get_settings)):
+    return _discovery_manifest(_public_base_url(request, settings))
+
+
 @app.get("/.well-known/payjent-agent-setup")
 def well_known_payjent_agent_setup():
     return RedirectResponse("/docs/agent-payjent-self-setup.md", status_code=308)
@@ -937,6 +992,41 @@ def redeem_agent_install_link(token: str, request: Request, session: Session = D
     return payload
 
 
+@app.get("/api/v1/agent-capabilities")
+def agent_capabilities(request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    agent = session.exec(select(AgentProfile).where(AgentProfile.bot_id == credential.bot_id)).first()
+    if not agent or agent.status != "active":
+        raise HTTPException(status_code=404, detail="agent not found")
+    base_url = _public_base_url(request, settings)
+    rails = session.exec(select(RailConnection).where(RailConnection.agent_id == agent.id)).all()
+    enabled_rails = []
+    x402_config = None
+    x402_available = False
+    for rail in rails:
+        cfg = _safe_rail_config_summary(rail)
+        enabled_rails.append({"rail": rail.rail, "status": rail.status, "mode": rail.mode, "config_summary": cfg})
+        if rail.rail == "x402" and rail.status in {"connected", "enabled"}:
+            x402_available = True
+            x402_config = cfg
+    return {
+        "agent": {"id": agent.id, "bot_id": agent.bot_id, "name": agent.name, "platform": agent.platform, "status": agent.status, "default_currency": agent.default_currency},
+        "base_url": base_url,
+        "enabled_rails": enabled_rails,
+        "tools": _tool_descriptors(x402_available=x402_available),
+        "limits": {
+            "default_currency": agent.default_currency,
+            "x402": {
+                "max_per_request_minor": x402_config.get("max_per_request_minor") if x402_config else None,
+                "max_per_call_minor": x402_config.get("max_per_call_minor") if x402_config else None,
+                "currency": x402_config.get("currency", agent.default_currency) if x402_config else agent.default_currency,
+            },
+        },
+        "docs_url": f"{base_url}/docs/agent-payjent-self-setup.md",
+        "dashboard_url": f"{base_url}/dashboard/agents/{agent.id}",
+        "security_invariants": _discovery_manifest(base_url)["security_invariants"],
+    }
+
+
 @app.get("/dashboard/agents/{agent_id}", response_class=HTMLResponse)
 def dashboard_agent(agent_id: str, request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
     account = _require_dashboard_account(request, session, settings)
@@ -965,7 +1055,9 @@ def dashboard_agent(agent_id: str, request: Request, session: Session = Depends(
     revoke_form = f"""<form method='post' action='/dashboard/agents/{_html_escape(agent.id)}/credentials/revoke'><p class='warnbox'><b>Revoke credentials.</b> Deletes hashed bot credentials for this agent. Existing payment history remains readable; old agent API keys immediately stop authenticating.</p><button type='submit' {'disabled' if controls_disabled else ''}>Revoke credentials</button></form>"""
     delete_form = f"""<form method='post' action='/dashboard/agents/{_html_escape(agent.id)}/delete'><p class='warnbox'><b>Delete agent.</b> This deactivates the agent instead of hard-deleting it: credentials are revoked, outstanding install links are burned, new install links are blocked, and audit/payment history is preserved.</p><button type='submit' {'disabled' if controls_disabled else ''}>Delete agent</button></form>"""
     install_link_form = f"""<form method='post' action='/dashboard/agents/install-links'><input type='hidden' name='agent_id' value='{_html_escape(agent.id)}'><input type='hidden' name='ttl_seconds' value='900'><p class='muted'>Safest easy setup: generate a short-lived, single-use Agent Install Link for this agent, give that link to the agent, and let it redeem an agent-scoped credential once. Do not paste raw credentials or env lines in chat.</p><button type='submit' {'disabled' if controls_disabled else ''}>Generate one-time install link</button></form>"""
-    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a href='/dashboard'>← Dashboard</a><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'><div class='card'><h3>Current policy defaults</h3>{_policy_defaults_html(x402_caps)}</div><div class='card'><h3>Smoke-test setup</h3><ol class='checklist'><li>Keep the Payjent agent credential in the agent secret store.</li><li>Give the agent <a href='/docs/agent-payjent-self-setup.md'>the setup guide</a>.</li><li>Run the demo smoke test and confirm payment creates a one-time resumable action.</li></ol></div></div><div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Agent Install Link</h3>{install_link_form}</div><div class='card'><h3>Agent credential</h3>{credential_form}</div><div class='card'><h3>Danger zone</h3>{revoke_form}{delete_form}</div><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><h3>Spend ledger entries</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div><div class='card'><h3>Paid-action lifecycle ledger</h3><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{lifecycle}</tbody></table></div></main></body></html>"
+    base_url = _public_base_url(request, settings)
+    discovery_card = f"""<div class='card'><h3>Paid tool discovery</h3><p class='muted'>After install, have the agent fetch the public manifest, then call authenticated capabilities with its private <code>X-Payjent-Bot-Key</code> to decide which paid actions are possible.</p><p class='fine'>Public manifest: <a href='/.well-known/payjent-tools.json'>{_html_escape(base_url)}/.well-known/payjent-tools.json</a></p><p class='fine'>Authenticated capabilities: <code>{_html_escape(base_url)}/api/v1/agent-capabilities</code></p><p><a class='btn' href='/docs/agent-payjent-self-setup.md'>Read discovery docs</a></p></div>"""
+    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a href='/dashboard'>← Dashboard</a><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'><div class='card'><h3>Current policy defaults</h3>{_policy_defaults_html(x402_caps)}</div><div class='card'><h3>Smoke-test setup</h3><ol class='checklist'><li>Keep the Payjent agent credential in the agent secret store.</li><li>Give the agent <a href='/docs/agent-payjent-self-setup.md'>the setup guide</a>.</li><li>Run the demo smoke test and confirm payment creates a one-time resumable action.</li></ol></div></div>{discovery_card}<div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Agent Install Link</h3>{install_link_form}</div><div class='card'><h3>Agent credential</h3>{credential_form}</div><div class='card'><h3>Danger zone</h3>{revoke_form}{delete_form}</div><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><h3>Spend ledger entries</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div><div class='card'><h3>Paid-action lifecycle ledger</h3><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{lifecycle}</tbody></table></div></main></body></html>"
 
 
 @app.post("/dashboard/agents/{agent_id}/credentials", response_class=HTMLResponse)

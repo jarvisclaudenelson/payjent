@@ -19,6 +19,16 @@ When a user asks you for premium work, Payjent lets you:
 
 Payjent is **not** the downstream premium API runtime. For pay.sh/paycurl work, Payjent authorizes and resumes the request; you execute pay.sh externally after Payjent says the action is paid.
 
+## Discovery flow: learn available paid tools
+
+Before creating paid actions, discover what this Payjent instance supports:
+
+1. Fetch the public manifest: `GET /.well-known/payjent-tools.json`. This is safe for any agent/client and contains no credentials, grants, or payment tokens. It describes Payjent tools, docs, auth requirements, and the authenticated capabilities URL.
+2. If you have been installed with a private Payjent credential, call `GET /api/v1/agent-capabilities` with `X-Payjent-Bot-Key` from your private secret store.
+3. Use the capabilities response to decide which paid actions and rails are available for your current agent. For example, generic paid actions may be available while x402 spend authorization depends on an enabled x402 rail.
+
+Never ask a user to paste `X-Payjent-Bot-Key`, grants, payment tokens, or install-link redemption output in chat.
+
 ## Primary setup flow: one-time Agent Install Link
 
 Use the dashboard-created **Agent Install Link** as the primary setup flow:
