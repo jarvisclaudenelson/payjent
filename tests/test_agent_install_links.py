@@ -44,6 +44,22 @@ def test_dashboard_creates_one_time_agent_install_link(client, engine):
         assert link.consumed_at is None
 
 
+def test_dashboard_register_primary_flow_does_not_show_or_create_raw_credential(client, engine):
+    client.post("/auth/register", data={"email": "owner@example.com", "password": "correc...tery"}, follow_redirects=False)
+    response = client.post(
+        "/dashboard/agents/register",
+        data={"name": "Research Agent", "platform": "cli", "bot_id": "agent-install-bot", "default_currency": "USD"},
+    )
+    assert response.status_code == 200
+    assert "One-time Agent Install Link" in response.text
+    assert "payjent_" not in response.text
+    assert "Copy this Payjent agent credential now" not in response.text
+    assert "Primary safe setup" in response.text
+    with Session(engine) as session:
+        assert session.exec(select(AgentInstallLink)).one().consumed_at is None
+        assert session.exec(select(BotCredential).where(BotCredential.bot_id == "agent-install-bot")).all() == []
+
+
 def test_agent_install_link_redeems_credential_once_with_agent_scope(client):
     agent_id = _register_owner_and_agent(client)
     install_url = client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).json()["install_url"]
@@ -78,7 +94,8 @@ def test_expired_agent_install_link_fails_safely(client, engine):
     agent_id = _register_owner_and_agent(client)
     install_url = client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).json()["install_url"]
     with Session(engine) as session:
-        link = session.exec(select(AgentInstallLink)).one()
+        token = urlparse(install_url).path.rsplit("/", 1)[-1]
+        link = session.exec(select(AgentInstallLink).where(AgentInstallLink.token_hash == hash_api_key(f"agent-install:{token}", get_settings().signing_secret))).one()
         link.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         session.add(link)
         session.commit()
@@ -98,6 +115,16 @@ def test_redeemed_credential_is_not_owner_or_operator_token(client, engine):
         credential = session.exec(select(BotCredential).where(BotCredential.key_hash == key_hash)).one()
         assert credential.bot_id == "agent-install-bot"
         assert credential.role == "bot"
+
+
+def test_agent_install_link_second_redemption_does_not_create_duplicate_credential(client, engine):
+    agent_id = _register_owner_and_agent(client)
+    install_url = client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).json()["install_url"]
+    assert client.post(install_url).status_code == 200
+    assert client.post(install_url).status_code == 404
+    with Session(engine) as session:
+        credentials = session.exec(select(BotCredential).where(BotCredential.bot_id == "agent-install-bot")).all()
+        assert len(credentials) == 1
 
 
 def test_agent_setup_doc_mentions_install_link_and_forbids_raw_credential_chat(client):
