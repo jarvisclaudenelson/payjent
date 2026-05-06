@@ -5,8 +5,11 @@ def test_agent_self_setup_markdown_is_agent_readable(client):
     text = response.text
     assert "# Agent Self-Setup Guide: Teach Yourself to Use Payjent" in text
     assert "C3PO" not in text
-    assert "do not ask them for code snippets, environment variables, or raw payment tokens" in text
-    assert "I can use Payjent, but I am not execution-ready yet" in text
+    assert "do not ask them for code snippets, environment variables, Payjent agent ids" in text
+    assert "I can use Payjent, but I am not connected yet" in text
+    assert "register/authorize this agent" in text
+    assert "do not invent variable names or manual shell steps" in text
+    assert "Do not provide a manual `.env` recipe" in text
     assert "https://payjent.vercel.app/docs/agent-payjent-self-setup.md" in text
     assert "grant_*" in text
     assert "Payjent does not execute pay.sh for you" in text

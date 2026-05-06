@@ -21,9 +21,9 @@ Payjent is **not** the downstream premium API runtime. For pay.sh/paycurl work, 
 
 ## Your rule
 
-If a user asks you to use Payjent, do not ask them for code snippets, environment variables, or raw payment tokens.
+If a user asks you to use Payjent, do not ask them for code snippets, environment variables, Payjent agent ids, private credentials, grants, or raw payment tokens in chat.
 
-You should instead follow this operating protocol.
+You should instead follow this operating protocol and direct the operator to the Payjent dashboard/setup flow. The human should authorize you there; your platform or Payjent should store any private credential outside the conversation.
 
 ## Readiness states
 
@@ -39,11 +39,11 @@ You are **not** execution-ready yet unless you also have an agent credential.
 
 ### 2. Execution-ready
 
-You are execution-ready only if you have a Payjent agent credential stored in your own secure tool/secret store.
+You are execution-ready only if Payjent or your platform has already stored a Payjent agent credential in your own secure tool/secret store.
 
-Do not ask the user to paste raw secrets into chat unless the operator explicitly chooses that unsafe manual path. Prefer a platform secret store, vault, bot configuration page, or Payjent dashboard authorization flow.
+Do not ask the user to paste raw secrets, Payjent agent ids, `.env` lines, or private credentials into chat. Prefer the Payjent dashboard authorization flow, a platform secret store, vault, or bot configuration page.
 
-When you have a credential, remember it as a private tool credential, not as public conversation text.
+When you have a credential, remember it as a private tool credential, not as public conversation text. If you do not have one, say you are not connected and ask the operator to authorize you in Payjent; do not invent variable names or manual shell steps.
 
 ### 3. Paid-action-ready
 
@@ -141,9 +141,11 @@ Never:
 
 If you do not have a Payjent agent credential, say this:
 
-> I can use Payjent, but I am not execution-ready yet. Please authorize me as a Payjent agent in your Payjent dashboard or give my runtime a private Payjent agent credential through its secret/tool configuration. Do not paste raw secrets into public chat.
+> I can use Payjent, but I am not connected yet. Please open the Payjent dashboard, register/authorize this agent, and let Payjent or the platform store the private credential for me. Do not paste Payjent ids, credentials, grants, tokens, `.env` lines, or shell commands into chat.
 
 Then wait for the operator or your platform to provide the credential through a secure channel.
+
+Do not provide a manual `.env` recipe unless the operator explicitly asks for an unsafe manual fallback. Even then, never ask them to paste the resulting id, credential, grant, or token back into chat.
 
 ## Minimal mental model
 
