@@ -129,6 +129,10 @@ def test_authenticated_dashboard_has_agent_credential_form_not_operator_curl(cli
     assert "Copy one-time credential" in response.text
     assert "X-Payjent-Bot-Key" in response.text
     assert "/docs/agent-payjent-self-setup.md" in response.text
+    assert "Agent-owner quickstart" in response.text
+    assert "Policy controls MVP" in response.text
+    assert "Paid-action lifecycle ledger" in response.text
+    assert "assess_checkout_risk" in response.text
     assert "&lt;operator-key&gt;" not in response.text
 
 

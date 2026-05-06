@@ -27,6 +27,22 @@ def test_pay_page_shows_quote_and_authenticated_dev_mock_instructions(client, qu
     assert payment_session["id"] in response.text
 
 
+def test_pay_page_is_human_approval_document_without_tokens(client, quote_payload, bot_headers, operator_headers):
+    action = client.post("/api/v1/agent-actions", json=quote_payload, headers=bot_headers).json()
+    paid = client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers).json()
+
+    response = client.get(f"/pay/{action['payment_session_id']}")
+
+    assert response.status_code == 200
+    assert "Human approval document" in response.text
+    assert "should this agent resume this exact paid action" in response.text
+    assert "What resumes after payment" in response.text
+    assert "one-time grant" in response.text
+    assert "Downstream rails" in response.text
+    assert paid["grant"]["id"] not in response.text
+    assert "payment_token" not in response.text
+
+
 def test_browser_mock_pay_post_action_is_not_available(client, quote_payload, bot_headers):
     _quote, payment_session = _create_checkout(client, quote_payload, bot_headers)
 
