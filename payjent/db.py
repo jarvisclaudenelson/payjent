@@ -113,6 +113,27 @@ def migrate_grant_payment_session_column(db_engine: Engine) -> None:
     _add_text_column_if_missing(db_engine, table_name="grant", column_name="payment_session_id")
 
 
+def migrate_spend_ledger_operation_id_column(db_engine: Engine) -> None:
+    """Add operation_id to existing pre-live spend ledger tables.
+
+    Spend authorization idempotency was added before Payjent has formal Alembic
+    migrations. Existing SQLite/Postgres deployments may already have
+    spendledgerentry rows without operation_id, so add the column and backfill it
+    from the row id. SQLModel.create_all() will not alter existing tables.
+    """
+    _add_text_column_if_missing(db_engine, table_name="spendledgerentry", column_name="operation_id")
+    if db_engine.dialect.name not in {"sqlite", "postgresql"}:
+        return
+    inspector = inspect(db_engine)
+    if "spendledgerentry" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("spendledgerentry")}
+    if "operation_id" not in columns:
+        return
+    with db_engine.begin() as connection:
+        connection.execute(text("UPDATE spendledgerentry SET operation_id = id WHERE operation_id IS NULL OR operation_id = ''"))
+
+
 # Backwards-compatible alias for tests/imports that referenced the original SQLite-only shim.
 def migrate_sqlite_quote_callback_column(db_engine: Engine) -> None:
     migrate_quote_callback_column(db_engine)
@@ -124,6 +145,7 @@ def init_db() -> None:
     migrate_quote_callback_column(engine)
     migrate_payment_session_provider_columns(engine)
     migrate_grant_payment_session_column(engine)
+    migrate_spend_ledger_operation_id_column(engine)
 
 
 def get_session() -> Generator[Session, None, None]:
