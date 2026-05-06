@@ -549,7 +549,9 @@ def _create_agent_profile_from_form(form: dict[str, str], account: Account, sess
         raise HTTPException(status_code=422, detail="agent name, platform, and bot_id are required")
     existing = session.exec(select(AgentProfile).where(AgentProfile.bot_id == bot_id)).first()
     if existing:
-        return existing, None, False
+        if existing.owner_id == account.id and existing.status == "active":
+            return existing, None, False
+        raise HTTPException(status_code=409, detail="bot_id is unavailable")
     agent = AgentProfile(
         id=f"agent_{uuid4().hex}",
         owner_id=account.id,
@@ -615,7 +617,7 @@ def _create_install_link(agent: AgentProfile, account: Account, request: Request
 
 def _require_owned_agent(agent_id: str, account: Account, session: Session) -> AgentProfile:
     agent = session.get(AgentProfile, agent_id)
-    if not agent or agent.owner_id not in {account.id, "local-owner"}:
+    if not agent or agent.owner_id != account.id:
         raise HTTPException(404, "agent not found")
     return agent
 
@@ -837,7 +839,7 @@ def dashboard(request: Request, session: Session = Depends(get_session), setting
     account = _require_dashboard_account(request, session, settings)
     if isinstance(account, RedirectResponse):
         return account
-    all_agents = session.exec(select(AgentProfile).where(AgentProfile.owner_id.in_([account.id, "local-owner"])).order_by(AgentProfile.created_at.desc())).all()
+    all_agents = session.exec(select(AgentProfile).where(AgentProfile.owner_id == account.id).order_by(AgentProfile.created_at.desc())).all()
     agents = [a for a in all_agents if a.status == "active"]
     deleted_agents = [a for a in all_agents if a.status != "active"]
     quotes = session.exec(select(Quote).order_by(Quote.created_at.desc()).limit(20)).all()

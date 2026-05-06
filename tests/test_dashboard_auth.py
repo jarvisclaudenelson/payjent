@@ -109,11 +109,6 @@ def test_logout_clears_session(client):
 
 
 def test_production_dashboard_redirects_without_session_and_renders_with_session(client, operator_headers):
-    agent = client.post(
-        "/api/v1/agents/register",
-        headers=operator_headers,
-        json={"name": "Prod Agent", "platform": "discord", "bot_id": "prod-bot", "default_currency": "USD"},
-    ).json()["agent"]
     app.dependency_overrides[get_settings] = lambda: Settings(env="production", dev_mode=False, public_base_url="https://payjent.example")
     try:
         no_session = client.get("/dashboard", follow_redirects=False)
@@ -128,9 +123,16 @@ def test_production_dashboard_redirects_without_session_and_renders_with_session
         )
         assert registered.status_code == 303
         assert "Secure" in registered.headers.get("set-cookie", "")
+        created = client.post(
+            "https://testserver/dashboard/agents/register",
+            data={"name": "Prod Agent", "platform": "discord", "bot_id": "prod-bot", "default_currency": "USD"},
+        )
+        assert created.status_code == 200
         dashboard = client.get("https://testserver/dashboard")
-        detail = client.get(f"https://testserver/dashboard/agents/{agent['id']}")
         assert dashboard.status_code == 200
+        detail_link = re.search(r"/dashboard/agents/(agent_[a-f0-9]+)", dashboard.text)
+        assert detail_link is not None
+        detail = client.get(f"https://testserver{detail_link.group(0)}")
         assert detail.status_code == 200
         assert "Prod Agent" in dashboard.text
         assert "prod-bot" in detail.text

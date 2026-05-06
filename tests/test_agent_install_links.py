@@ -3,7 +3,7 @@ from urllib.parse import urlparse
 
 from sqlmodel import Session, select
 
-from payjent.auth import hash_api_key
+from payjent.auth import create_bot_credential, hash_api_key
 from payjent.config import get_settings
 from payjent.models import AgentInstallLink, AgentProfile, BotCredential
 
@@ -223,3 +223,57 @@ def test_cross_owner_dashboard_revoke_and_delete_attempts_fail(client):
     assert client.post(f"/dashboard/agents/{agent_id}/credentials/revoke").status_code == 404
     assert client.post(f"/dashboard/agents/{agent_id}/delete").status_code == 404
     assert client.get(f"/dashboard/agents/{agent_id}").status_code == 404
+
+
+def test_local_owner_agent_is_not_visible_or_controllable_from_dashboard(client, engine):
+    with Session(engine) as session:
+        local_agent = AgentProfile(
+            id="agent_local_owner_boundary",
+            owner_id="local-owner",
+            bot_id="local-owner-boundary-bot",
+            name="Local Owner Boundary Bot",
+            platform="cli",
+        )
+        session.add(local_agent)
+        create_bot_credential(session, local_agent.bot_id, "local-owner-boundary-key", get_settings().signing_secret, role="bot")
+        session.commit()
+
+    client.post("/auth/register", data={"email": "owner@example.com", "password": "correc...tery"}, follow_redirects=False)
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "agent_local_owner_boundary" not in dashboard.text
+    assert "local-owner-boundary-bot" not in dashboard.text
+
+    assert client.get("/dashboard/agents/agent_local_owner_boundary").status_code == 404
+    assert client.post("/dashboard/agents/agent_local_owner_boundary/credentials").status_code == 404
+    assert client.post("/dashboard/agents/agent_local_owner_boundary/credentials/revoke").status_code == 404
+    assert client.post("/dashboard/agents/agent_local_owner_boundary/delete").status_code == 404
+    assert client.post("/dashboard/agents/install-links", json={"agent_id": "agent_local_owner_boundary"}).status_code == 404
+
+    with Session(engine) as session:
+        agent = session.get(AgentProfile, "agent_local_owner_boundary")
+        assert agent.status == "active"
+        assert session.exec(select(BotCredential).where(BotCredential.bot_id == "local-owner-boundary-bot")).one()
+        assert session.exec(select(AgentInstallLink).where(AgentInstallLink.agent_id == "agent_local_owner_boundary")).all() == []
+
+
+def test_dashboard_register_cross_owner_bot_id_conflicts_safely(client, engine):
+    agent_id = _register_owner_and_agent(client)
+    client.post("/auth/logout")
+    client.post("/auth/register", data={"email": "other@example.com", "password": "correc...tery"}, follow_redirects=False)
+
+    response = client.post(
+        "/dashboard/agents/register",
+        data={"name": "Other Agent", "platform": "cli", "bot_id": "agent-install-bot", "default_currency": "USD"},
+    )
+    assert response.status_code == 409
+    assert "bot_id is unavailable" in response.text
+    assert agent_id not in response.text
+    assert "Research Agent" not in response.text
+
+    with Session(engine) as session:
+        agents = session.exec(select(AgentProfile).where(AgentProfile.bot_id == "agent-install-bot")).all()
+        assert len(agents) == 1
+        assert agents[0].id == agent_id
+        assert session.exec(select(AgentInstallLink).where(AgentInstallLink.agent_id == agent_id)).all()

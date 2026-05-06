@@ -90,15 +90,22 @@ def test_x402_config_validation_and_persistence(client, operator_headers, engine
 
 
 def test_dashboard_and_agent_detail_render_key_copy(client, operator_headers):
-    agent = _register(client, operator_headers)["agent"]
-    assert client.post("/auth/register", data={"email": "dev@example.com", "password": "correct horse battery staple"}, follow_redirects=False).status_code == 303
+    assert client.post("/auth/register", data={"email": "dev@example.com", "password": "correct-pass"}, follow_redirects=False).status_code == 303
+    created = client.post(
+        "/dashboard/agents/register",
+        data={"name": "Hermes Research", "platform": "discord", "bot_id": "hermes-bot", "default_currency": "USD"},
+    )
+    assert created.status_code == 200
     overview = client.get("/dashboard")
-    assert overview.status_code == 200
+
     for copy in ["Payment operations", "Agent registration", "Stripe Connect", "x402", "integration snippets"]:
         assert copy.lower().split()[0] in overview.text.lower()
 
-    detail = client.get(f"/dashboard/agents/{agent['id']}")
+    assert overview.status_code == 200
+    agent_id = overview.text.split("data-agent-id='", 1)[1].split("'", 1)[0]
+    detail = client.get(f"/dashboard/agents/{agent_id}")
     assert detail.status_code == 200
+
     for copy in ["Stripe Connect", "x402 rail configuration", "Integration snippet", "Recent payments / spend ledger", "discord-aggregator-stripe-smoke"]:
         assert copy in detail.text
 
