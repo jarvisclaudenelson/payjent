@@ -211,6 +211,38 @@ class PayShPremiumActionCreate(BaseModel):
     callback_url: str | None = None
 
 
+class MerchantInfo(BaseModel):
+    name: str = Field(min_length=1)
+    domain: str = Field(min_length=1)
+
+
+class PurchaseItemSummary(BaseModel):
+    summary: str = Field(min_length=1)
+    url: str | None = None
+
+
+class PurchaseFulfillmentCreate(BaseModel):
+    bot_id: str
+    external_user_id: str
+    request_summary: str
+    request_hash: str | None = None
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    cost_breakdown: list[CostItem]
+    merchant: MerchantInfo
+    item: PurchaseItemSummary
+    order_summary: str = Field(min_length=1)
+    service_url: str = Field(min_length=1)
+    method: Literal["POST"] = "POST"
+    body: dict[str, Any]
+    headers: dict[str, str] = Field(default_factory=dict)
+    payjent_fulfillment_callback: Literal[True] = Field(
+        default=True,
+        description="Required: Payjent verifies payment, then POSTs a signed fulfillment handoff to an allowlisted procurement executor.",
+    )
+    callback_url: str | None = None
+
+
 class PaymentPrompt(BaseModel):
     action_id: str
     payment_url: str | None = None

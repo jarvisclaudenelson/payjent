@@ -92,6 +92,7 @@ from .schemas import (
     PaymentSessionRead,
     PayShPremiumActionCreate,
     PayShPremiumActionCreateResponse,
+    PurchaseFulfillmentCreate,
     QuoteCreate,
     QuoteRead,
     RailConnectionRead,
@@ -153,6 +154,7 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external action envelope gated by Payjent only after obtaining an exact provider/merchant quote. If payjent_fulfillment_callback=true, Payjent validates the callback target before checkout and performs one verified, allowlisted, sanitized post-payment handoff callback to the downstream executor after Stripe confirms payment; payjent_managed_execution remains a legacy alias. Otherwise agents poll/resume normally and perform fulfillment outside Payjent.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_purchase_fulfillment", "endpoint": "/api/v1/purchase-actions", "method": "POST", "description": "Create an Amazon-style merchant purchase/procurement handoff only after obtaining an exact merchant quote. The human pays Stripe/Payjent; Payjent verifies payment and sends a signed, verified POST fulfillment callback to an allowlisted procurement executor. The executor buys from Amazon or the merchant using its configured procurement/payment method. Payjent does not send funds to the agent and does not directly pay Amazon unless the downstream executor/provider rail does that.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "requires_fulfillment_callback": True},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
@@ -1342,6 +1344,58 @@ def create_pay_sh_premium_action(
     return {**data, "provider": "pay_sh", "premium_provider": "pay_sh", "command_preview": envelope["command_preview"]}
 
 
+@app.post("/api/v1/purchase-actions", response_model=AgentActionCreateResponse)
+def create_purchase_fulfillment_action(
+    payload: PurchaseFulfillmentCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    if not payload.payjent_fulfillment_callback:
+        raise HTTPException(status_code=422, detail="purchase actions require payjent_fulfillment_callback=true")
+    secret_path = _purchase_secret_body_key_path(payload.body)
+    if secret_path:
+        raise HTTPException(status_code=422, detail=f"purchase fulfillment body may not include credential/card/password/shipping secret fields: {secret_path}")
+    envelope = {
+        "provider": "merchant_purchase",
+        "category": "physical_or_digital_purchase_procurement",
+        "service_url": payload.service_url,
+        "method": "POST",
+        "headers": payload.headers,
+        "body": payload.body,
+        "merchant": payload.merchant.model_dump(),
+        "item": payload.item.model_dump(),
+        "order_summary": payload.order_summary,
+        "amount_minor": payload.amount_minor,
+        "currency": payload.currency.upper(),
+        "cost_breakdown": [item.model_dump() for item in payload.cost_breakdown],
+        "payjent_fulfillment_callback": True,
+        "money_flow": "User pays Stripe/Payjent; Payjent verifies payment and sends a verified callback to an allowlisted procurement executor. The executor buys from the merchant using its configured procurement/payment method; Payjent does not send funds to the agent or directly pay Amazon.",
+    }
+    _validate_purchase_executor_allowlisted(envelope, settings)
+    action_payload = AgentActionCreate(
+        bot_id=payload.bot_id,
+        external_user_id=payload.external_user_id,
+        request_summary=payload.request_summary,
+        request_hash=payload.request_hash,
+        amount_minor=payload.amount_minor,
+        currency=payload.currency,
+        cost_breakdown=payload.cost_breakdown,
+        execution_envelope=envelope,
+        callback_url=payload.callback_url,
+    )
+    return create_agent_action(
+        action_payload,
+        idempotency_key=idempotency_key,
+        provider=provider,
+        session=session,
+        settings=settings,
+        credential=credential,
+    )
+
+
 @app.get("/api/v1/agent-actions/{action_id}", response_model=AgentActionStatusResponse)
 def get_agent_action_status(action_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
     q = session.get(Quote, action_id)
@@ -1460,6 +1514,7 @@ def _deliver_agent_action_callback(session: Session, q: Quote, ps: PaymentSessio
 _SECRET_HEADER_MARKERS = ("authorization", "cookie", "token", "secret", "key", "credential")
 _INTERNAL_HOSTS = {"localhost", "localhost.localdomain", "metadata.google.internal"}
 _RESERVED_DOWNSTREAM_BODY_KEYS = {"grant", "grant_id", "payment", "payment_token", "receipt", "token"}
+_PURCHASE_SECRET_BODY_KEY_MARKERS = ("card", "cvv", "cvc", "pan", "password", "passcode", "credential", "amazon_login", "amazon_password", "shipping_address", "address", "ssn", "secret", "auth_token", "access_token")
 _ALLOWED_DOWNSTREAM_HEADERS = {"content-type", "accept", "idempotency-key", "x-request-id", "x-payjent-action-id"}
 
 
@@ -1520,6 +1575,24 @@ def _reserved_downstream_body_key_path(value, path: str = "body") -> str | None:
     return None
 
 
+def _purchase_secret_body_key_path(value, path: str = "body") -> str | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            normalized = str(key).lower().replace("-", "_")
+            if any(marker in normalized for marker in _PURCHASE_SECRET_BODY_KEY_MARKERS):
+                return child_path
+            found = _purchase_secret_body_key_path(child, child_path)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found = _purchase_secret_body_key_path(child, f"{path}[{index}]")
+            if found:
+                return found
+    return None
+
+
 def _fulfillment_callback_requested(envelope: dict | None) -> bool:
     if not envelope:
         return False
@@ -1539,6 +1612,12 @@ def _validate_managed_execution_envelope(envelope: dict | None, settings: Settin
         raise HTTPException(status_code=422, detail=f"fulfillment callback body may not include reserved Payjent field: {reserved_path}")
 
 
+def _validate_purchase_executor_allowlisted(envelope: dict, settings: Settings) -> None:
+    if not settings.managed_execution_allowed_host_set:
+        raise HTTPException(status_code=422, detail="purchase fulfillment requires PAYJENT_MANAGED_EXECUTION_ALLOWED_HOSTS to include the procurement executor hostname")
+    _validate_managed_execution_envelope(envelope, settings)
+
+
 def _sanitized_downstream_headers(headers: dict | None) -> dict[str, str]:
     safe: dict[str, str] = {}
     for name, value in (headers or {}).items():
@@ -1550,7 +1629,7 @@ def _sanitized_downstream_headers(headers: dict | None) -> dict[str, str]:
 
 
 def _record_downstream_event(session: Session, q: Quote, status: str, metadata: dict) -> FulfillmentEvent:
-    event = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status=status, metadata_json={"type": "payjent_downstream_execution", **metadata})
+    event = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status=status, metadata_json={"type": "payjent_fulfillment_callback", **metadata})
     if status == "executed":
         q.status = "executed"
     elif q.status not in {"executed", "completed"}:
@@ -1566,7 +1645,7 @@ def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSess
     existing = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id)).all()
     for event in existing:
         meta = event.metadata_json or {}
-        if meta.get("type") == "payjent_downstream_execution" and meta.get("payment_session_id") == ps.id:
+        if meta.get("type") in {"payjent_fulfillment_callback", "payjent_downstream_execution"} and meta.get("payment_session_id") == ps.id:
             return event
     if provider == "mock":
         return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "fulfillment callback handoff is disabled for mock payments"})
@@ -1580,11 +1659,31 @@ def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSess
     reserved_path = _reserved_downstream_body_key_path(body)
     if reserved_path:
         return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": f"reserved Payjent field in downstream body: {reserved_path}"})
+    callback_payload = {
+        "event_type": "payjent.fulfillment_callback",
+        "action_id": q.id,
+        "quote_id": q.id,
+        "payment_session_id": ps.id,
+        "bot_id": q.bot_id,
+        "external_user_id": q.external_user_id,
+        "provider": provider,
+        "amount_minor": q.amount_minor,
+        "currency": q.currency,
+        "request_hash": q.request_hash,
+        "fulfillment_body": body,
+    }
+    timestamp, signature = sign_webhook_payload(callback_payload, settings.signing_secret)
     headers = _sanitized_downstream_headers(envelope.get("headers") or {})
     headers.setdefault("Content-Type", "application/json")
+    headers[PAYJENT_TIMESTAMP_HEADER] = timestamp
+    headers[PAYJENT_SIGNATURE_HEADER] = signature
+    headers["X-Payjent-Action-Id"] = q.id
+    headers["X-Payjent-Quote-Id"] = q.id
+    headers["X-Payjent-Payment-Session-Id"] = ps.id
+    headers["X-Payjent-Request-Hash"] = q.request_hash
     try:
         with httpx.Client(timeout=5.0, follow_redirects=False) as client:
-            response = client.post(service_url, json=body, headers=headers)
+            response = client.post(service_url, json=callback_payload, headers=headers)
         status = "executed" if 200 <= response.status_code < 300 else "failed"
         return _record_downstream_event(session, q, status, {"payment_session_id": ps.id, "http_status": response.status_code, "service_host": urlparse(service_url).hostname})
     except Exception as exc:

@@ -1,7 +1,8 @@
 import json
 
-from payjent.config import Settings, get_settings
+from payjent.config import DEFAULT_SIGNING_SECRET, Settings, get_settings
 from payjent.main import app
+from payjent.signing import verify_webhook_signature
 import payjent.main as main_module
 
 
@@ -72,7 +73,15 @@ def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot
     assert duplicate.status_code == 200
     assert len(calls) == 1
     assert calls[0]["url"] == "https://downstream.example/run"
-    assert calls[0]["json"] == {"task": "run"}
+    assert calls[0]["json"]["event_type"] == "payjent.fulfillment_callback"
+    assert calls[0]["json"]["fulfillment_body"] == {"task": "run"}
+    assert calls[0]["json"]["amount_minor"] == 250
+    assert calls[0]["json"]["currency"] == "USD"
+    assert calls[0]["json"]["request_hash"] == "downstream-hash"
+    assert calls[0]["headers"].get("X-Payjent-Timestamp")
+    assert calls[0]["headers"].get("X-Payjent-Signature", "").startswith("v1=")
+    assert verify_webhook_signature(calls[0]["json"], calls[0]["headers"]["X-Payjent-Timestamp"], calls[0]["headers"]["X-Payjent-Signature"], DEFAULT_SIGNING_SECRET, tolerance_seconds=-1)
+    assert calls[0]["headers"].get("X-Payjent-Action-Id") == action["action_id"]
     sent = json.dumps(calls[0]).lower()
     assert "payment_token" not in sent
     assert "grant_" not in sent
@@ -80,7 +89,7 @@ def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot
     assert "x-api-key" not in {k.lower() for k in calls[0]["headers"]}
     status = client.get(f"/api/v1/agent-actions/{action['action_id']}", headers=bot_headers).json()
     assert status["fulfillment_events"][0]["status"] == "executed"
-    assert status["fulfillment_events"][0]["metadata"]["type"] == "payjent_downstream_execution"
+    assert status["fulfillment_events"][0]["metadata"]["type"] == "payjent_fulfillment_callback"
 
 
 def test_unsafe_service_url_rejected_before_checkout(client, bot_headers, monkeypatch):

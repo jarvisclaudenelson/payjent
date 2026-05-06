@@ -203,3 +203,32 @@ Payjent already supports the generic agent bridge. You do not need to know the P
 - `AgentPayjentBridge`
 
 Use the protocol above as your source of truth.
+
+## Merchant purchase / procurement handoff (Amazon-style)
+
+For Amazon-style purchases use `payjent.create_purchase_fulfillment` (`POST /api/v1/purchase-actions`) only when an allowlisted procurement executor is configured. Money flow is intentionally bounded: the human pays Stripe/Payjent; Payjent verifies payment and sends a signed, verified `POST` fulfillment callback to the allowlisted procurement executor; that executor buys from Amazon or the merchant using its own configured procurement/payment method (operator procurement service, virtual-card issuer, or merchant integration). Payjent does **not** send funds to the agent and does **not** directly pay Amazon unless the downstream executor/provider rail is the component doing that merchant payment.
+
+Required purchase payload fields include exact `amount_minor`, `currency`, matching `cost_breakdown`, `merchant.name`, `merchant.domain`, `item.summary` and optional `item.url`, `order_summary`, `service_url`, `method=POST`, `body`, `headers`, and `payjent_fulfillment_callback=true`. Do not include or request Amazon credentials, account passwords, card numbers, CVV/CVC/PAN, shipping-address secrets, raw tokens, or private credentials in chat or in the fulfillment body. The downstream procurement executor must already have its own secure configuration for checkout/payment.
+
+Example after researching an Amazon item and obtaining the exact merchant quote:
+
+```json
+{
+  "bot_id": "your-agent-bot-id",
+  "external_user_id": "user-123",
+  "request_summary": "Purchase exact quoted Amazon item via configured procurement executor",
+  "amount_minor": 4299,
+  "currency": "USD",
+  "cost_breakdown": [{"label": "Amazon quoted total", "amount_minor": 4299}],
+  "merchant": {"name": "Amazon", "domain": "amazon.com"},
+  "item": {"summary": "Exact item title, quantity 1", "url": "https://www.amazon.com/dp/EXAMPLE"},
+  "order_summary": "Buy quantity 1 at the exact quoted total; no substitutions unless executor policy permits.",
+  "service_url": "https://procurement-executor.example/purchase-handoffs",
+  "method": "POST",
+  "body": {"merchant": "amazon.com", "item_url": "https://www.amazon.com/dp/EXAMPLE", "quantity": 1, "quoted_total_minor": 4299, "currency": "USD"},
+  "headers": {"Content-Type": "application/json"},
+  "payjent_fulfillment_callback": true
+}
+```
+
+Fail closed if there is no procurement executor allowlist/configuration or the exact merchant quote is unavailable: do not create a payment link, and tell the user Payjent is awaiting an exact merchant quote or configured procurement executor.
