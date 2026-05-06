@@ -421,7 +421,7 @@ def _stripe_signature_header(raw_body: bytes, secret: str, *, timestamp: int = 1
     return f"t={timestamp},v1={digest}"
 
 
-def _stripe_checkout_completed_payload(*, payment_session_id: str, provider_session_id: str) -> bytes:
+def _stripe_checkout_completed_payload(*, payment_session_id: str, provider_session_id: str, amount_minor: int, currency: str) -> bytes:
     event = {
         "id": "evt_test_discord_aggregator",
         "type": "checkout.session.completed",
@@ -430,6 +430,8 @@ def _stripe_checkout_completed_payload(*, payment_session_id: str, provider_sess
                 "id": provider_session_id,
                 "object": "checkout.session",
                 "payment_status": "paid",
+                "amount_total": amount_minor,
+                "currency": currency.lower(),
                 "client_reference_id": payment_session_id,
                 "metadata": {"payment_session_id": payment_session_id},
             }
@@ -501,7 +503,7 @@ def run_discord_aggregator_stripe_smoke_with_client(client: Any, *, bot_id: str,
             channel_id="discord-demo-channel",
         )
         store.save(pending)
-        raw_body = _stripe_checkout_completed_payload(payment_session_id=checkout["id"], provider_session_id=checkout["provider_session_id"])
+        raw_body = _stripe_checkout_completed_payload(payment_session_id=checkout["id"], provider_session_id=checkout["provider_session_id"], amount_minor=quote["amount_minor"], currency=quote["currency"])
         webhook = _raise_for_demo_response(
             client.post(
                 "/api/v1/webhooks/stripe",

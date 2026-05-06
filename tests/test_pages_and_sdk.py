@@ -91,6 +91,39 @@ def test_browser_mock_pay_cta_unavailable_when_runtime_env_is_production(client,
         settings.mock_provider_enabled = original_mock_provider_enabled
 
 
+def test_browser_mock_pay_endpoint_cannot_complete_existing_mock_session_in_production(client, quote_payload, bot_headers, engine):
+    from sqlmodel import Session, select
+    from payjent.models import Grant
+
+    _quote, payment_session = _create_checkout(client, quote_payload, bot_headers)
+    settings = get_settings()
+    original_env = settings.env
+    original_dev_mode = settings.dev_mode
+    original_mock_provider_enabled = settings.mock_provider_enabled
+    original_hosted_smoke = settings.hosted_smoke_test_rail_enabled
+    try:
+        settings.env = "production"
+        settings.dev_mode = True
+        settings.mock_provider_enabled = True
+        settings.hosted_smoke_test_rail_enabled = True
+
+        pay_page = client.get(f"/pay/{payment_session['id']}")
+        response = client.post(f"/pay/{payment_session['id']}/mock-pay", follow_redirects=False)
+
+        assert "Approve and pay 2.50 USD" not in pay_page.text
+        assert response.status_code in {403, 404}
+        unchanged = client.get(f"/api/v1/payment-sessions/{payment_session['id']}").json()
+        assert unchanged["status"] == "checkout_created"
+        with Session(engine) as session:
+            grants = session.exec(select(Grant).where(Grant.quote_id == payment_session["quote_id"])).all()
+        assert grants == []
+    finally:
+        settings.env = original_env
+        settings.dev_mode = original_dev_mode
+        settings.mock_provider_enabled = original_mock_provider_enabled
+        settings.hosted_smoke_test_rail_enabled = original_hosted_smoke
+
+
 def test_browser_mock_pay_returns_404_for_non_mock_provider(client, quote_payload, bot_headers, engine):
     from sqlmodel import Session
     from payjent.models import PaymentSession

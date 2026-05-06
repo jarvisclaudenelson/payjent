@@ -309,7 +309,7 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
     status_words = "Paid — one-time grant issued; agent will resume automatically" if grant else "Waiting for human approval and payment"
     resumes = _html_escape(q.execution_envelope.get("description") or q.execution_envelope.get("command_preview") or q.request_summary)
     checkout_cta = ""
-    if ps.provider == "mock" and ps.status != "paid":
+    if ps.provider == "mock" and ps.status != "paid" and settings.effective_mock_provider_enabled:
         checkout_cta = f"""<section><h2>Complete payment</h2><p>This checkout can be completed from the browser without exposing operator credentials, payment tokens, or raw grant IDs.</p><form method="post" action="/pay/{_html_escape(ps.id)}/mock-pay"><button class="btn" type="submit">Approve and pay {_html_escape(_format_money(q.amount_minor, q.currency))}</button></form><p class="fine">Payjent will issue a single-use grant for the exact stored request after approval.</p></section>"""
     elif ps.provider == "stripe" and ps.status != "paid" and ps.checkout_url and ps.checkout_url.startswith("https://"):
         checkout_cta = f"""<section><h2>Complete secure payment</h2><p>Continue to Stripe hosted checkout to pay securely. Payjent will resume the exact stored agent action after Stripe confirms payment.</p><p><a class="btn" href="{_html_escape(ps.checkout_url)}" rel="noopener noreferrer">Continue to secure payment</a></p><p class="fine">Payjent does not show raw grants, payment tokens, or credentials on this page.</p></section>"""
@@ -318,6 +318,8 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
 
 @app.post("/pay/{payment_session_id}/mock-pay")
 def browser_mock_pay(payment_session_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    if not settings.effective_mock_provider_enabled:
+        raise HTTPException(404, "payment session not found")
     ps = session.get(PaymentSession, payment_session_id)
     if not ps or ps.provider != "mock":
         raise HTTPException(404, "payment session not found")
@@ -1578,9 +1580,13 @@ def _validate_stripe_paid_event(session: Session, ps: PaymentSession, data_objec
     if not q:
         raise HTTPException(404, "quote not found")
     amount_minor, currency = _stripe_event_amount_currency(event_type, data_object)
-    if amount_minor is not None and int(amount_minor) != q.amount_minor:
+    if amount_minor is None:
+        raise HTTPException(status_code=409, detail="Stripe amount missing")
+    if currency is None:
+        raise HTTPException(status_code=409, detail="Stripe currency missing")
+    if int(amount_minor) != q.amount_minor:
         raise HTTPException(status_code=409, detail="Stripe amount mismatch")
-    if currency is not None and currency != q.currency.upper():
+    if currency != q.currency.upper():
         raise HTTPException(status_code=409, detail="Stripe currency mismatch")
 
 

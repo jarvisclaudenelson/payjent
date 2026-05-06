@@ -61,6 +61,38 @@ def test_stripe_webhook_marks_paid_and_duplicate_is_idempotent(client, quote_pay
     assert duplicate.json()["reason"] == "payment session already paid"
 
 
+def test_stripe_webhook_rejects_paid_event_missing_amount_without_grant(client, quote_payload, bot_headers, monkeypatch):
+    secret = "whsec_test"
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret)
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_missing_amount", "https://checkout.stripe.test/session"))
+    _, ps = _checkout(client, quote_payload, bot_headers)
+    body = json.dumps({"type": "checkout.session.completed", "data": {"object": {"id": "cs_test_missing_amount", "payment_session_id": ps["id"], "currency": quote_payload["currency"].lower()}}}, separators=(",", ":")).encode()
+    headers = {"content-type": "application/json", "Stripe-Signature": _stripe_signature(body, secret)}
+
+    response = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Stripe amount missing"
+    unchanged = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
+    assert unchanged["status"] == "checkout_created"
+
+
+def test_stripe_webhook_rejects_paid_event_missing_currency_without_grant(client, quote_payload, bot_headers, monkeypatch):
+    secret = "whsec_test"
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret)
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_missing_currency", "https://checkout.stripe.test/session"))
+    _, ps = _checkout(client, quote_payload, bot_headers)
+    body = json.dumps({"type": "checkout.session.completed", "data": {"object": {"id": "cs_test_missing_currency", "payment_session_id": ps["id"], "amount_total": quote_payload["amount_minor"]}}}, separators=(",", ":")).encode()
+    headers = {"content-type": "application/json", "Stripe-Signature": _stripe_signature(body, secret)}
+
+    response = client.post("/api/v1/webhooks/stripe", content=body, headers=headers)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Stripe currency missing"
+    unchanged = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
+    assert unchanged["status"] == "checkout_created"
+
+
 def test_stripe_adapter_builds_checkout_payload_idempotency_and_metadata():
     quote = Quote(
         id="quote_1",
