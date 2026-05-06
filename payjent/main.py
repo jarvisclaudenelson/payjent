@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hmac
+from secrets import token_urlsafe
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 from pathlib import Path
@@ -20,6 +21,7 @@ from .auth import (
     create_dashboard_session_cookie,
     generate_api_key,
     get_account_from_cookie,
+    hash_api_key,
     hash_password,
     normalize_email,
     require_bot_credential,
@@ -35,6 +37,7 @@ from .db import (
 )
 from .models import (
     Account,
+    AgentInstallLink,
     AgentProfile,
     BotCredential,
     FulfillmentEvent,
@@ -566,6 +569,48 @@ def _create_agent_profile_from_form(form: dict[str, str], account: Account, sess
     return agent, generated_key, True
 
 
+def _public_base_url(request: Request, settings: Settings) -> str:
+    return (settings.public_base_url or str(request.base_url).rstrip("/")).rstrip("/")
+
+
+def _install_token_hash(token: str, settings: Settings) -> str:
+    return hash_api_key(f"agent-install:{token}", settings.signing_secret)
+
+
+def _safe_install_error() -> HTTPException:
+    return HTTPException(status_code=404, detail="install link is invalid, expired, or already used")
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _credential_payload(agent: AgentProfile, api_key: str, request: Request, settings: Settings, scopes: list[str]) -> dict:
+    return {
+        "agent_id": agent.id,
+        "bot_id": agent.bot_id,
+        "payjent_base_url": _public_base_url(request, settings),
+        "credential": {"type": "payjent_agent_api_key", "value": api_key, "header": "X-Payjent-Bot-Key"},
+        "scopes": scopes,
+        "policy": {"credential_scope": "agent", "single_agent_only": True, "store_privately": True, "do_not_paste_raw_credentials_in_chat": True},
+    }
+
+
+def _create_install_link(agent: AgentProfile, account: Account, request: Request, session: Session, settings: Settings, ttl_seconds: int = 900) -> tuple[AgentInstallLink, str]:
+    ttl_seconds = max(60, min(int(ttl_seconds or 900), 3600))
+    token = token_urlsafe(32)
+    link = AgentInstallLink(
+        id=f"ins_{uuid4().hex}", owner_id=account.id, agent_id=agent.id, bot_id=agent.bot_id,
+        token_hash=_install_token_hash(token, settings),
+        scopes=["quotes:create", "checkout:create", "agent-actions:create", "grants:consume"],
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+    )
+    session.add(link)
+    session.commit()
+    session.refresh(link)
+    return link, f"{_public_base_url(request, settings)}/agent-install/{token}"
+
+
 def _credential_display_html(account: Account, agent: AgentProfile, bot_api_key: str | None, created: bool) -> str:
     key_block = ""
     if bot_api_key:
@@ -786,6 +831,61 @@ async def dashboard_register_agent(request: Request, session: Session = Depends(
     return HTMLResponse(_credential_display_html(account, agent, bot_api_key, created))
 
 
+@app.post("/dashboard/agents/install-links")
+async def dashboard_create_agent_install_link(request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    account = _require_dashboard_account(request, session, settings)
+    if isinstance(account, RedirectResponse):
+        return account
+    content_type = request.headers.get("content-type", "")
+    form = await (request.json() if "application/json" in content_type else _form_fields(request))
+    agent_id = (form.get("agent_id") or "").strip()
+    ttl_seconds = int(form.get("ttl_seconds") or 900)
+    agent = session.get(AgentProfile, agent_id)
+    if not agent or agent.owner_id != account.id:
+        raise HTTPException(404, "agent not found")
+    link, install_url = _create_install_link(agent, account, request, session, settings, ttl_seconds)
+    return JSONResponse({
+        "install_link_id": link.id,
+        "install_url": install_url,
+        "agent_id": agent.id,
+        "bot_id": agent.bot_id,
+        "scopes": link.scopes,
+        "expires_at": link.expires_at.isoformat(),
+        "instructions": "Give this one-time install link only to the target agent. Do not paste raw credentials or tokens in chat.",
+    })
+
+
+@app.get("/agent-install/{token}", response_class=HTMLResponse)
+def agent_install_landing(token: str, request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    link = session.exec(select(AgentInstallLink).where(AgentInstallLink.token_hash == _install_token_hash(token, settings))).first()
+    now = datetime.now(timezone.utc)
+    if not link or link.consumed_at or _as_aware_utc(link.expires_at) <= now:
+        raise _safe_install_error()
+    agent = session.get(AgentProfile, link.agent_id)
+    if not agent:
+        raise _safe_install_error()
+    return HTMLResponse(f"""<!doctype html><html><head><title>Payjent agent install</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>One-time Agent Install Link</div><h1>Install Payjent for {_html_escape(agent.name)}</h1><p class='muted'>This private setup link is valid once and expires at {_html_escape(link.expires_at.isoformat())}. Redeem it only from the target agent and store the returned credential privately.</p></section><form method='post'><button type='submit'>Redeem once</button></form><p class='fine'>Payjent will not display raw credentials on this landing page. Do not paste raw credentials, tokens, or env lines in chat.</p></main></body></html>""")
+
+
+@app.post("/agent-install/{token}")
+def redeem_agent_install_link(token: str, request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    link = session.exec(select(AgentInstallLink).where(AgentInstallLink.token_hash == _install_token_hash(token, settings))).first()
+    now = datetime.now(timezone.utc)
+    if not link or link.consumed_at or _as_aware_utc(link.expires_at) <= now:
+        raise _safe_install_error()
+    agent = session.get(AgentProfile, link.agent_id)
+    if not agent or agent.owner_id != link.owner_id or agent.bot_id != link.bot_id:
+        raise _safe_install_error()
+    api_key = generate_api_key()
+    create_bot_credential(session, agent.bot_id, api_key, settings.signing_secret, role="bot")
+    link.consumed_at = now
+    session.add(link)
+    session.commit()
+    payload = _credential_payload(agent, api_key, request, settings, link.scopes)
+    payload["install_link"] = {"id": link.id, "consumed_at": now.isoformat(), "expires_at": link.expires_at.isoformat(), "single_use": True}
+    return payload
+
+
 @app.get("/dashboard/agents/{agent_id}", response_class=HTMLResponse)
 def dashboard_agent(agent_id: str, request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
     account = _require_dashboard_account(request, session, settings)
@@ -812,7 +912,8 @@ def dashboard_agent(agent_id: str, request: Request, session: Session = Depends(
     stripe_cmd = f"curl -X POST /api/v1/agents/{agent.id}/stripe-connect/start -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;'"
     x402_cmd = f"curl -X POST /api/v1/agents/{agent.id}/x402/configure -H 'X-Payjent-Bot-Key: &lt;operator-key&gt;' -H 'Content-Type: application/json' -d '{{\"network\":\"base-sepolia\",\"pay_to\":\"0xTEST_PAY_TO\",\"max_per_request_minor\":900,\"max_per_call_minor\":250,\"enabled\":true}}'"
     credential_form = f"""<form method='post' action='/dashboard/agents/{_html_escape(agent.id)}/credentials'><p class='muted'>Credentials are copy-once. Existing values cannot be revealed. Create another credential only if the agent needs a fresh private key; store it as <code>X-Payjent-Bot-Key</code>.</p><button type='submit'>Create another credential</button></form>"""
-    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a href='/dashboard'>← Dashboard</a><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'><div class='card'><h3>Current policy defaults</h3>{_policy_defaults_html(x402_caps)}</div><div class='card'><h3>Smoke-test setup</h3><ol class='checklist'><li>Keep the Payjent agent credential in the agent secret store.</li><li>Give the agent <a href='/docs/agent-payjent-self-setup.md'>the setup guide</a>.</li><li>Run the demo smoke test and confirm payment creates a one-time resumable action.</li></ol></div></div><div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Agent credential</h3>{credential_form}</div><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><h3>Spend ledger entries</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div><div class='card'><h3>Paid-action lifecycle ledger</h3><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{lifecycle}</tbody></table></div></main></body></html>"
+    install_link_form = f"""<form method='post' action='/dashboard/agents/install-links'><input type='hidden' name='agent_id' value='{_html_escape(agent.id)}'><input type='hidden' name='ttl_seconds' value='900'><p class='muted'>Safest easy setup: generate a short-lived, single-use Agent Install Link for this agent, give that link to the agent, and let it redeem an agent-scoped credential once. Do not paste raw credentials or env lines in chat.</p><button type='submit'>Generate one-time install link</button></form>"""
+    return f"<!doctype html><html><head><title>{_html_escape(agent.name)} · Payjent</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a href='/dashboard'>← Dashboard</a><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><span class='pill'>{_html_escape(agent.status)}</span><h1>{_html_escape(agent.name)}</h1><p class='muted'>{_html_escape(agent.platform)} · <code>{_html_escape(agent.bot_id)}</code></p></section><div class='grid'><div class='card'><h3>Current policy defaults</h3>{_policy_defaults_html(x402_caps)}</div><div class='card'><h3>Smoke-test setup</h3><ol class='checklist'><li>Keep the Payjent agent credential in the agent secret store.</li><li>Give the agent <a href='/docs/agent-payjent-self-setup.md'>the setup guide</a>.</li><li>Run the demo smoke test and confirm payment creates a one-time resumable action.</li></ol></div></div><div class='grid'>{rail_cards}</div><div class='grid'><div class='card'><h3>Agent Install Link</h3>{install_link_form}</div><div class='card'><h3>Agent credential</h3>{credential_form}</div><div class='card'><h3>Stripe Connect</h3><p class='muted'>Local/test starts return a simulated account link; production fails closed until live OAuth is configured.</p><pre><code>{_html_escape(stripe_cmd)}</code></pre></div><div class='card'><h3>x402 rail configuration</h3><p class='muted'>Stores only non-secret network, pay_to, facilitator URL, and caps.</p><pre><code>{_html_escape(x402_cmd)}</code></pre></div></div><div class='card'><h3>Integration snippet</h3><pre><code>{_html_escape(_integration_snippet(agent))}</code></pre></div><div class='card'><h3>Recent payments / spend ledger</h3><h3>Spend ledger entries</h3><p>{len(quotes)} recent quotes</p><ul>{ledger}</ul></div><div class='card'><h3>Paid-action lifecycle ledger</h3><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{lifecycle}</tbody></table></div></main></body></html>"
 
 
 @app.post("/dashboard/agents/{agent_id}/credentials", response_class=HTMLResponse)

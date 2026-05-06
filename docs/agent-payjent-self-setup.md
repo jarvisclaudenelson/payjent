@@ -19,11 +19,23 @@ When a user asks you for premium work, Payjent lets you:
 
 Payjent is **not** the downstream premium API runtime. For pay.sh/paycurl work, Payjent authorizes and resumes the request; you execute pay.sh externally after Payjent says the action is paid.
 
+## Primary setup flow: one-time Agent Install Link
+
+Use the dashboard-created **Agent Install Link** as the primary setup flow:
+
+1. The human owner signs in to the Payjent dashboard.
+2. The owner registers the target agent identity.
+3. The owner generates a short-lived, one-time Agent Install Link for that one agent.
+4. The owner gives that private install link to the target agent.
+5. The agent redeems the link exactly once and stores the returned agent-scoped credential privately.
+
+The install link is a bearer setup secret, but it is scoped, short-lived, and single-use. It is safer than asking a human to paste raw credentials, tokens, or environment-variable lines in chat. If you receive an Agent Install Link, redeem it once from your secure runtime and do not repeat it in public conversation.
+
 ## Your rule
 
 If a user asks you to use Payjent, do not ask them for code snippets, environment variables, Payjent agent ids, private credentials, grants, or raw payment tokens in chat.
 
-You should instead follow this operating protocol and direct the operator to the Payjent dashboard/setup flow. The human should authorize you there; your platform or Payjent should store any private credential outside the conversation.
+You should instead ask the operator to authorize you in Payjent and give you a one-time Agent Install Link, or use a platform secret store, vault, or bot configuration page. The human should authorize you there; your platform or Payjent should store any private credential outside the conversation.
 
 ## Readiness states
 

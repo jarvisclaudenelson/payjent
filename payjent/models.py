@@ -53,6 +53,18 @@ class AgentProfile(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class AgentInstallLink(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    owner_id: str = Field(index=True)
+    agent_id: str = Field(index=True)
+    bot_id: str = Field(index=True)
+    token_hash: str = Field(index=True, unique=True)
+    scopes: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    expires_at: datetime = Field(index=True)
+    consumed_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class RailConnection(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("agent_id", "rail", name="uq_rail_agent_rail"),)
 
