@@ -24,7 +24,7 @@ class StripeSDKCheckoutClient:
         try:
             import stripe  # type: ignore
         except ImportError as exc:
-            raise HTTPException(status_code=503, detail="Stripe SDK is not installed; install payjent[stripe]") from exc
+            raise HTTPException(status_code=503, detail="Stripe SDK is not installed") from exc
         stripe.api_key = self.secret_key
         return stripe.checkout.Session.create(**payload, idempotency_key=idempotency_key)
 

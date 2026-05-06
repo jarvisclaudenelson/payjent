@@ -187,6 +187,10 @@ def _discovery_manifest(base_url: str) -> dict:
             "credential_install": "Credentials are installed via one-time Agent Install Link and must not be pasted in chat.",
         },
         "pricing_policy": _EXACT_PRICING_POLICY,
+        "active_payment_rail": {
+            "provider": "stripe_when_configured",
+            "description": "In production, Stripe Checkout is the intended active payment rail when PAYJENT_CHECKOUT_PROVIDER=stripe and required deployment secrets are configured. Agents must send the returned payment_prompt/payment_url to the user and wait for paid status before resuming.",
+        },
         "tools": _tool_descriptors(),
         "security_invariants": [
             "request-bound approvals and grants",
@@ -219,6 +223,31 @@ def _html_escape(value) -> str:
 
 def _format_money(amount_minor: int, currency: str) -> str:
     return f"{amount_minor / 100:.2f} {currency.upper()}"
+
+
+def _checkout_provider(settings: Settings) -> str:
+    return (settings.checkout_provider or "mock").lower()
+
+
+def _payment_readiness(settings: Settings) -> dict:
+    provider = _checkout_provider(settings)
+    stripe_secret_configured = bool(settings.stripe_secret_key)
+    stripe_webhook_configured = bool(settings.stripe_webhook_secret)
+    public_base_url_configured = bool(settings.public_base_url)
+    database_configured = bool(settings.database_url)
+    return {
+        "active_payment_ready": provider == "stripe" and stripe_secret_configured and stripe_webhook_configured and public_base_url_configured and database_configured,
+        "checkout_provider": provider,
+        "stripe_secret_configured": stripe_secret_configured,
+        "stripe_webhook_configured": stripe_webhook_configured,
+        "public_base_url_configured": public_base_url_configured,
+        "database_configured": database_configured,
+    }
+
+
+@app.get("/api/v1/payment-readiness")
+def payment_readiness(settings: Settings = Depends(get_settings)):
+    return _payment_readiness(settings)
 
 
 def _primary_cta(settings: Settings) -> str:
@@ -277,10 +306,12 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
     ) or "<li>No line-item breakdown supplied.</li>"
     status_words = "Paid — one-time grant issued; agent will resume automatically" if grant else "Waiting for human approval and payment"
     resumes = _html_escape(q.execution_envelope.get("description") or q.execution_envelope.get("command_preview") or q.request_summary)
-    mock_form = ""
+    checkout_cta = ""
     if ps.provider == "mock" and ps.status != "paid":
-        mock_form = f"""<section><h2>Complete payment</h2><p>This checkout can be completed from the browser without exposing operator credentials, payment tokens, or raw grant IDs.</p><form method="post" action="/pay/{_html_escape(ps.id)}/mock-pay"><button class="btn" type="submit">Approve and pay {_html_escape(_format_money(q.amount_minor, q.currency))}</button></form><p class="fine">Payjent will issue a single-use grant for the exact stored request after approval.</p></section>"""
-    return f"""<!doctype html><html><head><title>Payjent checkout · Approve paid agent action</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Human approval document</div><h1>Approve this exact paid action?</h1><p class='muted'>Key question: should this agent resume this exact paid action after payment?</p></section><div class='grid'><div class='card'><h3>Agent request</h3><p>{_html_escape(q.request_summary)}</p><p class='fine'>External user: <code>{_html_escape(q.external_user_id)}</code><br>Request hash: <code>{_html_escape(q.request_hash)}</code></p></div><div class='card'><h3>Amount</h3><div class='stat'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div><ul>{breakdown}</ul></div><div class='card'><h3>Status</h3><p><b>{_html_escape(status_words)}</b></p><p class='fine'>Payment session: <code>{_html_escape(ps.id)}</code><br>Payment provider/status: {_html_escape(ps.provider)} / {_html_escape(ps.status)}<br>Grant state: {_html_escape(_grant_state(grant))}</p></div><div class='card'><h3>What resumes after payment</h3><p>{resumes}</p><p class='fine'>Approval creates a one-time grant bound to this stored request. Raw grant and payment tokens are not shown on this page.</p></div></div><section><h2>Approval terms</h2><ul><li>Human approval is required before Payjent marks this action ready.</li><li>The grant is single-use and tied to the exact request hash above.</li><li>Downstream rails may still impose their own authorization, settlement, availability, or rejection behavior; Payjent records the checkpoint and does not guarantee a third-party rail outcome.</li><li>Fulfillment events recorded so far: {len(fulfillment)}.</li></ul><p><a class='btn' href="/status/{_html_escape(ps.id)}">View status</a></p></section>{mock_form}</main></body></html>"""
+        checkout_cta = f"""<section><h2>Complete payment</h2><p>This checkout can be completed from the browser without exposing operator credentials, payment tokens, or raw grant IDs.</p><form method="post" action="/pay/{_html_escape(ps.id)}/mock-pay"><button class="btn" type="submit">Approve and pay {_html_escape(_format_money(q.amount_minor, q.currency))}</button></form><p class="fine">Payjent will issue a single-use grant for the exact stored request after approval.</p></section>"""
+    elif ps.provider == "stripe" and ps.status != "paid" and ps.checkout_url and ps.checkout_url.startswith(("https://", "http://")):
+        checkout_cta = f"""<section><h2>Complete secure payment</h2><p>Continue to Stripe hosted checkout to pay securely. Payjent will resume the exact stored agent action after Stripe confirms payment.</p><p><a class="btn" href="{_html_escape(ps.checkout_url)}" rel="noopener noreferrer">Continue to secure payment</a></p><p class="fine">Payjent does not show raw grants, payment tokens, or credentials on this page.</p></section>"""
+    return f"""<!doctype html><html><head><title>Payjent checkout · Approve paid agent action</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Human approval document</div><h1>Approve this exact paid action?</h1><p class='muted'>Key question: should this agent resume this exact paid action after payment?</p></section><div class='grid'><div class='card'><h3>Agent request</h3><p>{_html_escape(q.request_summary)}</p><p class='fine'>External user: <code>{_html_escape(q.external_user_id)}</code><br>Request hash: <code>{_html_escape(q.request_hash)}</code></p></div><div class='card'><h3>Amount</h3><div class='stat'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div><ul>{breakdown}</ul></div><div class='card'><h3>Status</h3><p><b>{_html_escape(status_words)}</b></p><p class='fine'>Payment session: <code>{_html_escape(ps.id)}</code><br>Payment provider/status: {_html_escape(ps.provider)} / {_html_escape(ps.status)}<br>Grant state: {_html_escape(_grant_state(grant))}</p></div><div class='card'><h3>What resumes after payment</h3><p>{resumes}</p><p class='fine'>Approval creates a one-time grant bound to this stored request. Raw grant and payment tokens are not shown on this page.</p></div></div><section><h2>Approval terms</h2><ul><li>Human approval is required before Payjent marks this action ready.</li><li>The grant is single-use and tied to the exact request hash above.</li><li>Downstream rails may still impose their own authorization, settlement, availability, or rejection behavior; Payjent records the checkpoint and does not guarantee a third-party rail outcome.</li><li>Fulfillment events recorded so far: {len(fulfillment)}.</li></ul><p><a class='btn' href="/status/{_html_escape(ps.id)}">View status</a></p></section>{checkout_cta}</main></body></html>"""
 
 
 @app.post("/pay/{payment_session_id}/mock-pay")
@@ -1039,6 +1070,11 @@ def agent_capabilities(request: Request, session: Session = Depends(get_session)
         "base_url": base_url,
         "enabled_rails": enabled_rails,
         "tools": _tool_descriptors(x402_available=x402_available),
+        "active_payment": {
+            "provider": _checkout_provider(settings),
+            "ready": _payment_readiness(settings)["active_payment_ready"],
+            "instructions": "Send the returned payment_prompt/payment_url to the user. When configured for production, Stripe Checkout is the active payment rail; wait for paid status before resuming.",
+        },
         "limits": {
             "default_currency": agent.default_currency,
             "x402": {
@@ -1193,6 +1229,8 @@ def _create_checkout_for_quote(
     requested_provider = (provider or settings.checkout_provider or "mock").lower()
     if requested_provider not in {"mock", "local", "stripe", "link"}:
         raise HTTPException(status_code=422, detail="unsupported checkout provider")
+    if settings.is_production and not settings.dev_mode and requested_provider in {"mock", "local"} and not settings.hosted_smoke_test_rail_enabled:
+        raise HTTPException(status_code=503, detail="active checkout provider not configured")
     session_id = f"ps_{uuid4().hex}"
     ps = PaymentSession(
         id=session_id,

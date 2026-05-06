@@ -136,6 +136,92 @@ def test_stripe_checkout_uses_adapter_payload_and_does_not_mark_paid(client, quo
     assert captured["payment_session_idempotency_key"] == "idem-1"
 
 
+def test_agent_action_stripe_provider_returns_hosted_payment_prompt(client, quote_payload, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        checkout_provider="stripe",
+        stripe_secret_key="sk_test_fake",
+        public_base_url="https://payjent.example",
+    )
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_prompt", "https://checkout.stripe.test/prompt"))
+
+    response = client.post("/api/v1/agent-actions", json=quote_payload, headers=bot_headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["payment_url"] == "https://checkout.stripe.test/prompt"
+    assert data["payment_prompt"]["payment_url"] == "https://checkout.stripe.test/prompt"
+    assert "https://checkout.stripe.test/prompt" in data["payment_prompt"]["message"]
+
+
+def test_production_mock_and_local_checkout_fail_closed(client, engine, quote_payload):
+    settings = Settings(
+        env="production",
+        dev_mode=False,
+        signing_secret="prod-signing-secret-for-test",
+        checkout_provider="mock",
+        public_base_url="https://payjent.example",
+    )
+    api_key = "prod-mock-fails-key"
+    with Session(engine) as session:
+        create_bot_credential(session, "bot-1", api_key, settings.signing_secret)
+    app.dependency_overrides[get_settings] = lambda: settings
+    headers = {"Authorization": f"Bearer {api_key}"}
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=headers).json()
+
+    for override in (None, "local"):
+        req_headers = dict(headers)
+        if override:
+            req_headers["X-Payjent-Provider"] = override
+        response = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=req_headers)
+        assert response.status_code == 503
+        assert response.json()["detail"] == "active checkout provider not configured"
+
+
+def test_stripe_pay_page_shows_secure_cta_not_mock_form(client, quote_payload, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        checkout_provider="stripe",
+        stripe_secret_key="sk_test_fake",
+        public_base_url="https://payjent.example",
+    )
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_page", "https://checkout.stripe.test/page"))
+    q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()
+    ps = client.post(f"/api/v1/quotes/{q['id']}/checkout", headers=bot_headers).json()
+
+    response = client.get(f"/pay/{ps['id']}")
+
+    assert response.status_code == 200
+    assert "Continue to secure payment" in response.text
+    assert "https://checkout.stripe.test/page" in response.text
+    assert "/mock-pay" not in response.text
+
+
+def test_payment_readiness_reports_booleans_without_secret_values(client):
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        checkout_provider="stripe",
+        stripe_secret_key="sk_test_do_not_leak",
+        stripe_webhook_secret="whsec_do_not_leak",
+        public_base_url="https://payjent.example",
+        database_url="postgresql://user:password@db/payjent",
+    )
+
+    response = client.get("/api/v1/payment-readiness")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data == {
+        "active_payment_ready": True,
+        "checkout_provider": "stripe",
+        "stripe_secret_configured": True,
+        "stripe_webhook_configured": True,
+        "public_base_url_configured": True,
+        "database_configured": True,
+    }
+    body = response.text
+    assert "sk_test_do_not_leak" not in body
+    assert "whsec_do_not_leak" not in body
+    assert "postgresql://" not in body
+
+
 def test_stripe_checkout_fails_closed_when_config_missing(client, quote_payload, bot_headers):
     app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key=None, public_base_url="https://payjent.example")
     q = client.post("/api/v1/quotes", json=quote_payload, headers=bot_headers).json()

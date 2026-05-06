@@ -26,8 +26,9 @@ Before creating paid actions, discover what this Payjent instance supports:
 1. Fetch the public manifest: `GET /.well-known/payjent-tools.json`. This is safe for any agent/client and contains no credentials, grants, or payment tokens. It describes Payjent tools, docs, auth requirements, and the authenticated capabilities URL.
 2. If you have been installed with a private Payjent credential, call `GET /api/v1/agent-capabilities` with `X-Payjent-Bot-Key` from your private secret store.
 3. Use the capabilities response to decide which paid actions and rails are available for your current agent. For example, generic paid actions may be available while x402 spend authorization depends on an enabled x402 rail.
+4. Optionally read `GET /api/v1/payment-readiness` for non-secret deployment status booleans. In production, Stripe Checkout is the intended active payment rail when configured; readiness reports booleans only and never returns secret values.
 
-Never ask a user to paste `X-Payjent-Bot-Key`, grants, payment tokens, or install-link redemption output in chat.
+Never ask a user to paste `X-Payjent-Bot-Key`, grants, payment tokens, deployment secrets, or install-link redemption output in chat.
 
 ## Primary setup flow: one-time Agent Install Link
 
@@ -112,7 +113,7 @@ For pay.sh-style actions, the action should produce an execution envelope with:
 
 ### Step 3: Send the payment prompt to the user
 
-Send only the Payjent payment prompt/link and a short explanation.
+Send only the returned Payjent `payment_prompt`/`payment_url` and a short explanation. If Payjent is configured with Stripe Checkout, the URL may be a Stripe-hosted checkout link or a Payjent page with a “Continue to secure payment” button; send it as returned and do not modify it.
 
 Good user message:
 
