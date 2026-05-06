@@ -193,6 +193,17 @@ python -m payjent.demo hosted-smoke-bootstrap --run-smoke
 
 The hosted bootstrap endpoint is disabled unless the Payjent server has `PAYJENT_BOOTSTRAP_TOKEN` configured. It accepts the `X-Payjent-Bootstrap-Token` header or a Bearer authorization value, compares in constant time, reuses an existing agent profile for the requested `bot_id`, and mints fresh bot/operator keys every call because only hashes are stored.
 
+For server-side validation from the hosted app itself, call the protected status smoke instead of depending on a local CLI network path:
+
+```bash
+curl -X POST "$PAYJENT_BASE_URL/api/v1/smoke/agent-webhook" \
+  -H "X-Payjent-Bootstrap-Token: $PAYJENT_BOOTSTRAP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"bot_id":"agent-smoke-1"}'
+```
+
+This endpoint is disabled by default, uses the same bootstrap token protection, creates fresh request-scope bot/operator credentials internally, runs the generic pay.sh action gate/resume/fulfillment metadata flow, and returns a redacted JSON artifact (`ok`, base URLs, payment link presence, unpaid/paid poll summary, `resumed_status`, `fulfilled_status`, `provider=pay_sh`, `settlement=external_pay_sh_runtime`, `operator_mock_pay=test_rail_only`). It does not return Payjent API keys, raw `payment_token`, grant IDs, or callback payload fields containing grant/payment tokens. It uses the explicit mock/test settlement rail only and never executes or settles pay.sh; if that test rail is disabled, it fails explicitly.
+
 The polling smoke proves: create premium pay.sh action, generate payment link/message, unpaid poll with no token, local/test mock payment, bot-auth poll discovers readiness, resume request, inspect the pay.sh command preview, and mark fulfilled. Output redacts any grant/payment token as `grant_...`.
 
 The webhook smoke proves: register `callback_url`, receive a signed callback after local/test payment, verify the signature, confirm the callback payload contains no grant/payment token, then resume with bot auth and mark fulfilled.

@@ -77,6 +77,8 @@ from .schemas import (
     GrantVerifyResponse,
     HostedSmokeBootstrapRequest,
     HostedSmokeBootstrapResponse,
+    HostedSmokeStatusRequest,
+    HostedSmokeStatusResponse,
     LinkCredentialApproval,
     LinkCredentialRequest,
     LinkPollResponse,
@@ -341,6 +343,107 @@ def hosted_smoke_bootstrap(
         agent=_agent_to_read(agent, session),
         bot_api_key=bot_key,
         operator_api_key=operator_key,
+    )
+
+
+def _redacted_status(status: AgentActionStatusResponse | dict) -> dict:
+    data = status if isinstance(status, dict) else status.model_dump()
+    return {
+        "status": data.get("status"),
+        "payment_status": data.get("payment_status"),
+        "payment_token_status": data.get("payment_token_status"),
+        "token_present": bool(data.get("payment_token")),
+        "token_redacted": bool(data.get("payment_token")),
+    }
+
+
+@app.post("/api/v1/smoke/agent-webhook", response_model=HostedSmokeStatusResponse)
+def hosted_smoke_agent_webhook(
+    payload: HostedSmokeStatusRequest | None = None,
+    request: Request = None,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    _authorized: None = Depends(require_bootstrap_token),
+):
+    payload = payload or HostedSmokeStatusRequest()
+    bot_id = (payload.bot_id or f"hosted-smoke-bot-{uuid4().hex[:8]}").strip()
+    operator_id = (payload.operator_id or f"hosted-smoke-operator-{uuid4().hex[:8]}").strip()
+    if not bot_id or not operator_id:
+        raise HTTPException(status_code=422, detail="bot_id/operator_id may not be blank")
+    callback_url = _validate_callback_url(payload.callback_url, settings)
+    callback_mode = "external" if callback_url else "none"
+
+    bot_key = generate_api_key()
+    operator_key = generate_api_key()
+    bot_credential = create_bot_credential(session, bot_id, bot_key, settings.signing_secret, role="bot")
+    operator_credential = create_bot_credential(session, operator_id, operator_key, settings.signing_secret, role="operator")
+
+    action_payload = PayShPremiumActionCreate(
+        bot_id=bot_id,
+        external_user_id="hosted-smoke-user",
+        request_summary="Payjent hosted smoke: verify gate/resume/fulfillment metadata only",
+        amount_minor=100,
+        currency="USD",
+        cost_breakdown=[{"label": "hosted smoke", "amount_minor": 100}],
+        service_url="https://example.invalid/payjent-hosted-smoke",
+        method="POST",
+        body={"smoke": True},
+        description="Payjent hosted smoke metadata check; pay.sh is not executed by this endpoint.",
+        callback_url=callback_url,
+    )
+    action = create_pay_sh_premium_action(action_payload, idempotency_key=None, provider="mock", session=session, settings=settings, credential=bot_credential)
+    action_data = action if isinstance(action, dict) else action.model_dump()
+    action_id = action_data["action_id"]
+    payment_session_id = action_data["payment_session_id"]
+    unpaid = get_agent_action_status(action_id, session=session, credential=bot_credential)
+
+    if not settings.effective_mock_provider_enabled:
+        raise HTTPException(status_code=503, detail="mock/test settlement rail unavailable for hosted smoke")
+    ps = session.get(PaymentSession, payment_session_id)
+    q = session.get(Quote, action_id)
+    if not ps or not q:
+        raise HTTPException(500, "hosted smoke action was not persisted")
+    mock_pay(payment_session_id, session=session, settings=settings, _credential=operator_credential)
+    callback_attempt = session.exec(select(WebhookDeliveryAttempt).where(WebhookDeliveryAttempt.payment_session_id == payment_session_id).order_by(WebhookDeliveryAttempt.created_at.desc())).first()
+    paid = get_agent_action_status(action_id, session=session, credential=bot_credential)
+    paid_data = paid if isinstance(paid, dict) else paid.model_dump()
+    payment_token = paid_data.get("payment_token")
+    if not payment_token:
+        raise HTTPException(500, "hosted smoke payment token was not issued")
+    resumed = consume_agent_action(
+        action_id,
+        AgentActionConsumeRequest(payment_token=payment_token, presentation=GrantPresentation(bot_id=bot_id, external_user_id="hosted-smoke-user", request_hash=paid_data.get("request_hash"))),
+        session=session,
+        settings=settings,
+        credential=bot_credential,
+    )
+    fulfilled = complete_agent_action(
+        action_id,
+        FulfillmentCreate(status="fulfilled", metadata={"smoke": True, "provider": "pay_sh", "settlement": "external_pay_sh_runtime"}),
+        session=session,
+        credential=bot_credential,
+    )
+    callback_payload = callback_attempt.payload if callback_attempt else {}
+    resumed_data = resumed if isinstance(resumed, dict) else resumed.model_dump()
+    fulfilled_data = fulfilled if isinstance(fulfilled, dict) else fulfilled.model_dump()
+    resumed_status = resumed_data.get("status")
+    fulfilled_status = fulfilled_data.get("status")
+    base_url = str(request.base_url).rstrip("/") if request else ""
+    public_base_url = settings.public_base_url or base_url
+    return HostedSmokeStatusResponse(
+        ok=fulfilled_status == "fulfilled" and resumed_status == "ready_to_execute",
+        base_url=base_url,
+        public_base_url=public_base_url,
+        action_id=action_id,
+        payment_session_id=payment_session_id,
+        payment_link_exists=bool(action_data.get("payment_url")),
+        callback_mode=callback_mode,
+        callback_contains_payment_token="payment_token" in callback_payload,
+        callback_contains_grant=any("grant" in key.lower() for key in callback_payload),
+        unpaid_poll=_redacted_status(unpaid),
+        paid_poll=_redacted_status(paid),
+        resumed_status=resumed_status,
+        fulfilled_status=fulfilled_status,
     )
 
 

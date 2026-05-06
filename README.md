@@ -178,6 +178,17 @@ python -m payjent.demo hosted-agent-webhook-smoke
 
 The hosted bootstrap endpoint is disabled unless the server is configured with `PAYJENT_BOOTSTRAP_TOKEN`; there is no default/dev token. It accepts the `X-Payjent-Bootstrap-Token` header or a Bearer authorization value, compares the token in constant time, creates/reuses the agent profile for the requested `bot_id`, and mints new bot/operator credentials every call because Payjent stores only key hashes and cannot recover old plaintext. For convenience, `python -m payjent.demo hosted-smoke-bootstrap --run-smoke` immediately runs the smoke with the returned keys without printing raw keys unless `--print-exports` is also passed.
 
+A production app can avoid flaky local CLI network paths by asking the server to run the bounded protected status smoke itself:
+
+```bash
+curl -X POST "$PAYJENT_BASE_URL/api/v1/smoke/agent-webhook" \
+  -H "X-Payjent-Bootstrap-Token: $PAYJENT_BOOTSTRAP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"bot_id":"agent-smoke-1"}'
+```
+
+`POST /api/v1/smoke/agent-webhook` is also disabled by default and uses the same bootstrap token protection. It creates fresh hashed bot/operator credentials only for request-scope internal auth, creates a generic pay.sh premium action, verifies the unpaid/paid poll states, uses only the explicit operator mock/test rail for internal settlement, consumes the redacted payment token internally, records `fulfilled`, and returns a redacted JSON artifact. The response labels `provider=pay_sh`, `settlement=external_pay_sh_runtime`, and `operator_mock_pay=test_rail_only`; it does **not** return Payjent API keys, raw `payment_token`, grant IDs, or callback fields containing payment/grant tokens. It never executes or settles pay.sh. If the hosted environment disables mock-pay, the endpoint fails with an explicit test-rail-unavailable error rather than weakening public mock-pay guardrails.
+
 For a safe local fallback that uses TestClient, temporary credentials, and an in-process callback capture, run `python -m payjent.demo hosted-agent-webhook-smoke --in-process` or set `PAYJENT_BOOTSTRAP_TOKEN` to any test value and run `python -m payjent.demo hosted-smoke-bootstrap --in-process --run-smoke`. The hosted smoke creates a generic pay.sh premium action, verifies a payment link exists, uses operator-auth dev/test mock-pay, validates a webhook when an observable test receiver is available (otherwise prints an explicit callback skip reason), resumes with bot auth, and marks fulfilled. It redacts grant/payment tokens and never executes or settles pay.sh. If the hosted environment disables mock-pay, the command fails with an actionable staging/test-rail message rather than pretending success.
 
 The older `python -m payjent.demo c3po-pay-sh` command remains as a compatibility alias. Caveat: Payjent gates payment and returns a stored pay.sh execution envelope/`command_preview`; pay.sh execution and settlement happen in the integrating agent runtime. This scaffold does not verify live pay.sh settlement or execute `paycurl`.

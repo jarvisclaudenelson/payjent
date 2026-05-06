@@ -86,6 +86,33 @@ class HostedSmokeBootstrapResponse(BaseModel):
     key_warning: str = "Plaintext keys are returned once from this authenticated bootstrap action; store them securely. Payjent stores only hashes."
 
 
+class HostedSmokeStatusRequest(BaseModel):
+    bot_id: str | None = None
+    operator_id: str | None = None
+    callback_url: str | None = None
+
+
+class HostedSmokeStatusResponse(BaseModel):
+    ok: bool
+    base_url: str
+    public_base_url: str
+    provider: Literal["pay_sh"] = "pay_sh"
+    settlement: Literal["external_pay_sh_runtime"] = "external_pay_sh_runtime"
+    operator_mock_pay: Literal["test_rail_only"] = "test_rail_only"
+    action_id: str
+    payment_session_id: str
+    payment_link_exists: bool
+    callback_mode: str
+    callback_contains_payment_token: bool
+    callback_contains_grant: bool
+    unpaid_poll: dict[str, Any]
+    paid_poll: dict[str, Any]
+    resumed_status: str
+    fulfilled_status: str
+    security_note: str = "Redacted status artifact: no Payjent API keys, bootstrap token, raw payment_token, or grant token are returned."
+    dev_note: str = "This protected smoke uses Payjent's internal mock/test settlement rail only to verify gate/resume/fulfillment metadata; it never executes or settles pay.sh."
+
+
 class StripeConnectStartResponse(BaseModel):
     mode: str
     account_id: str
