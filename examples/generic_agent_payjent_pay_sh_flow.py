@@ -4,12 +4,16 @@ Run a complete local dry demo without a running server:
 
     python examples/generic_agent_payjent_pay_sh_flow.py
 
-In production, replace the TestClient setup with:
+This is an actual tiny agent loop: it accepts a premium-user ask, asks Payjent
+for a payment-gated action, sends the user a payment prompt, waits/polls via bot
+auth, resumes the stored request after payment, and marks fulfillment. In
+production, replace the TestClient setup with:
 
     PayjentClient(os.environ["PAYJENT_BASE_URL"], api_key=os.environ["PAYJENT_BOT_KEY"])
 
 and execute the resumed envelope in your agent's own pay.sh runtime. This script
-never calls paycurl or performs pay.sh settlement.
+never calls paycurl, never exposes the raw payment token to the user, and never
+performs pay.sh settlement.
 """
 
 from __future__ import annotations
@@ -67,17 +71,16 @@ def main() -> None:
             print("payment prompt to send:")
             print(payment_message)
 
-            paid = test_client.post(
+            test_client.post(
                 f"/api/v1/payment-sessions/{pending.payment_session_id}/mock-pay",
                 headers={"X-Payjent-Bot-Key": "local-operator-key"},
-            ).json()
-            payment_token = paid["grant"]["id"]
-            print(f"mocked payment token: {payment_token}")
+            ).raise_for_status()
+            print("payment observed by Payjent; agent polls with bot auth (no user token paste)")
 
-            resumed = bridge.resume_after_payment(
+            resumed = bridge.resume_when_paid(
                 pending_id=pending.action_id,
                 agent_user_id="agent-user-1",
-                payment_token=payment_token,
+                timeout_seconds=0,
             )
             print("resumed pay.sh command_preview:")
             print(resumed["execution_envelope"]["command_preview"])
