@@ -15,6 +15,14 @@ def test_public_root_renders_landing_page(client):
     assert "Register your agent" in root.text
     assert "/docs/agent-payjent-self-setup.md" in root.text
     assert "Payjent does not execute downstream pay.sh" in root.text
+    assert "prefers-reduced-motion" in root.text
+    assert "IntersectionObserver" in root.text
+    assert "typing-dots" in root.text
+    assert "grant_" not in root.text
+    assert "payment_token" not in root.text
+    assert "<pre" not in root.text
+    assert "<code" not in root.text
+    assert "code-block" not in root.text
 
 
 def test_unauthenticated_dashboard_redirects_without_metadata(client, operator_headers):
