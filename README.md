@@ -8,6 +8,8 @@ Payjent is the paid execution and spend authorization control plane, not the car
 
 ## Agent owner quickstart (10 minutes)
 
+Pricing safety rule for installed agents: before creating a Payjent paid action, the agent must obtain the exact provider/merchant quoted price and send a matching `cost_breakdown`. It must not use placeholder/default/test amounts such as `$1.00` or `100` minor units. If the exact quote is unknown, the agent should not create the paid action and should tell the user Payjent is awaiting an exact provider quote.
+
 If you own an agent and want to gate a premium action, start here:
 
 ```bash

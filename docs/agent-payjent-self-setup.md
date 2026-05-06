@@ -91,12 +91,15 @@ If the task is free, do not create a Payjent action.
 
 ### Step 2: Create a Payjent paid action
 
+Before creating any Payjent paid action, first obtain the exact provider/merchant quoted price for the requested work. The `amount_minor` and `cost_breakdown` you send to Payjent must match that exact quote. Do **not** use placeholder, default, demo, or test amounts such as `$1.00` or `100` minor units. If the exact price is unknown, fail closed: do not create the paid action yet, and tell the user, "Payjent is awaiting an exact provider quote before I can create the paid action."
+
 Create a paid action with:
 
 - your agent id
 - the user's id
 - a concise request summary
-- amount and currency
+- exact quoted amount and currency
+- matching `cost_breakdown` that sums to the exact quoted amount
 - downstream provider metadata, such as `provider=pay_sh`
 - the target service or resource
 - method/body if applicable

@@ -135,11 +135,22 @@ def docs_index():
     return HTMLResponse("""<!doctype html><html><head><title>Payjent docs</title><meta name='viewport' content='width=device-width,initial-scale=1'></head><body><main style='font-family:system-ui;max-width:760px;margin:48px auto;padding:0 20px'><h1>Payjent agent setup</h1><p>Agent-readable setup guide for integrating paid action approvals.</p><p><a href='/docs/agent-payjent-self-setup.md'>Open /docs/agent-payjent-self-setup.md</a></p></main></body></html>""")
 
 
+_EXACT_PRICING_POLICY = {
+    "rule": "exact_provider_quote_required",
+    "description": "Before creating a Payjent paid action, obtain the exact provider/merchant quoted price and provide a matching cost_breakdown. Do not use placeholder, default, demo, or test amounts such as $1.00 or 100 minor units. If the exact price is unknown, do not create the paid action; tell the user Payjent is awaiting an exact provider quote.",
+    "amount_minor": "Must equal the exact provider/merchant quoted total in minor units.",
+    "cost_breakdown": "Required and must sum to amount_minor using the same exact provider/merchant quote.",
+    "unknown_price_behavior": "fail_closed_await_exact_provider_quote",
+    "forbidden_placeholders": ["$1.00", "100 minor units", "default amount", "test amount"],
+}
+
+
 def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
+    create_amount_requirements = {"amount_minor": "exact provider/merchant quoted total only", "cost_breakdown": "required; must match amount_minor", "fail_closed_if_unknown": True}
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
-        {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action; discovery is free, execution resumes only after payment."},
-        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external pay.sh action envelope gated by Payjent."},
+        {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external pay.sh action envelope gated by Payjent only after obtaining an exact provider/merchant quote.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
@@ -175,10 +186,12 @@ def _discovery_manifest(base_url: str) -> dict:
             "header": "X-Payjent-Bot-Key",
             "credential_install": "Credentials are installed via one-time Agent Install Link and must not be pasted in chat.",
         },
+        "pricing_policy": _EXACT_PRICING_POLICY,
         "tools": _tool_descriptors(),
         "security_invariants": [
             "request-bound approvals and grants",
             "paid-before-execute",
+            "exact provider/merchant quoted price required; no placeholder/default/test amounts",
             "no raw grants, credentials, or payment tokens in chat",
             "exact request resume",
         ],

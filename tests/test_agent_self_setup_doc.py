@@ -13,6 +13,12 @@ def test_agent_self_setup_markdown_is_agent_readable(client):
     assert "https://payjent.vercel.app/docs/agent-payjent-self-setup.md" in text
     assert "grant_*" in text
     assert "Payjent does not execute pay.sh for you" in text
+    assert "exact provider/merchant quoted price" in text
+    assert "amount_minor` and `cost_breakdown`" in text
+    assert "Do **not** use placeholder, default, demo, or test amounts" in text
+    assert "Payjent is awaiting an exact provider quote" in text
+    assert "default `$1.00`" not in text
+    assert "use `$1.00`" not in text
 
 
 def test_c3po_specific_doc_url_redirects_to_generic_agent_guide(client):
