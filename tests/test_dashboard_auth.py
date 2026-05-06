@@ -1,3 +1,5 @@
+import re
+
 from sqlmodel import Session, select
 
 from payjent.config import Settings, get_settings
@@ -116,3 +118,68 @@ def test_operator_api_auth_behavior_unchanged(client):
     assert missing.status_code == 401
     bot_only = client.post("/api/v1/agents/register", headers={"Authorization": "Bearer test-bot-key"}, json=payload)
     assert bot_only.status_code == 403
+
+
+def test_authenticated_dashboard_has_agent_credential_form_not_operator_curl(client):
+    client.post("/auth/register", data={"email": "dashform@example.com", "password": "password123"})
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    assert "Register agent and create credential" in response.text
+    assert "/dashboard/agents/register" in response.text
+    assert "Copy one-time credential" in response.text
+    assert "X-Payjent-Bot-Key" in response.text
+    assert "/docs/agent-payjent-self-setup.md" in response.text
+    assert "&lt;operator-key&gt;" not in response.text
+
+
+def test_dashboard_form_creates_agent_and_shows_key_once(client):
+    client.post("/auth/register", data={"email": "dashcreate@example.com", "password": "password123"})
+    created = client.post(
+        "/dashboard/agents/register",
+        data={"name": "Dashboard Agent", "platform": "discord", "bot_id": "dashboard-bot", "default_currency": "USD"},
+    )
+    assert created.status_code == 200
+    assert "Copy this Payjent agent credential now" in created.text
+    assert "Payjent will not show this value again" in created.text
+    match = re.search(r"payjent_[A-Za-z0-9_\-]+", created.text)
+    assert match is not None
+    generated_key = match.group(0)
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "Dashboard Agent" in dashboard.text
+    assert generated_key not in dashboard.text
+    detail_link = re.search(r"/dashboard/agents/(agent_[a-f0-9]+)", dashboard.text)
+    assert detail_link is not None
+    detail = client.get(detail_link.group(0))
+    assert detail.status_code == 200
+    assert "Dashboard Agent" in detail.text
+    assert generated_key not in detail.text
+
+
+def test_repeated_dashboard_registration_does_not_leak_existing_key(client):
+    client.post("/auth/register", data={"email": "repeat@example.com", "password": "password123"})
+    first = client.post(
+        "/dashboard/agents/register",
+        data={"name": "Repeat Agent", "platform": "discord", "bot_id": "repeat-bot", "default_currency": "USD"},
+    )
+    first_key = re.search(r"payjent_[A-Za-z0-9_\-]+", first.text).group(0)
+    second = client.post(
+        "/dashboard/agents/register",
+        data={"name": "Repeat Agent", "platform": "discord", "bot_id": "repeat-bot", "default_currency": "USD"},
+    )
+    assert second.status_code == 200
+    assert "Existing agent found" in second.text
+    assert "copy-once and cannot be revealed" in second.text
+    assert first_key not in second.text
+    assert re.search(r"payjent_[A-Za-z0-9_\-]+", second.text) is None
+
+
+def test_unauthenticated_dashboard_agent_form_post_redirects(client):
+    response = client.post(
+        "/dashboard/agents/register",
+        data={"name": "No Session", "platform": "discord", "bot_id": "no-session", "default_currency": "USD"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] in {"/auth/register", "/auth/login"}
