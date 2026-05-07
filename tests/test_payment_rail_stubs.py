@@ -127,7 +127,7 @@ def test_stripe_adapter_builds_checkout_payload_idempotency_and_metadata():
 
     assert provider_session_id == "cs_test_123"
     assert url == "https://checkout.stripe.test/session"
-    assert calls["idempotency_key"] == "idem-1"
+    assert calls["idempotency_key"] == "ps_1"
     assert calls["payload"]["line_items"][0]["price_data"]["unit_amount"] == 250
     assert calls["payload"]["line_items"][0]["price_data"]["currency"] == "usd"
     assert calls["payload"]["success_url"] == "https://payjent.example/status/ps_1?checkout=success"

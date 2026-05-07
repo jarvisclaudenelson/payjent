@@ -77,7 +77,13 @@ def create_stripe_checkout_session(
         raise HTTPException(status_code=503, detail="PAYJENT_STRIPE_SECRET_KEY is required for Stripe checkout")
     payload = build_stripe_checkout_payload(quote, payment_session, settings)
     stripe_client = client or StripeSDKCheckoutClient(settings.stripe_secret_key)
-    created = stripe_client.create_checkout_session(payload, payment_session.idempotency_key or payment_session.id)
+    # Stripe idempotency must identify this exact Checkout Session creation attempt,
+    # not the caller's semantic paid-action/request idempotency key. Agents often
+    # reuse request-level keys while changing amounts or endpoints during retries;
+    # forwarding those to Stripe can collide with stale Checkout Session params and
+    # surface as production 500s. Payjent still stores caller idempotency for its
+    # own duplicate-detection, but Stripe gets the unique payment session id.
+    created = stripe_client.create_checkout_session(payload, payment_session.id)
     provider_session_id = created.get("id")
     hosted_url = created.get("url")
     if not provider_session_id or not hosted_url:
