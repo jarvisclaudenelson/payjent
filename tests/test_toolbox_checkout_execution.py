@@ -11,9 +11,11 @@ def _payload(arguments=None, **extra):
     return body
 
 
-def _assert_no_secret_value(value, secret="super-secret-value"):
+def _assert_no_secret_value(value, secret="payjent-test-secret-value-never-return"):
     serialized = json.dumps(value).lower()
     assert secret not in serialized
+    for marker in ("target_url", "service_url", "callback", "webhook", "api_url"):
+        assert marker not in serialized
 
 
 def test_toolbox_checkout_fal_creates_quote_and_payment_session(client, bot_headers, engine):
@@ -96,21 +98,16 @@ def test_toolbox_execution_create_get_complete_fail_lifecycle_safe_and_route_ord
     scoped = client.get(f"/api/v1/toolbox/executions/{execution['id']}", headers=operator_headers)
     assert scoped.status_code == 200
 
-    completed = client.post(
+    completed_unpaid = client.post(
         f"/api/v1/toolbox/executions/{execution['id']}/complete",
-        json={"result_metadata": {"public": "ok", "api_key": "super-secret-value", "nested": {"Authorization": "super-secret-value"}}},
+        json={"result_metadata": {"public": "ok"}},
         headers=bot_headers,
     )
-    assert completed.status_code == 200
-    complete_body = completed.json()
-    assert complete_body["status"] == "succeeded"
-    assert complete_body["result_metadata_json"]["api_key"] == "redacted"
-    assert complete_body["result_metadata_json"]["nested"]["Authorization"] == "redacted"
-    _assert_no_secret_value(complete_body)
+    assert completed_unpaid.status_code == 409
 
     failed = client.post(
         f"/api/v1/toolbox/executions/{execution['id']}/fail",
-        json={"error_metadata": {"message": "provider failed", "token": "super-secret-value"}},
+        json={"error_metadata": {"message": "provider failed", "token": "payjent-test-secret-value-never-return"}},
         headers=bot_headers,
     )
     assert failed.status_code == 200
@@ -140,3 +137,80 @@ def test_toolbox_execution_ready_when_paid_payment_session_supplied(client, bot_
     )
     assert created.status_code == 200
     assert created.json()["status"] == "ready_to_execute"
+
+    completed = client.post(
+        f"/api/v1/toolbox/executions/{created.json()['id']}/complete",
+        json={"result_metadata": {"public": "ok", "api_key": "payjent-test-secret-value-never-return", "nested": {"Authorization": "payjent-test-secret-value-never-return"}}},
+        headers=bot_headers,
+    )
+    assert completed.status_code == 200
+    complete_body = completed.json()
+    assert complete_body["status"] == "succeeded"
+    assert complete_body["result_metadata_json"]["api_key"] == "redacted"
+    assert complete_body["result_metadata_json"]["nested"]["Authorization"] == "redacted"
+    _assert_no_secret_value(complete_body)
+
+
+def test_toolbox_rejects_secret_argument_keys_recursively(client, bot_headers):
+    response = client.post(
+        "/api/v1/toolbox/fal.image.generate/checkout",
+        json=_payload({"prompt": "safe", "nested": {"api_key": "payjent-test-secret-value-never-return"}}),
+        headers=bot_headers,
+    )
+    assert response.status_code == 422
+    _assert_no_secret_value(response.json())
+
+
+def test_toolbox_firecrawl_url_is_summarized_not_persisted(client, bot_headers, engine):
+    raw_url = "https://example.com/private/path?token=payjent-test-secret-value-never-return"
+    response = client.post(
+        "/api/v1/toolbox/firecrawl.scrape/checkout",
+        json=_payload({"url": raw_url}),
+        headers=bot_headers,
+    )
+    assert response.status_code == 402
+    _assert_no_secret_value(response.json())
+
+    checkout = client.post(
+        "/api/v1/toolbox/firecrawl.scrape/executions",
+        json=_payload({"url": raw_url}),
+        headers=bot_headers,
+    )
+    assert checkout.status_code == 200
+    body = checkout.json()
+    assert body["arguments_json"] == {"url": {"scheme": "https", "host": "example.com"}}
+    _assert_no_secret_value(body)
+
+
+def test_toolbox_checkout_failure_rolls_back_quote_and_payment_session(client, bot_headers, engine):
+    response = client.post(
+        "/api/v1/toolbox/fal.image.generate/checkout",
+        json=_payload({"prompt": "rollback robot", "quantity": 1}),
+        headers={**bot_headers, "X-Payjent-Provider": "unsupported-provider"},
+    )
+    assert response.status_code == 422
+    with Session(engine) as session:
+        assert session.exec(select(Quote)).all() == []
+        assert session.exec(select(PaymentSession)).all() == []
+
+
+def test_toolbox_checkout_idempotency_returns_existing_session(client, bot_headers, engine):
+    headers = {**bot_headers, "Idempotency-Key": "toolbox-idem-regression"}
+    payload = _payload({"prompt": "same robot", "quantity": 1})
+    first = client.post("/api/v1/toolbox/fal.image.generate/checkout", json=payload, headers=headers)
+    second = client.post("/api/v1/toolbox/fal.image.generate/checkout", json=payload, headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["payment_session"]["id"] == second.json()["payment_session"]["id"]
+    with Session(engine) as session:
+        assert len(session.exec(select(Quote)).all()) == 1
+        assert len(session.exec(select(PaymentSession)).all()) == 1
+
+
+def test_toolbox_execution_rejects_invalid_or_mismatched_quote_id(client, bot_headers):
+    missing = client.post(
+        "/api/v1/toolbox/fal.image.generate/executions",
+        json=_payload({"prompt": "safe", "quantity": 1}, quote_id="quote_missing"),
+        headers=bot_headers,
+    )
+    assert missing.status_code == 404

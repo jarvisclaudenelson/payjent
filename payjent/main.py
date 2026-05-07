@@ -294,18 +294,73 @@ def _toolbox_quote_or_404(tool_id: str, payload: ToolboxQuoteCreate) -> tuple[di
     tool = get_toolbox_tool(tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail="tool not found")
+    _reject_secret_argument_keys(payload.arguments)
     toolbox_quote = build_tool_quote(tool, bot_id=payload.bot_id, external_user_id=payload.external_user_id, arguments=payload.arguments)
     if payload.request_hash and payload.request_hash != toolbox_quote["request_hash"]:
         raise HTTPException(status_code=409, detail="request_hash does not match recomputed toolbox quote")
     return tool, toolbox_quote
 
 
+_SECRET_ARGUMENT_MARKERS = ("secret", "token", "api_key", "apikey", "authorization", "cookie", "password", "private_key", "credential", "grant")
+_EXECUTABLE_URL_KEY_MARKERS = ("target_url", "service_url", "callback", "webhook", "api_url")
+
+
+def _reject_secret_argument_keys(value: Any, path: str = "arguments") -> None:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            normalized = str(k).lower().replace("-", "_")
+            if any(marker in normalized for marker in _SECRET_ARGUMENT_MARKERS):
+                raise HTTPException(status_code=422, detail=f"toolbox arguments may not include secret-like key: {path}.{k}")
+            _reject_secret_argument_keys(v, f"{path}.{k}")
+    elif isinstance(value, list):
+        for idx, item in enumerate(value):
+            _reject_secret_argument_keys(item, f"{path}[{idx}]")
+
+
+def _public_https_url_summary(raw: str) -> dict[str, str]:
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="toolbox URL arguments must be public HTTPS URLs")
+    host = parsed.hostname.lower()
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise HTTPException(status_code=422, detail="toolbox URL arguments must be public HTTPS URLs")
+    except ValueError:
+        if host in {"localhost", "metadata.google.internal"} or host.endswith(".local"):
+            raise HTTPException(status_code=422, detail="toolbox URL arguments must be public HTTPS URLs")
+    return {"scheme": "https", "host": host}
+
+
+def _sanitize_toolbox_arguments(tool_id: str, value: Any, path: str = "arguments") -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for k, v in value.items():
+            key = str(k)
+            normalized = key.lower().replace("-", "_")
+            if any(marker in normalized for marker in _SECRET_ARGUMENT_MARKERS):
+                raise HTTPException(status_code=422, detail=f"toolbox arguments may not include secret-like key: {path}.{key}")
+            if isinstance(v, str) and (normalized == "url" or normalized.endswith("_url") or any(marker in normalized for marker in _EXECUTABLE_URL_KEY_MARKERS)):
+                if tool_id == "firecrawl.scrape" and normalized == "url":
+                    sanitized[key] = _public_https_url_summary(v)
+                else:
+                    raise HTTPException(status_code=422, detail=f"toolbox arguments may not include executable URL field: {path}.{key}")
+            else:
+                sanitized[key] = _sanitize_toolbox_arguments(tool_id, v, f"{path}.{key}")
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_toolbox_arguments(tool_id, item, f"{path}[{idx}]") for idx, item in enumerate(value)]
+    return value
+
+
 def _toolbox_execution_envelope(tool: dict[str, Any], toolbox_quote: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    sanitized_arguments = _sanitize_toolbox_arguments(tool["tool_id"], arguments)
     return {
         "tool_id": tool["tool_id"],
+        "toolbox_request_hash": toolbox_quote["request_hash"],
         "provider_type": toolbox_quote["provider_type"],
         "execution_mode": toolbox_quote["execution_mode"],
-        "arguments": arguments,
+        "argument_summary": sanitized_arguments,
         "payment_options": toolbox_quote["payment_options"],
         "recommended_payment_rail": toolbox_quote["recommended_payment_rail"],
         "execution_boundary": "agent_executes_after_payjent_authorization",
@@ -360,6 +415,8 @@ def toolbox_complete_execution(execution_id: str, payload: ToolExecutionComplete
     if not execution:
         raise HTTPException(404, "tool execution not found")
     _enforce_bot_scope(credential, execution.bot_id)
+    if execution.status not in {"ready_to_execute", "executing", "paid"}:
+        raise HTTPException(status_code=409, detail="tool execution must be paid before completion")
     execution.status = "succeeded"
     execution.result_metadata_json = _scrub_secret_metadata(payload.result_metadata)
     execution.updated_at = datetime.now(timezone.utc)
@@ -403,8 +460,25 @@ def toolbox_checkout(tool_id: str, payload: ToolboxCheckoutRequest, idempotency_
         if toolbox_quote["provider_type"] == "trusted_paysh" and toolbox_quote["recommended_payment_rail"] in {"pay_sh", "x402"}:
             return JSONResponse(status_code=402, content={"status": "micro_rail_required", "quote": None, "payment_session": None, "payment_url": None, "toolbox_quote": toolbox_quote, "guidance": {"reason": "sub-card-minimum trusted pay.sh/x402 action", "required_rail": toolbox_quote["recommended_payment_rail"], "pay_sh": {"arbitrary_url_execution": False, "instructions": "Use an agent-side funded pay.sh/x402 runtime after Payjent approval; Payjent does not create Stripe checkout for this microcharge by default."}}})
         return JSONResponse(status_code=402, content={"status": "task_budget_required", "quote": None, "payment_session": None, "payment_url": None, "toolbox_quote": toolbox_quote, "guidance": {"reason": "amount is below Stripe card checkout minimum", "task_budget_required": True, "minimum_amount_minor": STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(toolbox_quote["currency"].upper(), 50)}})
+    if idempotency_key:
+        for existing in session.exec(select(PaymentSession).where(PaymentSession.idempotency_key == idempotency_key)).all():
+            existing_quote = session.get(Quote, existing.quote_id)
+            envelope = existing_quote.execution_envelope if existing_quote else {}
+            if (
+                existing_quote
+                and existing_quote.bot_id == payload.bot_id
+                and envelope.get("tool_id") == tool_id
+                and envelope.get("toolbox_request_hash") == toolbox_quote["request_hash"]
+                and existing_quote.request_hash == toolbox_quote["request_hash"]
+            ):
+                return ToolboxCheckoutResponse(status="checkout_created", quote=quote_to_read(existing_quote), payment_session=session_to_read(existing), payment_url=existing.checkout_url, toolbox_quote=toolbox_quote)
     q = _create_quote_for_toolbox(payload, tool, toolbox_quote, session)
-    ps = _create_checkout_for_quote(q, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings)
+    try:
+        ps = _create_checkout_for_quote(q, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings)
+    except Exception:
+        session.delete(q)
+        session.commit()
+        raise
     return ToolboxCheckoutResponse(status="checkout_created", quote=quote_to_read(q), payment_session=session_to_read(ps), payment_url=ps.checkout_url, toolbox_quote=toolbox_quote)
 
 
@@ -423,11 +497,25 @@ def toolbox_create_execution(tool_id: str, payload: ToolExecutionCreate, session
         if not q:
             raise HTTPException(404, "quote not found")
         _enforce_bot_scope(credential, q.bot_id)
+        if q.bot_id != payload.bot_id or q.external_user_id != payload.external_user_id:
+            raise HTTPException(422, "payment session quote scope does not match toolbox execution")
         if q.request_hash != toolbox_quote["request_hash"]:
             raise HTTPException(409, "payment session quote does not match recomputed toolbox quote")
+        if quote_id and quote_id != q.id:
+            raise HTTPException(409, "quote_id does not match payment session quote")
         quote_id = q.id
         status = "ready_to_execute" if ps.status == "paid" else "payment_required"
-    execution = ToolExecution(id=f"texec_{uuid4().hex}", tool_id=tool_id, bot_id=payload.bot_id, external_user_id=payload.external_user_id, quote_id=quote_id, payment_session_id=payment_session_id, amount_minor=toolbox_quote["amount_minor"], currency=toolbox_quote["currency"], request_hash=toolbox_quote["request_hash"], arguments_json=payload.arguments, status=status)
+    elif quote_id:
+        q = session.get(Quote, quote_id)
+        if not q:
+            raise HTTPException(404, "quote not found")
+        _enforce_bot_scope(credential, q.bot_id)
+        if q.bot_id != payload.bot_id or q.external_user_id != payload.external_user_id:
+            raise HTTPException(422, "quote scope does not match toolbox execution")
+        if q.request_hash != toolbox_quote["request_hash"]:
+            raise HTTPException(409, "quote does not match recomputed toolbox quote")
+    sanitized_arguments = _sanitize_toolbox_arguments(tool_id, payload.arguments)
+    execution = ToolExecution(id=f"texec_{uuid4().hex}", tool_id=tool_id, bot_id=payload.bot_id, external_user_id=payload.external_user_id, quote_id=quote_id, payment_session_id=payment_session_id, amount_minor=toolbox_quote["amount_minor"], currency=toolbox_quote["currency"], request_hash=toolbox_quote["request_hash"], arguments_json=sanitized_arguments, status=status)
     session.add(execution); session.commit(); session.refresh(execution)
     return _execution_to_read(execution)
 
