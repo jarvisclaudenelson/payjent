@@ -58,6 +58,7 @@ from .models import (
 from .money import quote_hash, validate_breakdown
 from .providers.base import issue_receipt_and_grant
 from .providers.exa import ExaProviderError, ExaProviderNotConfigured, run_deep_search as run_exa_deep_search
+from .providers.firecrawl import FirecrawlProviderError, FirecrawlProviderNotConfigured, run_scrape as run_firecrawl_scrape
 from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest
 from .providers.link import (
     create_link_spend_request as create_link_provider_spend_request,
@@ -330,7 +331,22 @@ def _public_https_url_summary(raw: str) -> dict[str, str]:
     except ValueError:
         if host in {"localhost", "metadata.google.internal"} or host.endswith(".local"):
             raise HTTPException(status_code=422, detail="toolbox URL arguments must be public HTTPS URLs")
-    return {"scheme": "https", "host": host}
+    path = parsed.path or "/"
+    netloc = host if parsed.port is None else f"{host}:{parsed.port}"
+    canonical_url = f"https://{netloc}{path}"
+    if parsed.query:
+        canonical_url = f"{canonical_url}?{parsed.query}"
+    return {"scheme": "https", "host": host, "canonical_url": canonical_url}
+
+
+def _redact_toolbox_arguments_for_read(tool_id: str, value: Any) -> Any:
+    if tool_id == "firecrawl.scrape" and isinstance(value, dict):
+        redacted = dict(value)
+        url = redacted.get("url")
+        if isinstance(url, dict):
+            redacted["url"] = {k: v for k, v in url.items() if k in {"scheme", "host"}}
+        return redacted
+    return value
 
 
 def _sanitize_toolbox_arguments(tool_id: str, value: Any, path: str = "arguments") -> Any:
@@ -398,7 +414,9 @@ def _scrub_secret_metadata(value: Any) -> Any:
 
 
 def _execution_to_read(execution: ToolExecution) -> ToolExecutionRead:
-    return ToolExecutionRead.model_validate(execution, from_attributes=True)
+    data = ToolExecutionRead.model_validate(execution, from_attributes=True)
+    data.arguments_json = _redact_toolbox_arguments_for_read(execution.tool_id, data.arguments_json)
+    return data
 
 
 @app.get("/api/v1/toolbox/executions/{execution_id}", response_model=ToolExecutionRead)
@@ -444,7 +462,7 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
     if not execution:
         raise HTTPException(404, "tool execution not found")
     _enforce_bot_scope(credential, execution.bot_id)
-    if execution.tool_id != "exa.deep_search":
+    if execution.tool_id not in {"exa.deep_search", "firecrawl.scrape"}:
         raise HTTPException(status_code=501, detail="managed execution adapter not implemented for tool")
     if execution.status == "executing":
         raise HTTPException(status_code=409, detail="tool execution is already executing")
@@ -456,8 +474,11 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
     execution.updated_at = now
     session.add(execution); session.commit(); session.refresh(execution)
     try:
-        result = run_exa_deep_search(execution.arguments_json or {}, api_key=settings.exa_api_key)
-    except ExaProviderNotConfigured:
+        if execution.tool_id == "exa.deep_search":
+            result = run_exa_deep_search(execution.arguments_json or {}, api_key=settings.exa_api_key)
+        else:
+            result = run_firecrawl_scrape(execution.arguments_json or {}, api_key=settings.firecrawl_api_key)
+    except (ExaProviderNotConfigured, FirecrawlProviderNotConfigured):
         execution.status = "failed"
         execution.error_metadata_json = {"code": "provider_not_configured", "message": "managed provider is not configured"}
         execution.updated_at = datetime.now(timezone.utc)
@@ -469,7 +490,7 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
         execution.updated_at = datetime.now(timezone.utc)
         session.add(execution); session.commit(); session.refresh(execution)
         raise HTTPException(status_code=422, detail=str(exc))
-    except ExaProviderError:
+    except (ExaProviderError, FirecrawlProviderError):
         execution.status = "failed"
         execution.error_metadata_json = {"code": "provider_execution_failed", "message": "managed provider execution failed"}
         execution.updated_at = datetime.now(timezone.utc)

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     hosted_smoke_test_rail_enabled: bool = False
     managed_execution_allowed_hosts: str = ""
     exa_api_key: str | None = None
+    firecrawl_api_key: str | None = None
 
     @property
     def is_production(self) -> bool:
