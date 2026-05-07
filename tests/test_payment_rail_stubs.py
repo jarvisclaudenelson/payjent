@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 
+from fastapi import HTTPException
 from sqlmodel import Session
 
 from payjent.auth import create_bot_credential
@@ -139,6 +140,46 @@ def test_stripe_adapter_builds_checkout_payload_idempotency_and_metadata():
         "request_hash": "hash-1",
     }
     assert calls["payload"]["payment_intent_data"]["metadata"] == calls["payload"]["metadata"]
+
+
+def test_stripe_checkout_provider_errors_are_mapped_to_safe_502():
+    quote = Quote(
+        id="quote_stripe_error",
+        bot_id="bot-1",
+        external_user_id="user-1",
+        request_summary="do a paid thing",
+        request_hash="hash-stripe-error",
+        amount_minor=50,
+        currency="USD",
+        cost_breakdown=[{"label": "work", "amount_minor": 50}],
+        quote_hash="qh-stripe-error",
+    )
+    payment_session = PaymentSession(id="ps_stripe_error", quote_id="quote_stripe_error", provider="stripe")
+
+    class FakeStripeError(Exception):
+        user_message = "No such price: sk_live_secret_should_not_be_here\nPlease check Stripe setup"
+        code = "resource_missing"
+        http_status = 400
+
+    class FailingStripeClient:
+        def create_checkout_session(self, payload, idempotency_key):
+            raise FakeStripeError()
+
+    try:
+        create_stripe_checkout_session(
+            quote,
+            payment_session,
+            Settings(stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example"),
+            client=FailingStripeClient(),
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 502
+        assert "Stripe checkout session creation failed" in exc.detail
+        assert "resource_missing" in exc.detail
+        assert "\n" not in exc.detail
+        assert "sk_live" not in exc.detail
+    else:
+        raise AssertionError("expected Stripe checkout failure to map to HTTPException")
 
 
 def test_stripe_checkout_uses_adapter_payload_and_does_not_mark_paid(client, quote_payload, bot_headers, monkeypatch):

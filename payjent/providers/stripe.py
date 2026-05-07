@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+import httpx
 
 from fastapi import HTTPException
 
@@ -67,6 +70,30 @@ def build_stripe_checkout_payload(quote: Quote, payment_session: PaymentSession,
     }
 
 
+def _safe_stripe_checkout_error(exc: Exception) -> str:
+    """Return a non-secret, actionable Stripe checkout failure for API callers."""
+    message = getattr(exc, "user_message", None) or getattr(exc, "message", None) or str(exc)
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "http_status", None)
+    if isinstance(exc, httpx.HTTPError):
+        message = "Stripe checkout network request failed"
+    detail = "Stripe checkout session creation failed"
+    parts = []
+    if status:
+        parts.append(f"status={status}")
+    if code:
+        parts.append(f"code={code}")
+    if message:
+        sanitized = str(message).replace("\n", " ").strip()
+        sanitized = re.sub(r"\b(?:sk|pk|rk)_(?:test|live)_[A-Za-z0-9_=-]+", "[redacted_stripe_key]", sanitized)
+        if len(sanitized) > 300:
+            sanitized = sanitized[:297] + "..."
+        parts.append(sanitized)
+    if parts:
+        detail = f"{detail}: {'; '.join(parts)}"
+    return detail
+
+
 def create_stripe_checkout_session(
     quote: Quote,
     payment_session: PaymentSession,
@@ -83,7 +110,13 @@ def create_stripe_checkout_session(
     # forwarding those to Stripe can collide with stale Checkout Session params and
     # surface as production 500s. Payjent still stores caller idempotency for its
     # own duplicate-detection, but Stripe gets the unique payment session id.
-    created = stripe_client.create_checkout_session(payload, payment_session.id)
+    try:
+        created = stripe_client.create_checkout_session(payload, payment_session.id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        detail = _safe_stripe_checkout_error(exc)
+        raise HTTPException(status_code=502, detail=detail) from exc
     provider_session_id = created.get("id")
     hosted_url = created.get("url")
     if not provider_session_id or not hosted_url:
