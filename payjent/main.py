@@ -57,6 +57,7 @@ from .models import (
 )
 from .money import quote_hash, validate_breakdown
 from .providers.base import issue_receipt_and_grant
+from .providers.exa import ExaProviderError, ExaProviderNotConfigured, run_deep_search as run_exa_deep_search
 from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest
 from .providers.link import (
     create_link_spend_request as create_link_provider_spend_request,
@@ -432,6 +433,50 @@ def toolbox_fail_execution(execution_id: str, payload: ToolExecutionFailRequest,
     _enforce_bot_scope(credential, execution.bot_id)
     execution.status = "failed"
     execution.error_metadata_json = _scrub_secret_metadata(payload.error_metadata)
+    execution.updated_at = datetime.now(timezone.utc)
+    session.add(execution); session.commit(); session.refresh(execution)
+    return _execution_to_read(execution)
+
+
+@app.post("/api/v1/toolbox/executions/{execution_id}/run", response_model=ToolExecutionRead)
+def toolbox_run_execution(execution_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    execution = session.get(ToolExecution, execution_id)
+    if not execution:
+        raise HTTPException(404, "tool execution not found")
+    _enforce_bot_scope(credential, execution.bot_id)
+    if execution.tool_id != "exa.deep_search":
+        raise HTTPException(status_code=501, detail="managed execution adapter not implemented for tool")
+    if execution.status not in {"ready_to_execute", "paid", "executing"}:
+        raise HTTPException(status_code=409, detail="tool execution must be paid before run")
+
+    now = datetime.now(timezone.utc)
+    execution.status = "executing"
+    execution.updated_at = now
+    session.add(execution); session.commit(); session.refresh(execution)
+    try:
+        result = run_exa_deep_search(execution.arguments_json or {}, api_key=settings.exa_api_key)
+    except ExaProviderNotConfigured:
+        execution.status = "failed"
+        execution.error_metadata_json = {"code": "provider_not_configured", "message": "managed provider is not configured"}
+        execution.updated_at = datetime.now(timezone.utc)
+        session.add(execution); session.commit(); session.refresh(execution)
+        raise HTTPException(status_code=503, detail="provider_not_configured")
+    except ValueError as exc:
+        execution.status = "failed"
+        execution.error_metadata_json = {"code": "invalid_arguments", "message": str(exc)}
+        execution.updated_at = datetime.now(timezone.utc)
+        session.add(execution); session.commit(); session.refresh(execution)
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ExaProviderError:
+        execution.status = "failed"
+        execution.error_metadata_json = {"code": "provider_execution_failed", "message": "managed provider execution failed"}
+        execution.updated_at = datetime.now(timezone.utc)
+        session.add(execution); session.commit(); session.refresh(execution)
+        return _execution_to_read(execution)
+
+    execution.status = "succeeded"
+    execution.result_metadata_json = _scrub_secret_metadata(result)
+    execution.error_metadata_json = {}
     execution.updated_at = datetime.now(timezone.utc)
     session.add(execution); session.commit(); session.refresh(execution)
     return _execution_to_read(execution)
