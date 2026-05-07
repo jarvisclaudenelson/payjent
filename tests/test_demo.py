@@ -312,7 +312,7 @@ def test_demo_agent_owner_quickstart_cli_returns_success_and_redacts_tokens(tmp_
     assert "unpaid_poll_payment_token=None" in completed.stdout
     assert "paid_poll_discovered_token=grant_..." in completed.stdout
     assert "resumed_provider=pay_sh" in completed.stdout
-    assert "resumed_settlement=external_pay_sh_runtime" in completed.stdout
+    assert "resumed_settlement=external_x402_runtime" in completed.stdout
     assert "external_pay_sh_execution=integrating_agent_runtime" in completed.stdout
     assert "fulfilled_status=fulfilled" in completed.stdout
     assert "Public users never paste grant ids/payment tokens" in completed.stdout

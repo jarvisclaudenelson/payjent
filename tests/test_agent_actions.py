@@ -149,7 +149,7 @@ def test_pay_sh_consumed_envelope_returns_provider_metadata(client, bot_headers,
     assert envelope["provider"] == "pay_sh"
     assert envelope["kind"] == "premium_api_call"
     assert envelope["service_url"] == payload["service_url"]
-    assert envelope["settlement"] == "external_pay_sh_runtime"
+    assert envelope["settlement"] == "external_x402_runtime"
     assert envelope["command_preview"] == action["command_preview"]
 
 
@@ -171,6 +171,35 @@ def test_pay_sh_premium_action_rejects_fal_site_root_before_checkout(client, bot
     assert "not an executable pay.sh/x402 gateway endpoint" in r.text
     assert "paysponge/fal" in r.text
     assert "fal-ai/flux/schnell" in r.text
+
+
+def test_paysponge_fal_envelope_uses_sponge_wallet_runtime_not_plain_paycurl(client, bot_headers, operator_headers):
+    payload = _pay_sh_payload(
+        request_hash="paysponge-fal-hash-1",
+        service_url="https://fal.x402.paysponge.com/fal-ai/fast-sdxl",
+        service_fqn="paysponge/fal",
+        resource="fal-ai/fast-sdxl",
+        body={"prompt": "Lisbon at sunset"},
+    )
+    action = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
+    assert action.status_code == 200
+    created = action.json()
+    assert created["command_preview"].startswith("npx spongewallet pay fetch")
+    assert "fal.x402.paysponge.com/fal-ai/fast-sdxl" in created["command_preview"]
+    assert "paycurl" not in created["command_preview"]
+
+    paid = client.post(f"/api/v1/payment-sessions/{created['payment_session_id']}/mock-pay", headers=operator_headers).json()
+    consumed = client.post(
+        f"/api/v1/agent-actions/{created['action_id']}/consume",
+        json={"payment_token": paid["grant"]["id"], "presentation": _presentation(payload)},
+        headers=bot_headers,
+    )
+    assert consumed.status_code == 200
+    envelope = consumed.json()["execution_envelope"]
+    assert envelope["x402_runtime"] == "sponge"
+    assert envelope["settlement"] == "external_x402_runtime"
+    assert envelope["agent_runtime_requirements"]["credential"] == "SPONGE_API_KEY in the agent runtime only"
+    assert "does not satisfy the downstream x402 HTTP 402 challenge" in envelope["agent_runtime_requirements"]["execution_note"]
 
 
 def test_unpaid_agent_action_cannot_start(client, quote_payload, bot_headers):

@@ -97,7 +97,7 @@ class HostedSmokeStatusResponse(BaseModel):
     base_url: str
     public_base_url: str
     provider: Literal["pay_sh"] = "pay_sh"
-    settlement: Literal["external_pay_sh_runtime"] = "external_pay_sh_runtime"
+    settlement: Literal["external_x402_runtime"] = "external_x402_runtime"
     operator_mock_pay: Literal["test_rail_only"] = "test_rail_only"
     action_id: str
     payment_session_id: str

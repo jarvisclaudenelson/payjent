@@ -14,8 +14,8 @@ from urllib.parse import urlparse
 
 PROVIDER = "pay_sh"
 KIND = "premium_api_call"
-SETUP_HINT = "Install/setup pay.sh CLI at runtime: brew install pay; pay setup; pay skills update; inspect gateway URLs with pay skills endpoints."
-SETTLEMENT = "external_pay_sh_runtime"
+SETUP_HINT = "Use a funded downstream x402/pay.sh runtime after Payjent authorization. For Sponge/PaySponge gateways, configure SPONGE_API_KEY in the agent runtime and execute with SpongeWallet.paidFetch/x402Fetch or `npx spongewallet pay fetch`; plain paycurl may return the expected HTTP 402 challenge without settling it."
+SETTLEMENT = "external_x402_runtime"
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -51,10 +51,25 @@ def validate_target(*, service_url: str | None = None, service_fqn: str | None =
     return service_url, service_fqn, resource
 
 
+def _is_paysponge_gateway(service_url: str | None, service_fqn: str | None) -> bool:
+    if service_fqn and service_fqn.strip().lower().startswith("paysponge/"):
+        return True
+    if not service_url:
+        return False
+    host = (urlparse(service_url).netloc or "").lower()
+    return host.endswith(".paysponge.com") or host == "paysponge.com"
+
+
 def build_command_preview(*, service_url: str | None, service_fqn: str | None, resource: str | None, method: str, body: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> str:
-    """Return a non-executed paycurl preview string with no secret assumptions."""
+    """Return a non-executed x402 runtime preview string with no secret assumptions."""
 
     target = service_url or f"{service_fqn}:{resource}"
+    if _is_paysponge_gateway(service_url, service_fqn):
+        parts = ["npx", "spongewallet", "pay", "fetch", "--url", target, "--method", method.upper()]
+        if body:
+            parts.extend(["--body", json.dumps(body, sort_keys=True, separators=(",", ":"))])
+        return " ".join(shlex.quote(str(part)) for part in parts)
+
     parts = ["paycurl", "-X", method.upper(), target]
     for name, value in (headers or {}).items():
         parts.extend(["-H", f"{name}: {value}"])
@@ -107,6 +122,20 @@ def build_execution_envelope(
         ),
         "setup_hint": SETUP_HINT,
         "settlement": SETTLEMENT,
+        "x402_runtime": "sponge" if _is_paysponge_gateway(service_url, service_fqn) else "pay_sh",
+        "agent_runtime_requirements": (
+            {
+                "tool": "@paysponge/sdk or spongewallet CLI",
+                "credential": "SPONGE_API_KEY in the agent runtime only",
+                "execution_note": "Payjent's Stripe checkpoint does not satisfy the downstream x402 HTTP 402 challenge; the agent must settle the gateway payment with its funded Sponge wallet.",
+            }
+            if _is_paysponge_gateway(service_url, service_fqn)
+            else {
+                "tool": "pay.sh/paycurl or compatible x402 runtime",
+                "credential": "configured funded wallet in the agent runtime only",
+                "execution_note": "Payjent authorizes the action budget; the agent runtime settles the downstream x402 payment externally.",
+            }
+        ),
         "payjent_fulfillment_callback": False,
         "payjent_managed_execution": False,
         "payjent_execution_boundary": "agent_executes_after_spend_authorization",

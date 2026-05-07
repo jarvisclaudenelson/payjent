@@ -55,7 +55,7 @@ def test_hosted_smoke_status_production_requires_explicit_test_rail(client):
         data = ok.json()
         assert data["ok"] is True
         assert data["operator_mock_pay"] == "test_rail_only"
-        assert data["settlement"] == "external_pay_sh_runtime"
+        assert data["settlement"] == "external_x402_runtime"
     finally:
         _clear_bootstrap()
 
@@ -74,7 +74,7 @@ def test_hosted_smoke_status_success_and_redaction(client):
     data = response.json()
     assert data["ok"] is True
     assert data["provider"] == "pay_sh"
-    assert data["settlement"] == "external_pay_sh_runtime"
+    assert data["settlement"] == "external_x402_runtime"
     assert data["operator_mock_pay"] == "test_rail_only"
     assert data["payment_link_exists"] is True
     assert data["callback_contains_payment_token"] is False

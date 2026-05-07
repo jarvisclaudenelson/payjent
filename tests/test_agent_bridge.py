@@ -64,7 +64,7 @@ def test_successful_resume_when_paid_polls_token_consumes_and_mark_fulfilled(cli
 
     envelope = resumed["execution_envelope"]
     assert envelope["provider"] == "pay_sh"
-    assert envelope["settlement"] == "external_pay_sh_runtime"
+    assert envelope["settlement"] == "external_x402_runtime"
     assert envelope["command_preview"] == pending.command_preview
     assert store.get(pending.action_id).status == "consumed"
 
