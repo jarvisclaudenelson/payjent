@@ -204,6 +204,7 @@ class X402PaidActionCreate(BaseModel):
     provider: str | None = "pay_sh"
     rail: str | None = "x402"
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    task_budget_id: str | None = None
     readiness_mode: Literal["enforced", "advisory"] = "advisory"
     execution_readiness: dict[str, Any] = Field(default_factory=dict)
     payjent_fulfillment_callback: bool = Field(
@@ -300,6 +301,7 @@ class BigQueryPaidQueryCreate(BaseModel):
     amount_minor: int = Field(gt=0)
     currency: str = Field(default="USD", min_length=3, max_length=3)
     cost_breakdown: list[CostItem]
+    task_budget_id: str | None = None
     callback_url: str | None = None
 
 

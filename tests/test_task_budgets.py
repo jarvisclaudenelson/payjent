@@ -36,6 +36,45 @@ def test_sub_50_premium_action_without_budget_rejected(client, bot_headers):
     assert "task_budget_id" in response.json()["detail"]
 
 
+def test_sub_50_x402_action_without_budget_rejected(client, bot_headers):
+    payload = {
+        "bot_id": "bot-1",
+        "external_user_id": "user-1",
+        "request_summary": "micro x402 call",
+        "request_hash": "micro-x402-no-budget",
+        "amount_minor": 25,
+        "currency": "USD",
+        "cost_breakdown": [{"label": "provider", "amount_minor": 25}],
+        "service_url": "https://example.com/api",
+        "execution_readiness": {"can_execute_without_device_auth": True},
+    }
+    response = client.post("/api/v1/premium-actions/x402", json=payload, headers=bot_headers)
+    assert response.status_code == 402
+    assert "task_budget_id" in response.json()["detail"]
+
+
+def test_active_budget_reserves_micro_x402_action(client, bot_headers, operator_headers):
+    budget = _fund_budget(client, bot_headers, operator_headers, max_amount=100)
+    payload = {
+        "bot_id": "bot-1",
+        "external_user_id": "user-1",
+        "request_summary": "micro x402 call",
+        "request_hash": "micro-x402-budget",
+        "amount_minor": 25,
+        "currency": "USD",
+        "cost_breakdown": [{"label": "provider", "amount_minor": 25}],
+        "service_url": "https://example.com/api",
+        "execution_readiness": {"can_execute_without_device_auth": True},
+        "task_budget_id": budget["id"],
+    }
+    response = client.post("/api/v1/premium-actions/x402", json=payload, headers=bot_headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["payment_url"] is None
+    status = client.get(f"/api/v1/task-budgets/{budget['id']}", headers=bot_headers).json()
+    assert status["available_minor"] == 75
+    assert status["reserved_minor"] == 25
+
+
 def test_active_budget_reserves_micro_action(client, bot_headers, operator_headers):
     budget = _fund_budget(client, bot_headers, operator_headers, max_amount=100)
     response = client.post("/api/v1/premium-actions", json=_premium_payload(budget_id=budget["id"]), headers=bot_headers)

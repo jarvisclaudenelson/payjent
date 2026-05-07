@@ -1446,6 +1446,7 @@ def _create_x402_action_from_payload(
         )
         envelope["provider_metadata"] = dict(payload.provider_metadata or {})
         envelope["rail"] = payload.rail or "x402"
+        envelope["task_budget_id"] = payload.task_budget_id
         if strict_generic:
             _validate_generic_x402_envelope(envelope, settings)
     except ValueError as exc:
@@ -1468,15 +1469,29 @@ def _create_x402_action_from_payload(
         execution_envelope=envelope,
         callback_url=payload.callback_url,
     )
-    action = create_agent_action(
-        action_payload,
-        idempotency_key=idempotency_key,
-        provider=provider,
-        session=session,
-        settings=settings,
-        credential=credential,
-    )
-    data = action if isinstance(action, dict) else action.model_dump()
+    if payload.task_budget_id or (payload.currency.upper() == "USD" and payload.amount_minor < 50):
+        qread = create_quote(action_payload, session=session, settings=settings, credential=credential)
+        q = session.get(Quote, qread.id)
+        if not q:
+            raise HTTPException(500, "x402 action quote was not persisted")
+        _reserve_task_budget_for_action(payload, q, session)
+        ps = PaymentSession(id=f"ps_{uuid4().hex}", quote_id=q.id, provider="task_budget", status="checkout_created", checkout_url=None, idempotency_key=idempotency_key)
+        session.add(ps); session.commit(); session.refresh(ps)
+        _issue_paid_session(session, ps, settings, provider="task_budget")
+        q.status = "paid"
+        session.add(q); session.commit(); session.refresh(q); session.refresh(ps)
+        resp = create_paid_action_response(quote=q, payment_session=ps)
+        data = resp if isinstance(resp, dict) else resp.model_dump()
+    else:
+        action = create_agent_action(
+            action_payload,
+            idempotency_key=idempotency_key,
+            provider=provider,
+            session=session,
+            settings=settings,
+            credential=credential,
+        )
+        data = action if isinstance(action, dict) else action.model_dump()
     return {
         **data,
         "provider": "pay_sh",
