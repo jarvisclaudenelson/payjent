@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -70,8 +72,32 @@ def _public_https(url: str) -> None:
     if parsed.scheme.lower() != "https" or not parsed.hostname:
         raise HTTPException(status_code=422, detail="Firecrawl target url must be public HTTPS")
     host = parsed.hostname.lower()
-    if host in {"localhost", "localhost.localdomain", "metadata.google.internal"} or host.startswith("127.") or host.startswith("10.") or host.startswith("192.168.") or host.endswith(".local"):
+    blocked_hosts = {"localhost", "localhost.localdomain", "metadata.google.internal"}
+    if host in blocked_hosts or host.endswith((".localhost", ".local", ".internal")):
         raise HTTPException(status_code=422, detail="Firecrawl target url must be public HTTPS")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        raise HTTPException(status_code=422, detail="Firecrawl target url must be public HTTPS")
+
+
+_ELEVENLABS_VOICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _safe_elevenlabs_voice_id(voice_id: Any) -> str:
+    value = str(voice_id)
+    if not _ELEVENLABS_VOICE_ID_RE.fullmatch(value):
+        raise HTTPException(status_code=422, detail="ElevenLabs voice_id must contain only letters, numbers, underscores, or hyphens")
+    return value
 
 
 def _envelope(preset: PremiumActionPreset, body: dict[str, Any], description: str) -> dict[str, Any]:
@@ -119,7 +145,7 @@ def build_firecrawl(inputs: dict[str, Any], preset: PremiumActionPreset) -> dict
 def build_elevenlabs(inputs: dict[str, Any], preset: PremiumActionPreset) -> dict[str, Any]:
     _reject(inputs, {"voice_clone", "voice_cloning", "clone_voice", "samples", "voice_samples"}, "ElevenLabs voice cloning fields are not allowed for this preset")
     text = _require(inputs, "text")
-    voice_id = _require(inputs, "voice_id")
+    voice_id = _safe_elevenlabs_voice_id(_require(inputs, "voice_id"))
     body = {"text": text}
     for k in ("model_id", "voice_settings"):
         if k in inputs:

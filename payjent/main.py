@@ -1752,12 +1752,20 @@ def complete_agent_action(action_id: str, payload: FulfillmentCreate, session: S
 
 def _safe_failure_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     blocked = ("secret", "token", "key", "authorization", "cookie", "password", "credential")
-    safe = {}
-    for key, value in (metadata or {}).items():
-        if any(marker in str(key).lower() for marker in blocked):
-            continue
-        safe[key] = value if isinstance(value, (str, int, float, bool, type(None), list, dict)) else str(value)
-    return safe
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            safe: dict[str, Any] = {}
+            for key, nested in value.items():
+                if any(marker in str(key).lower() for marker in blocked):
+                    continue
+                safe[str(key)] = scrub(nested)
+            return safe
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        if isinstance(value, (str, int, float, bool, type(None))):
+            return value
+        return str(value)
+    return scrub(metadata or {})
 
 
 @app.post("/api/v1/agent-actions/{action_id}/fail", response_model=AgentActionFailResponse)
@@ -1766,12 +1774,14 @@ def fail_agent_action(action_id: str, payload: AgentActionFailRequest, session: 
     if not q:
         raise HTTPException(404, "quote not found")
     _enforce_bot_scope(credential, q.bot_id)
+    ps = session.exec(select(PaymentSession).where(PaymentSession.quote_id == q.id).order_by(PaymentSession.created_at.desc())).first()
+    existing_refund = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "refunded")).first()
+    if q.status == "refunded" and payload.refund and (existing_refund or (ps and ps.status == "refunded")):
+        return AgentActionFailResponse(action_id=q.id, quote_id=q.id, fulfillment_id=(existing_refund.id if existing_refund else q.id), status="failed", metadata=(existing_refund.metadata_json if existing_refund else {}), refund_status="already_refunded", refund_id=(existing_refund.metadata_json.get("refund_id") if existing_refund and isinstance(existing_refund.metadata_json, dict) else None), payment_status=(ps.status if ps else "refunded"), quote_status=q.status, message="Action was already refunded.")
     if q.status in {"fulfilled", "refunded"}:
         raise HTTPException(status_code=409, detail="fulfilled or refunded actions cannot be failed/refunded")
-    ps = session.exec(select(PaymentSession).where(PaymentSession.quote_id == q.id).order_by(PaymentSession.created_at.desc())).first()
     if not ps or ps.status not in {"paid", "refunded"}:
         raise HTTPException(status_code=409, detail="action must have a paid payment session before failure/refund")
-    existing_refund = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "refunded")).first()
     existing_failed = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "failed")).first()
     if not existing_failed:
         ev = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status="failed", metadata_json={"reason": payload.reason, **_safe_failure_metadata(payload.metadata)})
@@ -2147,11 +2157,21 @@ def refund_payment_session(
         raise HTTPException(404, "quote not found")
     if ps.provider != "stripe":
         raise HTTPException(status_code=409, detail="only Stripe payment sessions can be refunded automatically")
-    if ps.status == "refunded" or q.status == "refunded":
-        raise HTTPException(status_code=409, detail="payment session is already refunded")
     existing_refund = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "refunded")).first()
-    if existing_refund:
-        raise HTTPException(status_code=409, detail="quote already has a refund fulfillment event")
+    if ps.status == "refunded" or q.status == "refunded" or existing_refund:
+        metadata = existing_refund.metadata_json if existing_refund and isinstance(existing_refund.metadata_json, dict) else {}
+        return PaymentSessionRefundResponse(
+            payment_session_id=ps.id,
+            quote_id=q.id,
+            payment_status=ps.status,
+            quote_status=q.status,
+            refund_id=str(metadata.get("refund_id") or "already_refunded"),
+            refund_status="already_refunded",
+            amount_minor=q.amount_minor,
+            currency=q.currency,
+            fulfillment_id=existing_refund.id if existing_refund else q.id,
+            message="Payment session was already refunded.",
+        )
     if ps.status != "paid":
         raise HTTPException(status_code=409, detail="payment session must be paid before refund")
     if q.status != "failed" and not payload.force:

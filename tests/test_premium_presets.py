@@ -1,7 +1,8 @@
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from payjent.auth import create_bot_credential
 from payjent.config import get_settings
+from payjent.models import FulfillmentEvent
 
 
 def _preset_payload(**overrides):
@@ -60,10 +61,17 @@ def test_each_preset_creates_safe_payment_gated_envelope(client, bot_headers, op
 
 
 def test_firecrawl_rejects_unsafe_target_url(client, bot_headers):
-    payload = _preset_payload(input={"url": "http://127.0.0.1:8000/private"})
-    r = client.post("/api/v1/premium-action-presets/firecrawl.scrape/actions", json=payload, headers=bot_headers)
-    assert r.status_code == 422
-    assert "public https" in r.text.lower()
+    for url in [
+        "http://127.0.0.1:8000/private",
+        "https://172.16.0.1/private",
+        "https://169.254.169.254/latest/meta-data",
+        "https://[::1]/private",
+        "https://localhost/private",
+    ]:
+        payload = _preset_payload(request_hash=f"unsafe-{url}", input={"url": url})
+        r = client.post("/api/v1/premium-action-presets/firecrawl.scrape/actions", json=payload, headers=bot_headers)
+        assert r.status_code == 422
+        assert "public https" in r.text.lower()
 
 
 def test_elevenlabs_voice_clone_fields_rejected(client, bot_headers):
@@ -73,11 +81,31 @@ def test_elevenlabs_voice_clone_fields_rejected(client, bot_headers):
     assert "voice cloning" in r.text.lower()
 
 
-def test_fail_endpoint_records_failed_event_and_mock_refund_idempotent(client, bot_headers, operator_headers):
+def test_elevenlabs_voice_id_rejects_path_or_query_injection(client, bot_headers):
+    for voice_id in ["voice/../../escape", "voice?model=bad", "voice#frag"]:
+        payload = _preset_payload(request_hash=f"bad-voice-{voice_id}", input={"text": "hello", "voice_id": voice_id})
+        r = client.post("/api/v1/premium-action-presets/elevenlabs.text_to_speech/actions", json=payload, headers=bot_headers)
+        assert r.status_code == 422
+        assert "voice_id" in r.text
+
+
+def test_fail_endpoint_records_failed_event_and_mock_refund_idempotent(client, engine, bot_headers, operator_headers):
     payload = _preset_payload(request_hash="fail-refund-hash", input={"query": "refund"})
     action = client.post("/api/v1/premium-action-presets/exa.deep_search/actions", json=payload, headers=bot_headers).json()
     client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers)
-    failed = client.post(f"/api/v1/agent-actions/{action['action_id']}/fail", json={"refund": True, "metadata": {"error_code": "provider_500", "api_key": "redacted"}}, headers=bot_headers)
+    failed = client.post(
+        f"/api/v1/agent-actions/{action['action_id']}/fail",
+        json={
+            "refund": True,
+            "metadata": {
+                "error_code": "provider_500",
+                "api_key": "***",
+                "nested": {"token": "secret", "safe": "kept"},
+                "items": [{"authorization": "Bearer bad", "message": "ok"}, {"cookie": "bad"}],
+            },
+        },
+        headers=bot_headers,
+    )
     assert failed.status_code == 200, failed.text
     data = failed.json()
     assert data["status"] == "failed"
@@ -85,10 +113,14 @@ def test_fail_endpoint_records_failed_event_and_mock_refund_idempotent(client, b
     assert data["payment_status"] == "refunded"
     assert data["quote_status"] == "refunded"
     assert "api_key" not in data["metadata"]
+    assert data["metadata"]["nested"] == {"safe": "kept"}
+    assert data["metadata"]["items"] == [{"message": "ok"}, {}]
     duplicate = client.post(f"/api/v1/agent-actions/{action['action_id']}/fail", json={"refund": True}, headers=bot_headers)
-    assert duplicate.status_code in (200, 409)
-    if duplicate.status_code == 200:
-        assert duplicate.json()["refund_status"] == "already_refunded"
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["refund_status"] == "already_refunded"
+    with Session(engine) as session:
+        refund_events = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == action["action_id"], FulfillmentEvent.status == "refunded")).all()
+    assert len(refund_events) == 1
 
 
 def test_fail_endpoint_cross_bot_scope_blocked(client, engine, bot_headers, operator_headers):

@@ -142,8 +142,12 @@ def test_refund_requires_failed_quote_unless_forced(client, engine, operator_hea
     assert forced.json()["refund_id"] == "re_forced_refund"
 
     duplicate = client.post(f"/api/v1/payment-sessions/{payment_session_id}/refund", headers=operator_headers, json={"reason": "duplicate", "force": True})
-    assert duplicate.status_code == 409
-    assert duplicate.json()["detail"] == "payment session is already refunded"
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["refund_status"] == "already_refunded"
+    assert duplicate.json()["refund_id"] == "re_forced_refund"
+    with Session(engine) as session:
+        refund_events = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == quote_id, FulfillmentEvent.status == "refunded")).all()
+    assert len(refund_events) == 1
 
 
 def test_stripe_webhook_rejects_missing_or_invalid_signature_when_secret_configured(client, quote_payload, bot_headers):
