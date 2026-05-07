@@ -19,6 +19,11 @@ class StripeCheckoutClient(Protocol):
     def create_checkout_session(self, payload: dict[str, Any], idempotency_key: str) -> dict[str, Any]: ...
 
 
+class StripeRefundClient(Protocol):
+    def retrieve_checkout_session(self, provider_session_id: str) -> Any: ...
+    def create_refund(self, payload: dict[str, Any], idempotency_key: str) -> Any: ...
+
+
 @dataclass
 class StripeSDKCheckoutClient:
     secret_key: str
@@ -30,6 +35,22 @@ class StripeSDKCheckoutClient:
             raise HTTPException(status_code=503, detail="Stripe SDK is not installed") from exc
         stripe.api_key = self.secret_key
         return stripe.checkout.Session.create(**payload, idempotency_key=idempotency_key)
+
+    def retrieve_checkout_session(self, provider_session_id: str) -> Any:
+        try:
+            import stripe  # type: ignore
+        except ImportError as exc:
+            raise HTTPException(status_code=503, detail="Stripe SDK is not installed") from exc
+        stripe.api_key = self.secret_key
+        return stripe.checkout.Session.retrieve(provider_session_id)
+
+    def create_refund(self, payload: dict[str, Any], idempotency_key: str) -> Any:
+        try:
+            import stripe  # type: ignore
+        except ImportError as exc:
+            raise HTTPException(status_code=503, detail="Stripe SDK is not installed") from exc
+        stripe.api_key = self.secret_key
+        return stripe.Refund.create(**payload, idempotency_key=idempotency_key)
 
 
 def build_checkout_urls(settings: Settings, payment_session_id: str) -> tuple[str, str]:
@@ -94,6 +115,29 @@ def _safe_stripe_checkout_error(exc: Exception) -> str:
     return detail
 
 
+def _safe_stripe_refund_error(exc: Exception) -> str:
+    message = getattr(exc, "user_message", None) or getattr(exc, "message", None) or str(exc)
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "http_status", None)
+    if isinstance(exc, httpx.HTTPError):
+        message = "Stripe refund network request failed"
+    detail = "Stripe refund creation failed"
+    parts = []
+    if status:
+        parts.append(f"status={status}")
+    if code:
+        parts.append(f"code={code}")
+    if message:
+        sanitized = str(message).replace("\n", " ").strip()
+        sanitized = re.sub(r"\b(?:sk|pk|rk)_(?:test|live)_[A-Za-z0-9_=-]+", "[redacted_stripe_key]", sanitized)
+        if len(sanitized) > 300:
+            sanitized = sanitized[:297] + "..."
+        parts.append(sanitized)
+    if parts:
+        detail = f"{detail}: {'; '.join(parts)}"
+    return detail
+
+
 def _stripe_response_value(response: Any, key: str) -> Any:
     """Read values from Stripe SDK objects and plain dict test doubles."""
     if isinstance(response, dict):
@@ -132,6 +176,50 @@ def create_stripe_checkout_session(
     if not provider_session_id or not hosted_url:
         raise HTTPException(status_code=502, detail="Stripe checkout session response missing id or url")
     return str(provider_session_id), str(hosted_url)
+
+
+def create_stripe_refund(
+    payment_session: PaymentSession,
+    quote: Quote,
+    settings: Settings,
+    *,
+    reason: str | None = None,
+    client: StripeRefundClient | None = None,
+) -> tuple[str, str]:
+    if not settings.stripe_secret_key:
+        raise HTTPException(status_code=503, detail="PAYJENT_STRIPE_SECRET_KEY is required for Stripe refunds")
+    if payment_session.provider != "stripe":
+        raise HTTPException(status_code=409, detail="payment session provider is not stripe")
+    if not payment_session.provider_session_id:
+        raise HTTPException(status_code=409, detail="Stripe provider_session_id is required for refund")
+    stripe_client = client or StripeSDKCheckoutClient(settings.stripe_secret_key)
+    try:
+        checkout_session = stripe_client.retrieve_checkout_session(payment_session.provider_session_id)
+        payment_intent = _stripe_response_value(checkout_session, "payment_intent")
+        if not payment_intent:
+            raise HTTPException(status_code=409, detail="Stripe checkout session missing payment_intent")
+        refund_payload: dict[str, Any] = {
+            "payment_intent": str(payment_intent),
+            "amount": quote.amount_minor,
+            "metadata": {
+                "quote_id": quote.id,
+                "payment_session_id": payment_session.id,
+                "bot_id": quote.bot_id,
+            },
+        }
+        if reason:
+            refund_payload["metadata"]["payjent_refund_reason"] = reason[:300]
+        refund = stripe_client.create_refund(refund_payload, f"refund:{payment_session.id}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        detail = _safe_stripe_refund_error(exc)
+        raise HTTPException(status_code=502, detail=detail) from exc
+    refund_id = _stripe_response_value(refund, "id")
+    refund_status = _stripe_response_value(refund, "status") or "unknown"
+    if not refund_id:
+        raise HTTPException(status_code=502, detail="Stripe refund response missing id")
+    return str(refund_id), str(refund_status)
 
 
 def verify_stripe_signature(raw_body: bytes, signature_header: str | None, secret: str | None) -> None:

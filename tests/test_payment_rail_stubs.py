@@ -3,12 +3,12 @@ import hmac
 import json
 
 from fastapi import HTTPException
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from payjent.auth import create_bot_credential
 from payjent.config import Settings, get_settings
-from payjent.models import PaymentSession, Quote
-from payjent.providers.stripe import create_stripe_checkout_session
+from payjent.models import FulfillmentEvent, PaymentSession, Quote
+from payjent.providers.stripe import create_stripe_checkout_session, create_stripe_refund
 import payjent.main as main_module
 from payjent.main import app
 
@@ -22,6 +22,128 @@ def _checkout(client, quote_payload, bot_headers):
 def _stripe_signature(body: bytes, secret: str, timestamp: str = "1700000000") -> str:
     digest = hmac.new(secret.encode("utf-8"), timestamp.encode("utf-8") + b"." + body, hashlib.sha256).hexdigest()
     return f"t={timestamp},v1={digest}"
+
+
+def _store_stripe_paid_quote(engine, *, quote_status: str = "failed") -> tuple[str, str]:
+    quote = Quote(
+        id="quote_refund_test",
+        bot_id="bot-1",
+        external_user_id="user-1",
+        request_summary="refund failed action",
+        request_hash="refund-hash",
+        amount_minor=250,
+        currency="USD",
+        cost_breakdown=[{"label": "work", "amount_minor": 250}],
+        execution_envelope={"action": "test"},
+        quote_hash="refund-quote-hash",
+        status=quote_status,
+    )
+    payment_session = PaymentSession(
+        id="ps_refund_test",
+        quote_id=quote.id,
+        provider="stripe",
+        status="paid",
+        checkout_url="https://checkout.stripe.test/session",
+        provider_session_id="cs_refund_test",
+    )
+    quote_id = quote.id
+    payment_session_id = payment_session.id
+    with Session(engine) as session:
+        session.add(quote)
+        session.add(payment_session)
+        session.commit()
+    return quote_id, payment_session_id
+
+
+def test_stripe_refund_adapter_uses_payment_intent_and_safe_idempotency():
+    quote = Quote(
+        id="quote_adapter_refund",
+        bot_id="bot-1",
+        external_user_id="user-1",
+        request_summary="refund adapter",
+        request_hash="refund-adapter-hash",
+        amount_minor=250,
+        currency="USD",
+        cost_breakdown=[{"label": "work", "amount_minor": 250}],
+        execution_envelope={},
+        quote_hash="quote-hash",
+        status="failed",
+    )
+    payment_session = PaymentSession(
+        id="ps_adapter_refund",
+        quote_id=quote.id,
+        provider="stripe",
+        status="paid",
+        provider_session_id="cs_adapter_refund",
+    )
+
+    class FakeStripeRefundClient:
+        def __init__(self):
+            self.refund_payload = None
+            self.idempotency_key = None
+
+        def retrieve_checkout_session(self, provider_session_id):
+            assert provider_session_id == "cs_adapter_refund"
+            return {"payment_intent": "pi_adapter_refund"}
+
+        def create_refund(self, payload, idempotency_key):
+            self.refund_payload = payload
+            self.idempotency_key = idempotency_key
+            return {"id": "re_adapter_refund", "status": "succeeded"}
+
+    fake = FakeStripeRefundClient()
+    refund_id, refund_status = create_stripe_refund(payment_session, quote, Settings(stripe_secret_key="sk_test_fake"), reason="failed action", client=fake)
+
+    assert refund_id == "re_adapter_refund"
+    assert refund_status == "succeeded"
+    assert fake.idempotency_key == "refund:ps_adapter_refund"
+    assert fake.refund_payload["payment_intent"] == "pi_adapter_refund"
+    assert fake.refund_payload["amount"] == 250
+    assert fake.refund_payload["metadata"]["payjent_refund_reason"] == "failed action"
+
+
+def test_operator_can_refund_failed_stripe_payment_session(client, engine, operator_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(stripe_secret_key="sk_test_fake")
+    quote_id, payment_session_id = _store_stripe_paid_quote(engine)
+    calls = []
+    monkeypatch.setattr(main_module, "create_stripe_refund", lambda ps, q, settings, reason=None: calls.append((ps.id, q.id, reason)) or ("re_test_refund", "succeeded"))
+
+    response = client.post(f"/api/v1/payment-sessions/{payment_session_id}/refund", headers=operator_headers, json={"reason": "downstream action failed"})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["payment_session_id"] == payment_session_id
+    assert payload["quote_id"] == quote_id
+    assert payload["payment_status"] == "refunded"
+    assert payload["quote_status"] == "refunded"
+    assert payload["refund_id"] == "re_test_refund"
+    assert payload["amount_minor"] == 250
+    assert calls == [(payment_session_id, quote_id, "downstream action failed")]
+    with Session(engine) as session:
+        stored_ps = session.get(PaymentSession, payment_session_id)
+        stored_quote = session.get(Quote, quote_id)
+        event = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == quote_id, FulfillmentEvent.status == "refunded")).first()
+    assert stored_ps.status == "refunded"
+    assert stored_quote.status == "refunded"
+    assert event.metadata_json["refund_id"] == "re_test_refund"
+
+
+def test_refund_requires_failed_quote_unless_forced(client, engine, operator_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(stripe_secret_key="sk_test_fake")
+    quote_id, payment_session_id = _store_stripe_paid_quote(engine, quote_status="fulfilled")
+    monkeypatch.setattr(main_module, "create_stripe_refund", lambda *_args, **_kwargs: ("re_forced_refund", "succeeded"))
+
+    blocked = client.post(f"/api/v1/payment-sessions/{payment_session_id}/refund", headers=operator_headers, json={"reason": "admin review"})
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"] == "quote must be failed before refund unless force=true"
+
+    forced = client.post(f"/api/v1/payment-sessions/{payment_session_id}/refund", headers=operator_headers, json={"reason": "admin override", "force": True})
+    assert forced.status_code == 200, forced.text
+    assert forced.json()["refund_id"] == "re_forced_refund"
+
+    duplicate = client.post(f"/api/v1/payment-sessions/{payment_session_id}/refund", headers=operator_headers, json={"reason": "duplicate", "force": True})
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "payment session is already refunded"
 
 
 def test_stripe_webhook_rejects_missing_or_invalid_signature_when_secret_configured(client, quote_payload, bot_headers):

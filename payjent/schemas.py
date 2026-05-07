@@ -391,6 +391,24 @@ class FulfillmentCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class PaymentSessionRefundCreate(BaseModel):
+    reason: str = Field(default="operator_requested", min_length=1, max_length=300)
+    force: bool = False
+
+
+class PaymentSessionRefundResponse(BaseModel):
+    payment_session_id: str
+    quote_id: str
+    payment_status: str
+    quote_status: str
+    refund_id: str
+    refund_status: str
+    amount_minor: int
+    currency: str
+    fulfillment_id: str
+    message: str
+
+
 class FulfillmentRead(BaseModel):
     id: str
     quote_id: str

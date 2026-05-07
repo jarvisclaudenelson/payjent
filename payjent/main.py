@@ -62,6 +62,7 @@ from .providers.mock import complete_mock_payment
 from .providers.paysh import build_execution_envelope as build_paysh_execution_envelope
 from .providers.stripe import (
     create_stripe_checkout_session,
+    create_stripe_refund,
     parse_stripe_event,
     verify_stripe_signature,
 )
@@ -91,6 +92,8 @@ from .schemas import (
     LinkPollResponse,
     MockPayResponse,
     PaymentSessionRead,
+    PaymentSessionRefundCreate,
+    PaymentSessionRefundResponse,
     PayShPremiumActionCreate,
     PayShPremiumActionCreateResponse,
     PurchaseFulfillmentCreate,
@@ -1919,6 +1922,67 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
     _validate_stripe_paid_event(session, ps, data_object, event_type)
     _issue_paid_session(session, ps, settings, provider="stripe")
     return {"received": True, "processed": True}
+
+
+@app.post("/api/v1/payment-sessions/{session_id}/refund", response_model=PaymentSessionRefundResponse)
+def refund_payment_session(
+    session_id: str,
+    payload: PaymentSessionRefundCreate,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    _credential: BotCredential = Depends(require_operator_credential),
+):
+    ps = session.get(PaymentSession, session_id)
+    if not ps:
+        raise HTTPException(404, "payment session not found")
+    q = session.get(Quote, ps.quote_id)
+    if not q:
+        raise HTTPException(404, "quote not found")
+    if ps.provider != "stripe":
+        raise HTTPException(status_code=409, detail="only Stripe payment sessions can be refunded automatically")
+    if ps.status == "refunded" or q.status == "refunded":
+        raise HTTPException(status_code=409, detail="payment session is already refunded")
+    existing_refund = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "refunded")).first()
+    if existing_refund:
+        raise HTTPException(status_code=409, detail="quote already has a refund fulfillment event")
+    if ps.status != "paid":
+        raise HTTPException(status_code=409, detail="payment session must be paid before refund")
+    if q.status != "failed" and not payload.force:
+        raise HTTPException(status_code=409, detail="quote must be failed before refund unless force=true")
+
+    refund_id, refund_status = create_stripe_refund(ps, q, settings, reason=payload.reason)
+    ev = FulfillmentEvent(
+        id=f"ful_{uuid4().hex}",
+        quote_id=q.id,
+        status="refunded",
+        metadata_json={
+            "provider": "stripe",
+            "refund_id": refund_id,
+            "refund_status": refund_status,
+            "payment_session_id": ps.id,
+            "reason": payload.reason,
+            "forced": payload.force,
+        },
+    )
+    ps.status = "refunded"
+    q.status = "refunded"
+    session.add(ps)
+    session.add(q)
+    session.add(ev)
+    session.commit()
+    session.refresh(ev)
+    return PaymentSessionRefundResponse(
+        payment_session_id=ps.id,
+        quote_id=q.id,
+        payment_status=ps.status,
+        quote_status=q.status,
+        refund_id=refund_id,
+        refund_status=refund_status,
+        amount_minor=q.amount_minor,
+        currency=q.currency,
+        fulfillment_id=ev.id,
+        message="Stripe refund created and Payjent session marked refunded.",
+    )
 
 
 def _load_valid_grant(grant_id: str, presentation: GrantPresentation, session: Session, settings: Settings) -> Grant:
