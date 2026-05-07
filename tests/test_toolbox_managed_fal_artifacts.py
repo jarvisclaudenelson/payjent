@@ -7,6 +7,8 @@ from payjent.artifacts import MAX_ARTIFACT_BYTES, create_artifact
 from payjent.config import Settings, get_settings
 from payjent.main import app
 from payjent.models import PaymentSession, Quote, ResumeEvent, ToolExecution
+from payjent.providers.fal import validate_image_arguments
+from payjent.signing import verify_webhook_signature
 
 
 def _ready_execution(engine, *, status="ready_to_execute", tool_id="fal.image.generate", quote_id=None, payment_session_id=None):
@@ -66,6 +68,16 @@ def test_artifact_helper_enforces_size_bounds(engine):
             raise AssertionError("expected ValueError")
 
 
+def test_managed_fal_rejects_secret_like_argument_keys():
+    for key in ["api_key", "fal_api_key", "access_token", "x-token", "authorization_header"]:
+        try:
+            validate_image_arguments({"prompt": "safe", key: "not-allowed"})
+        except ValueError as exc:
+            assert "provider credentials" in str(exc)
+        else:
+            raise AssertionError(f"expected {key} to be rejected")
+
+
 def test_managed_fal_missing_provider_config_fails_closed(client, bot_headers, engine):
     app.dependency_overrides[get_settings] = lambda: Settings(fal_api_key=None)
     execution_id = _ready_execution(engine)
@@ -100,7 +112,8 @@ def test_managed_fal_success_creates_artifact_and_prevents_duplicate(client, bot
 
 
 def test_managed_fal_success_enqueues_resume_event_with_artifact_idempotently(client, bot_headers, engine, monkeypatch):
-    app.dependency_overrides[get_settings] = lambda: Settings(fal_api_key="test-fal-secret")
+    settings = Settings(fal_api_key="test-fal-secret")
+    app.dependency_overrides[get_settings] = lambda: settings
     with Session(engine) as session:
         q = Quote(id="quote-fal", bot_id="bot-1", external_user_id="user-1", request_summary="generate", request_hash="hash-test", amount_minor=50, currency="USD", cost_breakdown=[], execution_envelope={}, quote_hash="qh", status="paid")
         ps = PaymentSession(id="ps-fal", quote_id=q.id, provider="mock", status="paid")
@@ -114,4 +127,6 @@ def test_managed_fal_success_enqueues_resume_event_with_artifact_idempotently(cl
     assert managed["artifacts"][0]["artifact_id"].startswith("art_")
     _assert_no_secret(managed)
     with Session(engine) as session:
+        event = session.exec(__import__("sqlmodel").select(ResumeEvent).where(ResumeEvent.payment_session_id == "ps-fal")).one()
+        assert verify_webhook_signature(event.payload, event.signature_timestamp, event.signature, settings.signing_secret, tolerance_seconds=-1)
         assert len(session.exec(__import__("sqlmodel").select(ResumeEvent).where(ResumeEvent.payment_session_id == "ps-fal")).all()) == 1

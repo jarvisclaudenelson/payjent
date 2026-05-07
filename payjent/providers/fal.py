@@ -25,7 +25,10 @@ Transport = Callable[[dict[str, Any], str], dict[str, Any]]
 def _contains_secret_like(value: Any) -> bool:
     markers = {"api_key", "apikey", "authorization", "token", "secret", "password", "cookie", "credential", "grant"}
     if isinstance(value, dict):
-        return any(str(k).lower().replace("-", "_") in markers or _contains_secret_like(v) for k, v in value.items())
+        return any(
+            any(marker in str(k).lower().replace("-", "_") for marker in markers) or _contains_secret_like(v)
+            for k, v in value.items()
+        )
     if isinstance(value, list):
         return any(_contains_secret_like(v) for v in value)
     if isinstance(value, str):

@@ -604,6 +604,10 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
         if q and ps:
             event = _enqueue_resume_event(session, q, ps, settings, "managed")
             event.payload = scrub_artifact_value({**event.payload, "managed_execution": {"execution_id": execution.id, "tool_id": execution.tool_id, "status": execution.status, "artifacts": [artifact_pointer(a) for a in artifacts]}})
+            timestamp, signature = sign_webhook_payload(event.payload, settings.signing_secret)
+            event.signature_timestamp = timestamp
+            event.signature = signature
+            event.updated_at = datetime.now(timezone.utc)
             session.add(event); session.commit()
     return _execution_to_read(execution)
 
