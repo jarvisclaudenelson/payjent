@@ -115,3 +115,8 @@ def test_well_known_manifest_exposes_toolbox_url_or_count(client):
     manifest = response.json()
     assert manifest["toolbox_url"] == "https://payjent.com/api/v1/toolbox"
     assert manifest["toolbox_tool_count"] >= 9
+    toolbox_tool_ids = {tool.get("tool_id") for tool in manifest["tools"] if tool.get("tool_id")}
+    assert "fal.image.generate" in toolbox_tool_ids
+    fal_descriptor = next(tool for tool in manifest["tools"] if tool.get("tool_id") == "fal.image.generate")
+    assert fal_descriptor["endpoint"] == "/api/v1/toolbox/fal.image.generate"
+    assert fal_descriptor["execution_mode"] == "agent_managed_provider_runtime"

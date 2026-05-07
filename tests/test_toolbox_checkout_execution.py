@@ -1,5 +1,7 @@
 import json
 
+from payjent.config import Settings, get_settings
+from payjent.main import app
 from sqlmodel import Session, select
 
 from payjent.models import PaymentSession, Quote, ToolExecution
@@ -53,6 +55,46 @@ def test_toolbox_checkout_sub_50_managed_requires_task_budget_without_payment_se
     assert body["toolbox_quote"]["amount_minor"] < 50
     with Session(engine) as session:
         assert session.exec(select(PaymentSession)).all() == []
+
+
+def test_toolbox_checkout_enforced_readiness_blocks_missing_managed_provider(client, bot_headers, engine):
+    response = client.post(
+        "/api/v1/toolbox/fal.image.generate/checkout",
+        json=_payload({"prompt": "strict readiness robot", "quantity": 1}),
+        headers={**bot_headers, "X-Payjent-Readiness-Mode": "enforced"},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == {"code": "provider_not_configured", "tool_id": "fal.image.generate", "readiness_mode": "enforced"}
+    with Session(engine) as session:
+        assert session.exec(select(Quote)).all() == []
+        assert session.exec(select(PaymentSession)).all() == []
+
+
+def test_toolbox_checkout_enforced_readiness_allows_configured_managed_provider(client, bot_headers):
+    app.dependency_overrides[get_settings] = lambda: Settings(fal_api_key="test-fal-key")
+    try:
+        response = client.post(
+            "/api/v1/toolbox/fal.image.generate/checkout",
+            json=_payload({"prompt": "configured robot", "quantity": 1}),
+            headers={**bot_headers, "X-Payjent-Readiness-Mode": "enforced"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+    assert response.status_code == 200
+    assert response.json()["status"] == "checkout_created"
+
+
+def test_payment_readiness_reports_managed_provider_config_without_secret_values(client):
+    app.dependency_overrides[get_settings] = lambda: Settings(fal_api_key="test-fal-key", exa_api_key=None, firecrawl_api_key=None, elevenlabs_api_key=None)
+    try:
+        response = client.get("/api/v1/payment-readiness")
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["managed_provider_readiness"]["fal.image.generate"] is True
+    assert body["managed_provider_readiness"]["exa.deep_search"] is False
+    assert "test-fal-key" not in json.dumps(body)
 
 
 def test_toolbox_checkout_sub_50_paysh_requires_micro_rail_without_payment_session(client, bot_headers, engine):

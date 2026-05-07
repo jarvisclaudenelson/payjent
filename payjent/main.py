@@ -215,6 +215,18 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
         {"name": "payjent.authorize_x402_spend", "endpoint": "/api/v1/grants/{grant_id}/spend-authorizations", "method": "POST", "description": "After consuming a paid Payjent grant, authorize/capture request-bound downstream x402/pay.sh spend for the exact action/budget. The agent uses this authorization to execute externally; Payjent does not call the service_url.", "required_rail": "x402"},
     ]
+    tools.extend(
+        {
+            **tool,
+            "name": f"payjent.toolbox.{tool['tool_id']}",
+            "endpoint": f"/api/v1/toolbox/{tool['tool_id']}",
+            "quote_endpoint": f"/api/v1/toolbox/{tool['tool_id']}/quote",
+            "checkout_endpoint": f"/api/v1/toolbox/{tool['tool_id']}/checkout",
+            "execution_endpoint": f"/api/v1/toolbox/{tool['tool_id']}/executions",
+            "method": "GET/POST",
+        }
+        for tool in list_toolbox_tools()
+    )
     if x402_available is not None:
         for tool in tools:
             if tool.get("required_rail") == "x402":
@@ -628,9 +640,10 @@ def toolbox_quote(tool_id: str, payload: ToolboxQuoteCreate, credential: BotCred
 
 
 @app.post("/api/v1/toolbox/{tool_id}/checkout", response_model=ToolboxCheckoutResponse)
-def toolbox_checkout(tool_id: str, payload: ToolboxCheckoutRequest, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), provider: str | None = Header(default=None, alias="X-Payjent-Provider"), session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+def toolbox_checkout(tool_id: str, payload: ToolboxCheckoutRequest, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), provider: str | None = Header(default=None, alias="X-Payjent-Provider"), readiness_mode: str = Header(default="advisory", alias="X-Payjent-Readiness-Mode"), session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
     _enforce_bot_scope(credential, payload.bot_id)
     tool, toolbox_quote = _toolbox_quote_or_404(tool_id, payload)
+    _enforce_managed_provider_ready(tool_id, settings, mode=readiness_mode)
     if toolbox_quote["amount_minor"] < STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(toolbox_quote["currency"].upper(), 50):
         if toolbox_quote["provider_type"] == "trusted_paysh" and toolbox_quote["recommended_payment_rail"] in {"pay_sh", "x402"}:
             return JSONResponse(status_code=402, content={"status": "micro_rail_required", "quote": None, "payment_session": None, "payment_url": None, "toolbox_quote": toolbox_quote, "guidance": {"reason": "sub-card-minimum trusted pay.sh/x402 action", "required_rail": toolbox_quote["recommended_payment_rail"], "pay_sh": {"arbitrary_url_execution": False, "instructions": "Use an agent-side funded pay.sh/x402 runtime after Payjent approval; Payjent does not create Stripe checkout for this microcharge by default."}}})
@@ -717,6 +730,23 @@ def _checkout_provider(settings: Settings) -> str:
     return (settings.checkout_provider or "mock").lower()
 
 
+def _managed_provider_readiness(settings: Settings) -> dict[str, bool]:
+    return {
+        "exa.deep_search": bool(settings.exa_api_key),
+        "firecrawl.scrape": bool(settings.firecrawl_api_key),
+        "elevenlabs.text_to_speech": bool(settings.elevenlabs_api_key),
+        "fal.image.generate": bool(settings.fal_api_key),
+    }
+
+
+def _enforce_managed_provider_ready(tool_id: str, settings: Settings, *, mode: str = "advisory") -> None:
+    if mode.strip().lower() not in {"enforced", "strict"}:
+        return
+    readiness = _managed_provider_readiness(settings).get(tool_id)
+    if readiness is False:
+        raise HTTPException(status_code=503, detail={"code": "provider_not_configured", "tool_id": tool_id, "readiness_mode": "enforced"})
+
+
 def _payment_readiness(settings: Settings) -> dict:
     provider = _checkout_provider(settings)
     stripe_secret_configured = bool(settings.stripe_secret_key)
@@ -724,6 +754,7 @@ def _payment_readiness(settings: Settings) -> dict:
     public_base_url_configured = bool(settings.public_base_url)
     database_configured = bool(settings.database_url)
     production_persistent_database_configured = settings.production_persistent_database_configured if settings.is_production else database_configured
+    managed_providers = _managed_provider_readiness(settings)
     return {
         "active_payment_ready": provider == "stripe" and stripe_secret_configured and stripe_webhook_configured and public_base_url_configured and production_persistent_database_configured,
         "checkout_provider": provider,
@@ -732,6 +763,8 @@ def _payment_readiness(settings: Settings) -> dict:
         "public_base_url_configured": public_base_url_configured,
         "database_configured": database_configured,
         "production_persistent_database_configured": production_persistent_database_configured,
+        "managed_provider_readiness": managed_providers,
+        "managed_provider_ready": all(managed_providers.values()),
     }
 
 

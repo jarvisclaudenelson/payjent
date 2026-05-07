@@ -497,6 +497,13 @@ def test_payment_readiness_reports_booleans_without_secret_values(client):
         "public_base_url_configured": True,
         "database_configured": True,
         "production_persistent_database_configured": True,
+        "managed_provider_readiness": {
+            "exa.deep_search": False,
+            "firecrawl.scrape": False,
+            "elevenlabs.text_to_speech": False,
+            "fal.image.generate": False,
+        },
+        "managed_provider_ready": False,
     }
     body = response.text
     assert "sk_test_do_not_leak" not in body
