@@ -96,6 +96,8 @@ from .schemas import (
     PaymentSessionRefundResponse,
     PayShPremiumActionCreate,
     PayShPremiumActionCreateResponse,
+    PremiumActionCreate,
+    PremiumActionCreateResponse,
     PurchaseFulfillmentCreate,
     QuoteCreate,
     QuoteRead,
@@ -159,6 +161,7 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_premium_action", "endpoint": "/api/v1/premium-actions", "method": "POST", "description": "Provider-neutral premium action primitive for any external provider-backed paid action. Requires exact provider quote up front; creates a request-bound Payjent payment/grant and neutral execution envelope. Payjent authorizes payment/spend only; the agent executes externally after Payjent authorization. Safe HTTPS target_url/service_url is optional when provider/body/provider_metadata fully describe a provider-backed action. Do not include Authorization, Cookie, or API-key headers.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_payjent_authorization"},
         {"name": "payjent.create_x402_paid_action", "endpoint": "/api/v1/premium-actions/x402", "method": "POST", "description": "Generic primitive for any x402/pay.sh-compatible paid URL. Requires an exact provider quote up front; creates a request-bound Payjent payment/grant and x402/pay.sh execution envelope. Flow: create action, user pays Stripe/Payjent, agent polls/status, agent consumes payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then agent executes target_url/service_url externally and marks complete. Payjent never POSTs the target URL or stores Authorization/Cookie/API-key headers.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_spend_authorization"},
         {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Backward-compatible alias for payjent.create_x402_paid_action. Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Payjent does not POST service_url or execute the downstream task; payjent_managed_execution is a legacy alias and legacy payjent_fulfillment_callback/payjent_managed_execution flags are ignored for pay.sh actions.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.create_bigquery_paid_query", "endpoint": "/api/v1/premium-actions/pay-sh/bigquery-query", "method": "POST", "description": "Preset for the real pay.sh public catalog BigQuery gateway service solana-foundation/google/bigquery resource jobs. Creates a pay.sh/x402 action for POST https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries with body {query,useLegacySql}. User pays Stripe/Payjent first; agent consumes grant, calls payjent.authorize_x402_spend with capture=true, then agent executes externally using pay curl/pay.sh. Payjent does not execute BigQuery.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "preset": {"provider": "pay_sh", "service_fqn": "solana-foundation/google/bigquery", "resource": "jobs", "gateway": "https://bigquery.google.gateway-402.com/bigquery/v2", "method": "POST", "path_template": "/projects/{project_id}/queries", "execution_boundary": "agent_executes_after_spend_authorization"}},
@@ -1402,6 +1405,99 @@ def _create_x402_action_from_payload(
         "execution_boundary": envelope["payjent_execution_boundary"],
         "provider_metadata": envelope.get("provider_metadata") or {},
     }
+
+
+def _validate_premium_action_envelope(payload: PremiumActionCreate, envelope: dict) -> None:
+    if payload.payjent_fulfillment_callback or payload.payjent_managed_execution:
+        raise HTTPException(status_code=422, detail="generic premium actions are authorization-only; Payjent does not execute target_url/service_url")
+    for url in (payload.service_url, payload.target_url):
+        if url:
+            ok, reason = _safe_public_https_url(url)
+            if not ok:
+                raise HTTPException(status_code=422, detail=reason)
+    _reject_secret_headers(payload.headers)
+    if not (payload.service_url or payload.target_url or payload.body or payload.provider_metadata or payload.provider != "generic"):
+        raise HTTPException(status_code=422, detail="premium action must include a safe target_url/service_url or provider/body/provider_metadata describing the provider-backed action")
+
+
+def _premium_command_preview(payload: PremiumActionCreate, service_url: str | None) -> str:
+    method = (payload.method or "POST").upper()
+    target = service_url or f"provider:{payload.provider}"
+    return f"{method} {target} (agent executes externally after Payjent authorization)"
+
+
+def _create_premium_action_from_payload(
+    payload: PremiumActionCreate,
+    *,
+    idempotency_key: str | None,
+    provider: str | None,
+    session: Session,
+    settings: Settings,
+    credential: BotCredential,
+) -> dict:
+    service_url = payload.service_url or payload.target_url
+    kind = payload.kind or payload.action_type or "premium_action"
+    envelope = {
+        "provider": payload.provider,
+        "kind": kind,
+        "target_url": payload.target_url,
+        "service_url": payload.service_url,
+        "method": (payload.method or "POST").upper(),
+        "body": payload.body or {},
+        "headers": payload.headers or {},
+        "description": payload.description or payload.request_summary,
+        "command_preview": _premium_command_preview(payload, service_url),
+        "setup_hint": "Use the provider's external runtime/SDK/API after Payjent payment authorization; do not expose provider secrets to Payjent.",
+        "settlement": "provider_external_runtime",
+        "provider_metadata": dict(payload.provider_metadata or {}),
+        "rail": payload.rail,
+        "payjent_fulfillment_callback": False,
+        "payjent_managed_execution": False,
+        "payjent_execution_boundary": "agent_executes_after_payjent_authorization",
+        "boundary": "agent_executes_after_payjent_authorization",
+    }
+    _validate_premium_action_envelope(payload, envelope)
+    action_payload = AgentActionCreate(
+        bot_id=payload.bot_id,
+        external_user_id=payload.external_user_id,
+        request_summary=payload.request_summary,
+        request_hash=payload.request_hash,
+        amount_minor=payload.amount_minor,
+        currency=payload.currency,
+        cost_breakdown=payload.cost_breakdown,
+        execution_envelope=envelope,
+        callback_url=payload.callback_url,
+    )
+    action = create_agent_action(
+        action_payload,
+        idempotency_key=idempotency_key,
+        provider=provider,
+        session=session,
+        settings=settings,
+        credential=credential,
+    )
+    data = action if isinstance(action, dict) else action.model_dump()
+    return {
+        **data,
+        "provider": payload.provider,
+        "premium_provider": payload.provider,
+        "command_preview": envelope["command_preview"],
+        "request_fingerprint": data["request_hash"],
+        "execution_boundary": envelope["payjent_execution_boundary"],
+        "provider_metadata": envelope["provider_metadata"],
+    }
+
+
+@app.post("/api/v1/premium-actions", response_model=PremiumActionCreateResponse)
+def create_premium_action(
+    payload: PremiumActionCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    return _create_premium_action_from_payload(payload, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings, credential=credential)
 
 
 @app.post("/api/v1/premium-actions/x402", response_model=X402PaidActionCreateResponse)

@@ -30,6 +30,27 @@ def _pay_sh_payload(**overrides):
     return payload
 
 
+def _premium_payload(**overrides):
+    payload = {
+        "bot_id": "bot-1",
+        "external_user_id": "user-1",
+        "request_summary": "generate premium image via external provider",
+        "request_hash": "generic-premium-hash-1",
+        "amount_minor": 725,
+        "currency": "USD",
+        "cost_breakdown": [{"label": "provider quote", "amount_minor": 725}],
+        "provider": "fal_ai",
+        "target_url": "https://queue.fal.run/fal-ai/flux/schnell",
+        "method": "POST",
+        "body": {"prompt": "Lisbon at sunset"},
+        "headers": {"Content-Type": "application/json"},
+        "description": "Create image through fal.ai",
+        "provider_metadata": {"model": "fal-ai/flux/schnell"},
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_create_agent_action_returns_payment_prompt_and_action_id(client, quote_payload, bot_headers):
     r = _create_action(client, quote_payload, bot_headers)
     assert r.status_code == 200
@@ -41,6 +62,66 @@ def test_create_agent_action_returns_payment_prompt_and_action_id(client, quote_
     assert data["request_hash"] == quote_payload["request_hash"]
     assert data["payment_prompt"]["action_id"] == data["action_id"]
     assert "Payment required" in data["message"]
+
+
+def test_generic_premium_action_endpoint_creates_non_pay_sh_provider_action(client, bot_headers, operator_headers):
+    payload = _premium_payload()
+    r = client.post("/api/v1/premium-actions", json=payload, headers=bot_headers)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "fal_ai"
+    assert data["premium_provider"] == "fal_ai"
+    assert data["command_preview"].startswith("POST https://queue.fal.run/fal-ai/flux/schnell")
+    assert data["execution_boundary"] == "agent_executes_after_payjent_authorization"
+    paid = client.post(f"/api/v1/payment-sessions/{data['payment_session_id']}/mock-pay", headers=operator_headers).json()
+    consumed = client.post(
+        f"/api/v1/agent-actions/{data['action_id']}/consume",
+        json={"payment_token": paid["grant"]["id"], "presentation": _presentation(payload)},
+        headers=bot_headers,
+    )
+    assert consumed.status_code == 200
+    envelope = consumed.json()["execution_envelope"]
+    assert envelope["provider"] == "fal_ai"
+    assert envelope["kind"] == "premium_action"
+    assert envelope["target_url"] == payload["target_url"]
+    assert envelope["settlement"] == "provider_external_runtime"
+    assert envelope["boundary"] == "agent_executes_after_payjent_authorization"
+    assert envelope["payjent_fulfillment_callback"] is False
+    assert envelope["payjent_managed_execution"] is False
+
+
+def test_generic_premium_action_rejects_unsafe_url_before_checkout(client, bot_headers):
+    r = client.post("/api/v1/premium-actions", json=_premium_payload(target_url="http://127.0.0.1:8000/private"), headers=bot_headers)
+    assert r.status_code == 422
+    assert "https" in r.text.lower() or "public" in r.text.lower()
+
+
+def test_generic_premium_action_rejects_secret_header_before_checkout(client, bot_headers):
+    r = client.post("/api/v1/premium-actions", json=_premium_payload(headers={"Authorization": "Bearer nope"}), headers=bot_headers)
+    assert r.status_code == 422
+    assert "secret-like" in r.text
+
+
+def test_generic_premium_action_allows_non_url_metadata_backed_action(client, bot_headers):
+    payload = _premium_payload(
+        request_hash="generic-premium-hash-2",
+        target_url=None,
+        service_url=None,
+        body={},
+        provider_metadata={"provider_action_id": "quote_123", "model": "premium-model"},
+    )
+    r = client.post("/api/v1/premium-actions", json=payload, headers=bot_headers)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "fal_ai"
+    assert data["command_preview"].startswith("POST provider:fal_ai")
+    assert data["provider_metadata"]["provider_action_id"] == "quote_123"
+
+
+def test_generic_premium_action_rejects_true_payjent_execution_flags(client, bot_headers):
+    r = client.post("/api/v1/premium-actions", json=_premium_payload(payjent_managed_execution=True), headers=bot_headers)
+    assert r.status_code == 422
+    assert "does not execute" in r.text
 
 
 def test_pay_sh_premium_action_endpoint_creates_provider_action(client, bot_headers):

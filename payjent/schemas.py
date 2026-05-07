@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class CostItem(BaseModel):
@@ -219,6 +219,40 @@ class PayShPremiumActionCreate(X402PaidActionCreate):
     """Backward-compatible alias for the generic x402/pay.sh paid action primitive."""
 
 
+class PremiumActionCreate(BaseModel):
+    bot_id: str
+    external_user_id: str
+    request_summary: str
+    request_hash: str | None = None
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    cost_breakdown: list[CostItem]
+    provider: str = Field(default="generic", min_length=1, max_length=64)
+    rail: str | None = None
+    target_url: str | None = None
+    service_url: str | None = None
+    action_type: str = "premium_action"
+    kind: str | None = None
+    method: str = "POST"
+    body: dict[str, Any] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    description: str | None = None
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    callback_url: str | None = None
+    payjent_fulfillment_callback: bool = Field(default=False)
+    payjent_managed_execution: bool = Field(default=False)
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider_slug(cls, value: str) -> str:
+        import re
+
+        slug = (value or "generic").strip().lower().replace("-", "_")
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", slug):
+            raise ValueError("provider must be a safe slug containing only lowercase letters, numbers, and underscores")
+        return slug
+
+
 class BigQueryPaidQueryCreate(BaseModel):
     bot_id: str
     external_user_id: str
@@ -313,6 +347,15 @@ class PayShPremiumActionCreateResponse(AgentActionCreateResponse):
 
 class X402PaidActionCreateResponse(PayShPremiumActionCreateResponse):
     """Response for the public generic x402/pay.sh paid action primitive."""
+
+
+class PremiumActionCreateResponse(AgentActionCreateResponse):
+    provider: str
+    premium_provider: str
+    command_preview: str | None = None
+    request_fingerprint: str | None = None
+    execution_boundary: str | None = None
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentActionConsumeRequest(BaseModel):
