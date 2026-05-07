@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 from typing import Any, Callable
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 import httpx
 
@@ -44,6 +44,11 @@ def _validate_public_https_url(raw_url: Any) -> tuple[str, dict[str, str]]:
     parsed = urlparse(raw_url.strip())
     if parsed.scheme.lower() != "https" or not parsed.hostname:
         raise ValueError("url must be a public HTTPS URL")
+    if parsed.username or parsed.password:
+        raise ValueError("url must not include userinfo")
+    for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        if _is_secret_like_key(key):
+            raise ValueError("url query keys must not include secrets")
     host = parsed.hostname.lower().rstrip(".")
     if host in {"localhost", "metadata.google.internal"} or host.endswith(".local"):
         raise ValueError("url must be a public HTTPS URL")

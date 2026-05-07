@@ -162,13 +162,18 @@ def test_toolbox_rejects_secret_argument_keys_recursively(client, bot_headers):
 
 
 def test_toolbox_firecrawl_url_is_summarized_not_persisted(client, bot_headers, engine):
-    raw_url = "https://example.com/private/path?token=payjent-test-secret-value-never-return"
+    raw_url = "https://example.com/private/path?safe=1"
     response = client.post(
         "/api/v1/toolbox/firecrawl.scrape/checkout",
         json=_payload({"url": raw_url}),
         headers=bot_headers,
     )
     assert response.status_code == 402
+    response_text = json.dumps(response.json()).lower()
+    assert "canonical_url" not in response_text
+    assert raw_url.lower() not in response_text
+    assert "private/path" not in response_text
+    assert response.json()["guidance"]["task_budget_required"] is True
     _assert_no_secret_value(response.json())
 
     checkout = client.post(
@@ -179,7 +184,37 @@ def test_toolbox_firecrawl_url_is_summarized_not_persisted(client, bot_headers, 
     assert checkout.status_code == 200
     body = checkout.json()
     assert body["arguments_json"] == {"url": {"scheme": "https", "host": "example.com"}}
+    body_text = json.dumps(body).lower()
+    assert "canonical_url" not in body_text
+    assert raw_url.lower() not in body_text
+    assert "private/path" not in body_text
     _assert_no_secret_value(body)
+
+    with Session(engine) as session:
+        stored = session.get(ToolExecution, body["id"])
+        assert stored.arguments_json["url"]["canonical_url"] == raw_url
+
+
+def test_toolbox_firecrawl_rejects_secret_like_query_keys_before_quote_or_execution(client, bot_headers, engine):
+    raw_url = "https://example.com/page?api_key=redacted"
+    quote = client.post(
+        "/api/v1/toolbox/firecrawl.scrape/quote",
+        json=_payload({"url": raw_url}),
+        headers=bot_headers,
+    )
+    assert quote.status_code == 422
+    assert "redacted" not in json.dumps(quote.json()).lower()
+
+    execution = client.post(
+        "/api/v1/toolbox/firecrawl.scrape/executions",
+        json=_payload({"url": raw_url}),
+        headers=bot_headers,
+    )
+    assert execution.status_code == 422
+    assert "redacted" not in json.dumps(execution.json()).lower()
+    with Session(engine) as session:
+        assert session.exec(select(Quote)).all() == []
+        assert session.exec(select(ToolExecution)).all() == []
 
 
 def test_toolbox_checkout_failure_rolls_back_quote_and_payment_session(client, bot_headers, engine):

@@ -148,7 +148,9 @@ def test_managed_firecrawl_adapter_rejects_invalid_input_before_transport():
         ({"url": "https://169.254.169.254/a"}, "public HTTPS"),
         ({"url": "https://metadata.google.internal/a"}, "public HTTPS"),
         ({"url": "https://service.local/a"}, "public HTTPS"),
-        ({"url": "https://example.com", "api_key": "***"}, "provider credentials are not accepted"),
+        ({"url": "https://example.com", "api_key": "redacted"}, "provider credentials are not accepted"),
+        ({"url": "https://example.com/page?api_key=redacted"}, "query keys"),
+        ({"url": "https://user:pass@example.com/page"}, "userinfo"),
         ({"url": "https://example.com", "formats": ["screenshot"]}, "unsupported"),
         ({"url": "https://example.com", "only_main_content": "yes"}, "boolean"),
     ]

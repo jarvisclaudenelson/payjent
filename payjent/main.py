@@ -5,7 +5,7 @@ import ipaddress
 from secrets import token_urlsafe
 import socket
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 from uuid import uuid4
 from pathlib import Path
 
@@ -297,6 +297,8 @@ def _toolbox_quote_or_404(tool_id: str, payload: ToolboxQuoteCreate) -> tuple[di
     if not tool:
         raise HTTPException(status_code=404, detail="tool not found")
     _reject_secret_argument_keys(payload.arguments)
+    if tool_id == "firecrawl.scrape":
+        _sanitize_toolbox_arguments(tool_id, payload.arguments)
     toolbox_quote = build_tool_quote(tool, bot_id=payload.bot_id, external_user_id=payload.external_user_id, arguments=payload.arguments)
     if payload.request_hash and payload.request_hash != toolbox_quote["request_hash"]:
         raise HTTPException(status_code=409, detail="request_hash does not match recomputed toolbox quote")
@@ -307,11 +309,24 @@ _SECRET_ARGUMENT_MARKERS = ("secret", "token", "api_key", "apikey", "authorizati
 _EXECUTABLE_URL_KEY_MARKERS = ("target_url", "service_url", "callback", "webhook", "api_url")
 
 
+def _secret_like_marker(value: Any) -> bool:
+    normalized = str(value).lower().replace("-", "_")
+    return any(marker in normalized for marker in _SECRET_ARGUMENT_MARKERS)
+
+
+def _reject_secret_like_url_parts(parsed: Any) -> None:
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=422, detail="toolbox URL arguments may not include userinfo")
+    for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        if _secret_like_marker(key):
+            raise HTTPException(status_code=422, detail="toolbox URL arguments may not include secret-like query keys")
+
+
 def _reject_secret_argument_keys(value: Any, path: str = "arguments") -> None:
     if isinstance(value, dict):
         for k, v in value.items():
             normalized = str(k).lower().replace("-", "_")
-            if any(marker in normalized for marker in _SECRET_ARGUMENT_MARKERS):
+            if _secret_like_marker(normalized):
                 raise HTTPException(status_code=422, detail=f"toolbox arguments may not include secret-like key: {path}.{k}")
             _reject_secret_argument_keys(v, f"{path}.{k}")
     elif isinstance(value, list):
@@ -319,10 +334,11 @@ def _reject_secret_argument_keys(value: Any, path: str = "arguments") -> None:
             _reject_secret_argument_keys(item, f"{path}[{idx}]")
 
 
-def _public_https_url_summary(raw: str) -> dict[str, str]:
+def _public_https_url_parts(raw: str) -> tuple[str, dict[str, str]]:
     parsed = urlparse(raw)
     if parsed.scheme.lower() != "https" or not parsed.hostname:
         raise HTTPException(status_code=422, detail="toolbox URL arguments must be public HTTPS URLs")
+    _reject_secret_like_url_parts(parsed)
     host = parsed.hostname.lower()
     try:
         ip = ipaddress.ip_address(host)
@@ -336,7 +352,17 @@ def _public_https_url_summary(raw: str) -> dict[str, str]:
     canonical_url = f"https://{netloc}{path}"
     if parsed.query:
         canonical_url = f"{canonical_url}?{parsed.query}"
-    return {"scheme": "https", "host": host, "canonical_url": canonical_url}
+    return canonical_url, {"scheme": "https", "host": host}
+
+
+def _public_https_url_summary(raw: str) -> dict[str, str]:
+    _canonical_url, summary = _public_https_url_parts(raw)
+    return summary
+
+
+def _internal_https_url_summary(raw: str) -> dict[str, str]:
+    canonical_url, summary = _public_https_url_parts(raw)
+    return {**summary, "canonical_url": canonical_url}
 
 
 def _redact_toolbox_arguments_for_read(tool_id: str, value: Any) -> Any:
@@ -355,11 +381,11 @@ def _sanitize_toolbox_arguments(tool_id: str, value: Any, path: str = "arguments
         for k, v in value.items():
             key = str(k)
             normalized = key.lower().replace("-", "_")
-            if any(marker in normalized for marker in _SECRET_ARGUMENT_MARKERS):
+            if _secret_like_marker(normalized):
                 raise HTTPException(status_code=422, detail=f"toolbox arguments may not include secret-like key: {path}.{key}")
             if isinstance(v, str) and (normalized == "url" or normalized.endswith("_url") or any(marker in normalized for marker in _EXECUTABLE_URL_KEY_MARKERS)):
                 if tool_id == "firecrawl.scrape" and normalized == "url":
-                    sanitized[key] = _public_https_url_summary(v)
+                    sanitized[key] = _internal_https_url_summary(v)
                 else:
                     raise HTTPException(status_code=422, detail=f"toolbox arguments may not include executable URL field: {path}.{key}")
             else:
@@ -372,12 +398,13 @@ def _sanitize_toolbox_arguments(tool_id: str, value: Any, path: str = "arguments
 
 def _toolbox_execution_envelope(tool: dict[str, Any], toolbox_quote: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
     sanitized_arguments = _sanitize_toolbox_arguments(tool["tool_id"], arguments)
+    argument_summary = _redact_toolbox_arguments_for_read(tool["tool_id"], sanitized_arguments)
     return {
         "tool_id": tool["tool_id"],
         "toolbox_request_hash": toolbox_quote["request_hash"],
         "provider_type": toolbox_quote["provider_type"],
         "execution_mode": toolbox_quote["execution_mode"],
-        "argument_summary": sanitized_arguments,
+        "argument_summary": argument_summary,
         "payment_options": toolbox_quote["payment_options"],
         "recommended_payment_rail": toolbox_quote["recommended_payment_rail"],
         "execution_boundary": "agent_executes_after_payjent_authorization",
