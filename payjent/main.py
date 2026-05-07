@@ -73,6 +73,7 @@ from .providers.stripe import (
 )
 from .rails import normalize_spend_rail
 from .settlement_rails import list_settlement_rail_manifests, normalize_settlement_rail, settlement_rail_manifest
+from .toolbox import build_tool_quote, get_tool as get_toolbox_tool, list_tools as list_toolbox_tools
 from .risk import assess_checkout_risk
 from .readiness import enforce_readiness, readiness_record, safe_metadata
 from .schemas import (
@@ -128,6 +129,8 @@ from .schemas import (
     TaskBudgetCreate,
     TaskBudgetFundResponse,
     TaskBudgetRead,
+    ToolboxQuoteCreate,
+    ToolboxQuoteRead,
     X402ConfigureRequest,
     X402PaidActionCreate,
     X402PaidActionCreateResponse,
@@ -231,6 +234,8 @@ def _discovery_manifest(base_url: str) -> dict:
         "public_base_url": CANONICAL_PUBLIC_BASE_URL,
         "docs_url": f"{CANONICAL_PUBLIC_BASE_URL}/docs/agent-payjent-self-setup.md",
         "authenticated_capabilities_url": f"{base_url}/api/v1/agent-capabilities",
+        "toolbox_url": f"{CANONICAL_PUBLIC_BASE_URL}/api/v1/toolbox",
+        "toolbox_tool_count": len(list_toolbox_tools()),
         "auth": {
             "header": "X-Payjent-Bot-Key",
             "credential_install": "Credentials are installed via one-time Agent Install Link and must not be pasted in chat.",
@@ -271,6 +276,28 @@ def well_known_payjent_tools(request: Request, settings: Settings = Depends(get_
 @app.get("/.well-known/payjent-agent-setup")
 def well_known_payjent_agent_setup():
     return RedirectResponse("/docs/agent-payjent-self-setup.md", status_code=308)
+
+
+@app.get("/api/v1/toolbox")
+def toolbox_list():
+    return {"tools": list_toolbox_tools(), "count": len(list_toolbox_tools())}
+
+
+@app.get("/api/v1/toolbox/{tool_id}")
+def toolbox_detail(tool_id: str):
+    tool = get_toolbox_tool(tool_id)
+    if not tool:
+        raise HTTPException(status_code=404, detail="tool not found")
+    return tool
+
+
+@app.post("/api/v1/toolbox/{tool_id}/quote", response_model=ToolboxQuoteRead)
+def toolbox_quote(tool_id: str, payload: ToolboxQuoteCreate, credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, payload.bot_id)
+    tool = get_toolbox_tool(tool_id)
+    if not tool:
+        raise HTTPException(status_code=404, detail="tool not found")
+    return build_tool_quote(tool, bot_id=payload.bot_id, external_user_id=payload.external_user_id, arguments=payload.arguments)
 
 @app.get("/", response_class=HTMLResponse)
 def landing_page(settings: Settings = Depends(get_settings)):

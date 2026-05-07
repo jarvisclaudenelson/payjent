@@ -34,6 +34,28 @@ class QuoteRead(BaseModel):
     status: str
 
 
+class ToolboxQuoteCreate(BaseModel):
+    bot_id: str = Field(min_length=1)
+    external_user_id: str = Field(min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolboxQuoteRead(BaseModel):
+    tool_quote_id: str
+    quote_id: str
+    tool_id: str
+    amount_minor: int
+    currency: str
+    request_hash: str
+    expires_at: str
+    payment_options: list[dict[str, Any]]
+    recommended_payment_rail: str
+    stripe_minimum_applies: bool
+    execution_mode: str
+    provider_type: str
+    execution_caveat: str
+
+
 class AgentRegisterRequest(BaseModel):
     name: str = Field(min_length=1)
     platform: str = Field(min_length=1)
