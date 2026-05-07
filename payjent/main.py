@@ -153,12 +153,12 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
-        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium/downstream external action envelope gated by Payjent only after obtaining an exact provider/merchant quote. If payjent_fulfillment_callback=true, Payjent validates the callback target before checkout and performs one verified, allowlisted, sanitized post-payment handoff callback to the downstream executor after Stripe confirms payment; payjent_managed_execution remains a legacy alias. Otherwise agents poll/resume normally and perform fulfillment outside Payjent.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Flow: create action, user pays Stripe/Payjent, agent polls/status, agent consumes the payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then the agent executes externally with its pay.sh/x402 runtime and marks complete. Payjent does not POST service_url or execute the downstream task; payjent_managed_execution is a legacy alias and legacy payjent_fulfillment_callback/payjent_managed_execution flags are ignored for pay.sh actions.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.create_purchase_fulfillment", "endpoint": "/api/v1/purchase-actions", "method": "POST", "description": "Create an Amazon-style merchant purchase/procurement handoff only after obtaining an exact merchant quote. The human pays Stripe/Payjent; Payjent verifies payment and sends a signed, verified POST fulfillment callback to an allowlisted procurement executor. The executor buys from Amazon or the merchant using its configured procurement/payment method. Payjent does not send funds to the agent and does not directly pay Amazon unless the downstream executor/provider rail does that.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "requires_fulfillment_callback": True},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
-        {"name": "payjent.authorize_x402_spend", "endpoint": "/api/v1/grants/{grant_id}/spend-authorizations", "method": "POST", "description": "Authorize request-bound downstream x402 spend after Payjent grant consumption.", "required_rail": "x402"},
+        {"name": "payjent.authorize_x402_spend", "endpoint": "/api/v1/grants/{grant_id}/spend-authorizations", "method": "POST", "description": "After consuming a paid Payjent grant, authorize/capture request-bound downstream x402/pay.sh spend for the exact action/budget. The agent uses this authorization to execute externally; Payjent does not call the service_url.", "required_rail": "x402"},
     ]
     if x402_available is not None:
         for tool in tools:
@@ -1515,7 +1515,6 @@ _SECRET_HEADER_MARKERS = ("authorization", "cookie", "token", "secret", "key", "
 _INTERNAL_HOSTS = {"localhost", "localhost.localdomain", "metadata.google.internal"}
 _RESERVED_DOWNSTREAM_BODY_KEYS = {"grant", "grant_id", "payment", "payment_token", "receipt", "token"}
 _PURCHASE_SECRET_BODY_KEY_MARKERS = ("card", "cvv", "cvc", "pan", "password", "passcode", "credential", "amazon_login", "amazon_password", "shipping_address", "address", "ssn", "secret", "auth_token", "access_token")
-_ALLOWED_DOWNSTREAM_HEADERS = {"content-type", "accept", "idempotency-key", "x-request-id", "x-payjent-action-id"}
 
 
 def _safe_public_https_url(url: str | None) -> tuple[bool, str | None]:
@@ -1618,109 +1617,6 @@ def _validate_purchase_executor_allowlisted(envelope: dict, settings: Settings) 
     _validate_managed_execution_envelope(envelope, settings)
 
 
-def _sanitized_downstream_headers(headers: dict | None) -> dict[str, str]:
-    safe: dict[str, str] = {}
-    for name, value in (headers or {}).items():
-        lower = str(name).lower()
-        if lower not in _ALLOWED_DOWNSTREAM_HEADERS:
-            continue
-        safe[str(name)] = str(value)
-    return safe
-
-
-def _record_downstream_event(session: Session, q: Quote, status: str, metadata: dict) -> FulfillmentEvent:
-    event = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status=status, metadata_json={"type": "payjent_fulfillment_callback", **metadata})
-    if status == "executed":
-        q.status = "executed"
-    elif q.status not in {"executed", "completed"}:
-        q.status = "execution_failed"
-    session.add(q); session.add(event); session.commit(); session.refresh(event)
-    return event
-
-
-def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSession, grant: Grant, provider: str, settings: Settings) -> FulfillmentEvent | None:
-    envelope = q.execution_envelope or {}
-    if not _fulfillment_callback_requested(envelope):
-        return None
-    existing = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id)).all()
-    for event in existing:
-        meta = event.metadata_json or {}
-        if meta.get("type") in {"payjent_x402_service_execution", "payjent_fulfillment_callback", "payjent_downstream_execution"} and meta.get("payment_session_id") == ps.id:
-            return event
-    if provider == "mock":
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "x402/pay.sh service execution is disabled for mock payments"})
-    if (envelope.get("provider") or "") != "pay_sh":
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "managed downstream execution is limited to pay.sh/x402 service rail actions"})
-    if (envelope.get("method") or "POST").upper() != "POST":
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "only POST downstream execution is supported"})
-    service_url = envelope.get("service_url")
-    ok, reason = _managed_execution_host_allowed(service_url, settings)
-    if not ok:
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": reason})
-    body = dict(envelope.get("body") or {})
-    reserved_path = _reserved_downstream_body_key_path(body)
-    if reserved_path:
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": f"reserved Payjent field in downstream body: {reserved_path}"})
-    if not _mark_grant_consumed(grant.id, session):
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "payment grant was already consumed before x402/pay.sh execution"})
-    session.refresh(grant)
-    operation_id = f"paysh_execute:{ps.id}"
-    spend = SpendLedgerEntry(
-        id=f"spend_{uuid4().hex}",
-        grant_id=grant.id,
-        quote_id=q.id,
-        operation_id=operation_id,
-        tool="payjent.create_pay_sh_premium_action",
-        vendor="pay.sh",
-        rail="x402",
-        amount_minor=q.amount_minor,
-        currency=q.currency.upper(),
-        reason=envelope.get("description") or q.request_summary,
-        status="captured",
-        provider_reference=service_url,
-        metadata_json={"provider": "pay_sh", "service_url": service_url, "payment_session_id": ps.id},
-    )
-    session.add(spend)
-    try:
-        session.commit()
-    except IntegrityError:
-        session.rollback()
-        spend = session.exec(select(SpendLedgerEntry).where(SpendLedgerEntry.grant_id == grant.id, SpendLedgerEntry.operation_id == operation_id)).first()
-    callback_payload = {
-        "event_type": "payjent.x402_service_execution",
-        "action_id": q.id,
-        "quote_id": q.id,
-        "payment_session_id": ps.id,
-        "bot_id": q.bot_id,
-        "external_user_id": q.external_user_id,
-        "provider": "pay_sh",
-        "rail": "x402",
-        "spend_status": "captured",
-        "spend_id": spend.id if spend else None,
-        "amount_minor": q.amount_minor,
-        "currency": q.currency,
-        "request_hash": q.request_hash,
-        "service_body": body,
-    }
-    timestamp, signature = sign_webhook_payload(callback_payload, settings.signing_secret)
-    headers = _sanitized_downstream_headers(envelope.get("headers") or {})
-    headers.setdefault("Content-Type", "application/json")
-    headers[PAYJENT_TIMESTAMP_HEADER] = timestamp
-    headers[PAYJENT_SIGNATURE_HEADER] = signature
-    headers["X-Payjent-Action-Id"] = q.id
-    headers["X-Payjent-Quote-Id"] = q.id
-    headers["X-Payjent-Payment-Session-Id"] = ps.id
-    headers["X-Payjent-Request-Hash"] = q.request_hash
-    headers["X-Payjent-Rail"] = "x402"
-    try:
-        with httpx.Client(timeout=5.0, follow_redirects=False) as client:
-            response = client.post(service_url, json=callback_payload, headers=headers)
-        status = "executed" if 200 <= response.status_code < 300 else "failed"
-        return _record_downstream_event(session, q, status, {"type": "payjent_x402_service_execution", "payment_session_id": ps.id, "http_status": response.status_code, "service_host": urlparse(service_url).hostname, "spend_id": spend.id if spend else None, "rail": "x402", "provider": "pay_sh"})
-    except Exception as exc:
-        return _record_downstream_event(session, q, "failed", {"type": "payjent_x402_service_execution", "payment_session_id": ps.id, "error": str(exc)[:500], "service_host": urlparse(service_url).hostname, "spend_id": spend.id if spend else None, "rail": "x402", "provider": "pay_sh"})
-
-
 def _issued_response(ps: PaymentSession, receipt, grant):
     return {"payment_session": session_to_read(ps), "receipt": {"payload": receipt.payload, "signature": receipt.signature}, "grant": {"id": grant.id, "payload": grant.payload, "signature": grant.signature}}
 
@@ -1733,7 +1629,6 @@ def _issue_paid_session(session: Session, ps: PaymentSession, settings: Settings
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     _deliver_agent_action_callback(session, q, ps, settings, provider)
-    _execute_managed_downstream_once(session, q, ps, grant, provider, settings)
     return receipt, grant
 
 
