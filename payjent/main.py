@@ -1219,6 +1219,25 @@ def get_quote(quote_id: str, session: Session = Depends(get_session)):
     return quote_to_read(q)
 
 
+STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY = {
+    "USD": 50,
+}
+
+
+def _enforce_checkout_amount_supported(q: Quote, requested_provider: str) -> None:
+    if requested_provider != "stripe":
+        return
+    minimum = STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(q.currency.upper())
+    if minimum is not None and q.amount_minor < minimum:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Stripe checkout minimum for {q.currency.upper()} is {minimum} minor units; "
+                "obtain an exact provider quote at or above the card checkout minimum, or batch/top up the paid action before creating checkout"
+            ),
+        )
+
+
 def _create_checkout_for_quote(
     q: Quote,
     *,
@@ -1243,6 +1262,7 @@ def _create_checkout_for_quote(
     requested_provider = (provider or settings.checkout_provider or "mock").lower()
     if requested_provider not in {"mock", "local", "stripe", "link"}:
         raise HTTPException(status_code=422, detail="unsupported checkout provider")
+    _enforce_checkout_amount_supported(q, requested_provider)
     if settings.is_production and requested_provider in {"mock", "local"}:
         safe_internal_hosted_smoke = (
             settings.hosted_smoke_test_rail_enabled

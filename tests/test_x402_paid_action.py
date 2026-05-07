@@ -80,6 +80,25 @@ def test_generic_x402_rejects_secret_headers(client, bot_headers):
     assert "secret-like outbound header" in response.text
 
 
+def test_stripe_checkout_rejects_usd_amount_below_card_minimum_before_stripe_call(client, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        checkout_provider="stripe",
+        stripe_secret_key="sk_test_fake",
+        public_base_url="https://payjent.example",
+        stripe_webhook_secret="whsec_test",
+    )
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: (_ for _ in ()).throw(AssertionError("Stripe should not be called for below-minimum checkout")))
+
+    response = client.post(
+        "/api/v1/premium-actions/pay-sh",
+        headers=bot_headers,
+        json=_payload(amount_minor=1, cost_breakdown=[{"label": "exact provider quote", "amount_minor": 1}]),
+    )
+
+    assert response.status_code == 422
+    assert "Stripe checkout minimum for USD is 50 minor units" in response.text
+
+
 def test_generic_x402_full_create_pay_consume_spend_complete_flow(client, bot_headers, operator_headers):
     created = client.post("/api/v1/premium-actions/x402", headers=bot_headers, json=_payload(amount_minor=125, cost_breakdown=[{"label": "exact quote", "amount_minor": 125}]))
     assert created.status_code == 200, created.text
