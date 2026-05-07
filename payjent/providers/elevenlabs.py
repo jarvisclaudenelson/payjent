@@ -9,6 +9,7 @@ ELEVENLABS_TTS_URL_TEMPLATE = "https://api.elevenlabs.io/v1/text-to-speech/{voic
 DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # ElevenLabs public Rachel voice id
 MAX_TEXT_LENGTH = 5000
 MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024
+METADATA_ONLY_AUDIO_CAVEAT = "metadata_only_audio_not_stored"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
@@ -75,18 +76,28 @@ def validate_text_to_speech_arguments(arguments: dict[str, Any]) -> dict[str, An
 
 
 def _default_transport(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
-    response = httpx.post(
+    audio_size_bytes = 0
+    with httpx.stream(
+        "POST",
         ELEVENLABS_TTS_URL_TEMPLATE.format(voice_id=payload["voice_id"]),
         headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": "audio/mpeg"},
         json={"text": payload["text"], "model_id": payload["model_id"]},
         timeout=60,
-    )
-    response.raise_for_status()
-    return {
-        "content_type": response.headers.get("content-type") or "application/octet-stream",
-        "audio_size_bytes": len(response.content or b""),
-        "request_id": response.headers.get("request-id") or response.headers.get("x-request-id"),
-    }
+    ) as response:
+        response.raise_for_status()
+        content_type = response.headers.get("content-type") or "application/octet-stream"
+        _validate_audio_content_type(content_type)
+        for chunk in response.iter_bytes():
+            audio_size_bytes += len(chunk)
+            if audio_size_bytes > MAX_AUDIO_SIZE_BYTES:
+                raise ElevenLabsProviderError("provider_execution_failed")
+        if audio_size_bytes <= 0:
+            raise ElevenLabsProviderError("provider_execution_failed")
+        return {
+            "content_type": content_type,
+            "audio_size_bytes": audio_size_bytes,
+            "request_id": response.headers.get("request-id") or response.headers.get("x-request-id"),
+        }
 
 
 def _safe_str(value: Any, max_len: int) -> str | None:
@@ -98,6 +109,23 @@ def _safe_str(value: Any, max_len: int) -> str | None:
     return text[:max_len]
 
 
+def _normalized_content_type(value: Any) -> str | None:
+    text = _safe_str(value, 100)
+    if not text:
+        return None
+    return text.split(";", 1)[0].strip().lower() or None
+
+
+def _is_allowed_audio_content_type(value: Any) -> bool:
+    content_type = _normalized_content_type(value)
+    return bool(content_type and (content_type.startswith("audio/") or content_type == "application/octet-stream"))
+
+
+def _validate_audio_content_type(value: Any) -> None:
+    if not _is_allowed_audio_content_type(value):
+        raise ElevenLabsProviderError("provider_execution_failed")
+
+
 def sanitize_elevenlabs_response(data: dict[str, Any], *, payload: dict[str, Any]) -> dict[str, Any]:
     size = data.get("audio_size_bytes")
     if not isinstance(size, int) or size < 0:
@@ -106,15 +134,19 @@ def sanitize_elevenlabs_response(data: dict[str, Any], *, payload: dict[str, Any
             size = len(raw_audio)
         else:
             size = 0
-    if size > MAX_AUDIO_SIZE_BYTES:
+    if size <= 0 or size > MAX_AUDIO_SIZE_BYTES:
         raise ElevenLabsProviderError("provider_execution_failed")
+    content_type = _safe_str(data.get("content_type"), 100) or "audio/mpeg"
+    _validate_audio_content_type(content_type)
     result: dict[str, Any] = {
         "provider": "elevenlabs",
         "tool_id": "elevenlabs.text_to_speech",
         "voice_id": payload["voice_id"],
         "model_id": payload["model_id"],
-        "content_type": _safe_str(data.get("content_type"), 100) or "audio/mpeg",
+        "content_type": content_type,
         "audio_size_bytes": size,
+        "delivery_mode": "metadata_only",
+        "result_caveat": METADATA_ONLY_AUDIO_CAVEAT,
     }
     request_id = _safe_str(data.get("request_id"), 64)
     if request_id:

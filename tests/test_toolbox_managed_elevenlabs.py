@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from sqlmodel import Session
 
 from payjent.config import Settings, get_settings
@@ -48,6 +49,8 @@ def test_managed_elevenlabs_run_succeeds_with_mocked_provider(client, bot_header
             "model_id": "eleven_multilingual_v2",
             "content_type": "audio/mpeg",
             "audio_size_bytes": 1234,
+            "delivery_mode": "metadata_only",
+            "result_caveat": "metadata_only_audio_not_stored",
             "provider_request_id": "req_abc",
         }
 
@@ -58,6 +61,8 @@ def test_managed_elevenlabs_run_succeeds_with_mocked_provider(client, bot_header
     body = response.json()
     assert body["status"] == "succeeded"
     assert body["result_metadata_json"]["audio_size_bytes"] == 1234
+    assert body["result_metadata_json"]["delivery_mode"] == "metadata_only"
+    assert body["result_metadata_json"]["result_caveat"] == "metadata_only_audio_not_stored"
     _assert_no_secret(body)
 
 
@@ -119,6 +124,8 @@ def test_managed_elevenlabs_adapter_happy_path_via_fake_transport():
         "model_id": "eleven_multilingual_v2",
         "content_type": "audio/mpeg",
         "audio_size_bytes": 42,
+        "delivery_mode": "metadata_only",
+        "result_caveat": "metadata_only_audio_not_stored",
         "provider_request_id": ("request-id-0123456789" * 5)[:64],
     }
     _assert_no_secret(result)
@@ -165,3 +172,61 @@ def test_managed_elevenlabs_adapter_sanitizes_transport_failure():
         assert str(exc) == "provider_execution_failed"
     else:  # pragma: no cover - assertion guard
         raise AssertionError("expected ElevenLabsProviderError")
+
+
+def test_managed_elevenlabs_adapter_rejects_empty_audio_body():
+    from payjent.providers.elevenlabs import ElevenLabsProviderError, run_text_to_speech
+
+    def fake_transport(payload, api_key):
+        return {"content_type": "audio/mpeg", "audio_size_bytes": 0}
+
+    with pytest.raises(ElevenLabsProviderError, match="provider_execution_failed"):
+        run_text_to_speech({"text": "valid"}, api_key="test-elevenlabs-secret", transport=fake_transport)
+
+
+def test_managed_elevenlabs_adapter_rejects_non_audio_2xx_body():
+    from payjent.providers.elevenlabs import ElevenLabsProviderError, run_text_to_speech
+
+    def fake_transport(payload, api_key):
+        return {"content_type": "application/json; charset=utf-8", "audio_size_bytes": 2, "content": b"{}"}
+
+    with pytest.raises(ElevenLabsProviderError, match="provider_execution_failed"):
+        run_text_to_speech({"text": "valid"}, api_key="test-elevenlabs-secret", transport=fake_transport)
+
+
+def test_managed_elevenlabs_adapter_rejects_oversized_fake_transport_response():
+    from payjent.providers.elevenlabs import ElevenLabsProviderError, MAX_AUDIO_SIZE_BYTES, run_text_to_speech
+
+    def fake_transport(payload, api_key):
+        return {"content_type": "audio/mpeg", "audio_size_bytes": MAX_AUDIO_SIZE_BYTES + 1}
+
+    with pytest.raises(ElevenLabsProviderError, match="provider_execution_failed"):
+        run_text_to_speech({"text": "valid"}, api_key="test-elevenlabs-secret", transport=fake_transport)
+
+
+def test_managed_elevenlabs_default_transport_streams_and_rejects_json_before_reading(monkeypatch):
+    from payjent.providers import elevenlabs
+    from payjent.providers.elevenlabs import ElevenLabsProviderError, run_text_to_speech
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self):  # pragma: no cover - should reject on content-type first
+            raise AssertionError("default transport buffered/read a non-audio response")
+
+    class FakeStream:
+        def __enter__(self):
+            return FakeResponse()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_stream(*args, **kwargs):
+        return FakeStream()
+
+    monkeypatch.setattr(elevenlabs.httpx, "stream", fake_stream)
+    with pytest.raises(ElevenLabsProviderError, match="provider_execution_failed"):
+        run_text_to_speech({"text": "valid"}, api_key="test-elevenlabs-secret")
