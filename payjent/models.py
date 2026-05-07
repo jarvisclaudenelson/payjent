@@ -134,6 +134,41 @@ class SpendLedgerEntry(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class TaskBudget(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    bot_id: str = Field(index=True)
+    external_user_id: str = Field(index=True)
+    task_id: str = Field(index=True)
+    max_amount_minor: int
+    currency: str = Field(default="USD", index=True)
+    available_minor: int = 0
+    reserved_minor: int = 0
+    captured_minor: int = 0
+    refunded_minor: int = 0
+    released_minor: int = 0
+    status: str = Field(default="created", index=True)
+    provider: str | None = None
+    checkout_url: str | None = None
+    provider_session_id: str | None = None
+    created_at: datetime = Field(default_factory=now_utc)
+    funded_at: datetime | None = None
+
+
+class TaskBudgetLedgerEntry(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("budget_id", "operation_id", name="uq_task_budget_operation_id"),)
+
+    id: str = Field(primary_key=True)
+    budget_id: str = Field(index=True)
+    quote_id: str | None = Field(default=None, index=True)
+    operation_id: str = Field(index=True)
+    amount_minor: int
+    currency: str = Field(default="USD", index=True)
+    status: str = Field(index=True)
+    reason: str = ""
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class FulfillmentEvent(SQLModel, table=True):
     id: str = Field(primary_key=True)
     quote_id: str = Field(index=True)

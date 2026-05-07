@@ -49,6 +49,8 @@ from .models import (
     Quote,
     RailConnection,
     SpendLedgerEntry,
+    TaskBudget,
+    TaskBudgetLedgerEntry,
     WebhookDeliveryAttempt,
 )
 from .money import quote_hash, validate_breakdown
@@ -111,6 +113,9 @@ from .schemas import (
     SpendAuthorizationRead,
     SpendCaptureRequest,
     StripeConnectStartResponse,
+    TaskBudgetCreate,
+    TaskBudgetFundResponse,
+    TaskBudgetRead,
     X402ConfigureRequest,
     X402PaidActionCreate,
     X402PaidActionCreateResponse,
@@ -1439,6 +1444,81 @@ def _premium_command_preview(payload: PremiumActionCreate, service_url: str | No
     return f"{method} {target} (agent executes externally after Payjent authorization)"
 
 
+def _budget_to_read(b: TaskBudget) -> dict:
+    return {
+        "id": b.id, "bot_id": b.bot_id, "external_user_id": b.external_user_id, "task_id": b.task_id,
+        "max_amount_minor": b.max_amount_minor, "currency": b.currency, "available_minor": b.available_minor,
+        "reserved_minor": b.reserved_minor, "captured_minor": b.captured_minor, "refunded_minor": b.refunded_minor,
+        "released_minor": b.released_minor, "status": b.status, "provider": b.provider, "checkout_url": b.checkout_url,
+    }
+
+
+@app.post("/api/v1/task-budgets", response_model=TaskBudgetRead)
+def create_task_budget(payload: TaskBudgetCreate, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, payload.bot_id)
+    b = TaskBudget(id=f"tb_{uuid4().hex}", bot_id=payload.bot_id, external_user_id=payload.external_user_id, task_id=payload.task_id, max_amount_minor=payload.max_amount_minor, currency=payload.currency.upper(), status="created")
+    session.add(b); session.commit(); session.refresh(b)
+    return _budget_to_read(b)
+
+
+@app.get("/api/v1/task-budgets/{budget_id}", response_model=TaskBudgetRead)
+def get_task_budget(budget_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    b = session.get(TaskBudget, budget_id)
+    if not b: raise HTTPException(404, "task budget not found")
+    _enforce_bot_scope(credential, b.bot_id)
+    return _budget_to_read(b)
+
+
+@app.post("/api/v1/task-budgets/{budget_id}/checkout", response_model=TaskBudgetFundResponse)
+def checkout_task_budget(budget_id: str, provider: str | None = Header(default=None, alias="X-Payjent-Provider"), session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    b = session.get(TaskBudget, budget_id)
+    if not b: raise HTTPException(404, "task budget not found")
+    _enforce_bot_scope(credential, b.bot_id)
+    b.provider = (provider or "stripe").lower(); b.checkout_url = f"https://payjent.com/api/v1/task-budgets/{b.id}/mock-fund"; b.status = "checkout_created"
+    session.add(b); session.commit(); session.refresh(b)
+    return {"budget": _budget_to_read(b), "checkout_url": b.checkout_url, "message": "Fund this task budget once, then reference task_budget_id for micro premium actions."}
+
+
+@app.post("/api/v1/task-budgets/{budget_id}/mock-fund", response_model=TaskBudgetRead)
+def mock_fund_task_budget(budget_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_operator_credential)):
+    b = session.get(TaskBudget, budget_id)
+    if not b: raise HTTPException(404, "task budget not found")
+    if b.status not in {"active", "closed"}:
+        b.available_minor = b.max_amount_minor - b.captured_minor - b.reserved_minor
+        b.status = "active" if b.available_minor > 0 else "closed"
+        b.provider = b.provider or "mock"; b.funded_at = b.funded_at or datetime.now(timezone.utc)
+        session.add(b); session.commit(); session.refresh(b)
+    return _budget_to_read(b)
+
+
+@app.post("/api/v1/task-budgets/{budget_id}/release-unused", response_model=TaskBudgetRead)
+def release_unused_task_budget(budget_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    b = session.get(TaskBudget, budget_id)
+    if not b: raise HTTPException(404, "task budget not found")
+    _enforce_bot_scope(credential, b.bot_id)
+    if b.available_minor > 0:
+        amount = b.available_minor; b.available_minor = 0; b.released_minor += amount; b.status = "closed"
+        session.add(TaskBudgetLedgerEntry(id=f"tbl_{uuid4().hex}", budget_id=b.id, operation_id=f"release_unused:{b.id}", amount_minor=amount, currency=b.currency, status="released", reason="release_unused"))
+    session.add(b); session.commit(); session.refresh(b)
+    return _budget_to_read(b)
+
+
+def _reserve_task_budget_for_action(payload: PremiumActionCreate, q: Quote, session: Session) -> TaskBudget | None:
+    if not payload.task_budget_id:
+        if payload.currency.upper() == "USD" and payload.amount_minor < 50:
+            raise HTTPException(status_code=402, detail="Sub-50 USD minor-unit premium actions require an active funded task_budget_id; create and fund /api/v1/task-budgets first.")
+        return None
+    b = session.get(TaskBudget, payload.task_budget_id)
+    if not b or b.status != "active" or b.available_minor < payload.amount_minor:
+        raise HTTPException(status_code=422, detail="task_budget_id must reference an active funded budget with sufficient available balance")
+    if b.bot_id != payload.bot_id or b.external_user_id != payload.external_user_id or b.currency.upper() != payload.currency.upper():
+        raise HTTPException(status_code=422, detail="task budget must match bot_id, external_user_id, and currency")
+    b.available_minor -= payload.amount_minor; b.reserved_minor += payload.amount_minor
+    session.add(TaskBudgetLedgerEntry(id=f"tbl_{uuid4().hex}", budget_id=b.id, quote_id=q.id, operation_id=f"reserve:{q.id}", amount_minor=payload.amount_minor, currency=b.currency, status="reserved", reason="premium_action_create"))
+    session.add(b); session.commit(); session.refresh(b)
+    return b
+
+
 def _create_premium_action_from_payload(
     payload: PremiumActionCreate,
     *,
@@ -1468,6 +1548,7 @@ def _create_premium_action_from_payload(
         "payjent_managed_execution": False,
         "payjent_execution_boundary": "agent_executes_after_payjent_authorization",
         "boundary": "agent_executes_after_payjent_authorization",
+        "task_budget_id": payload.task_budget_id,
     }
     _validate_premium_action_envelope(payload, envelope)
     action_payload = AgentActionCreate(
@@ -1481,15 +1562,29 @@ def _create_premium_action_from_payload(
         execution_envelope=envelope,
         callback_url=payload.callback_url,
     )
-    action = create_agent_action(
-        action_payload,
-        idempotency_key=idempotency_key,
-        provider=provider,
-        session=session,
-        settings=settings,
-        credential=credential,
-    )
-    data = action if isinstance(action, dict) else action.model_dump()
+    if payload.task_budget_id or (payload.currency.upper() == "USD" and payload.amount_minor < 50):
+        qread = create_quote(action_payload, session=session, settings=settings, credential=credential)
+        q = session.get(Quote, qread.id)
+        if not q:
+            raise HTTPException(500, "premium action quote was not persisted")
+        _reserve_task_budget_for_action(payload, q, session)
+        ps = PaymentSession(id=f"ps_{uuid4().hex}", quote_id=q.id, provider="task_budget", status="checkout_created", checkout_url=None, idempotency_key=idempotency_key)
+        session.add(ps); session.commit(); session.refresh(ps)
+        _issue_paid_session(session, ps, settings, provider="task_budget")
+        q.status = "paid"
+        session.add(q); session.commit(); session.refresh(q); session.refresh(ps)
+        resp = create_paid_action_response(quote=q, payment_session=ps)
+        data = resp if isinstance(resp, dict) else resp.model_dump()
+    else:
+        action = create_agent_action(
+            action_payload,
+            idempotency_key=idempotency_key,
+            provider=provider,
+            session=session,
+            settings=settings,
+            credential=credential,
+        )
+        data = action if isinstance(action, dict) else action.model_dump()
     return {
         **data,
         "provider": payload.provider,
@@ -1746,9 +1841,41 @@ def start_agent_action(action_id: str, payload: AgentActionConsumeRequest, sessi
     return consume_agent_action(action_id, payload, session=session, settings=settings, credential=credential)
 
 
+def _budget_for_quote(q: Quote, session: Session) -> TaskBudget | None:
+    budget_id = (q.execution_envelope or {}).get("task_budget_id")
+    return session.get(TaskBudget, budget_id) if budget_id else None
+
+
+def _transition_budget_reservation(q: Quote, session: Session, status: str, reason: str) -> bool:
+    b = _budget_for_quote(q, session)
+    if not b:
+        return False
+    existing = session.exec(select(TaskBudgetLedgerEntry).where(TaskBudgetLedgerEntry.budget_id == b.id, TaskBudgetLedgerEntry.operation_id == f"{status}:{q.id}")).first()
+    if existing:
+        return False
+    reserve = session.exec(select(TaskBudgetLedgerEntry).where(TaskBudgetLedgerEntry.budget_id == b.id, TaskBudgetLedgerEntry.operation_id == f"reserve:{q.id}")).first()
+    amount = reserve.amount_minor if reserve else q.amount_minor
+    if status == "captured":
+        b.reserved_minor = max(0, b.reserved_minor - amount); b.captured_minor += amount
+    elif status == "released":
+        b.reserved_minor = max(0, b.reserved_minor - amount); b.available_minor += amount; b.released_minor += amount
+    elif status == "refunded":
+        b.reserved_minor = max(0, b.reserved_minor - amount); b.available_minor += amount; b.refunded_minor += amount
+    if b.status == "closed" and b.available_minor > 0:
+        b.status = "active"
+    session.add(TaskBudgetLedgerEntry(id=f"tbl_{uuid4().hex}", budget_id=b.id, quote_id=q.id, operation_id=f"{status}:{q.id}", amount_minor=amount, currency=b.currency, status=status, reason=reason))
+    session.add(b); session.commit()
+    return True
+
+
 @app.post("/api/v1/agent-actions/{action_id}/complete", response_model=AgentActionCompleteResponse)
 def complete_agent_action(action_id: str, payload: FulfillmentCreate, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
     event = record_fulfillment(action_id, payload, session=session, credential=credential)
+    q = session.get(Quote, action_id)
+    if q and payload.status == "fulfilled":
+        _transition_budget_reservation(q, session, "captured", "agent_action_complete")
+    elif q and payload.status in {"failed", "refunded"}:
+        _transition_budget_reservation(q, session, "released", "agent_action_not_fulfilled")
     stored = session.get(FulfillmentEvent, event.id)
     if not stored:
         raise HTTPException(500, "agent action fulfillment was not persisted")
@@ -1779,6 +1906,7 @@ def fail_agent_action(action_id: str, payload: AgentActionFailRequest, session: 
     if not q:
         raise HTTPException(404, "quote not found")
     _enforce_bot_scope(credential, q.bot_id)
+    budget_release_attempted = _transition_budget_reservation(q, session, "released", "agent_action_failed")
     ps = session.exec(select(PaymentSession).where(PaymentSession.quote_id == q.id).order_by(PaymentSession.created_at.desc())).first()
     existing_refund = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "refunded")).first()
     if q.status == "refunded" and payload.refund and (existing_refund or (ps and ps.status == "refunded")):

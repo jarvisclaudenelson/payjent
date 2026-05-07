@@ -219,6 +219,37 @@ class PayShPremiumActionCreate(X402PaidActionCreate):
     """Backward-compatible alias for the generic x402/pay.sh paid action primitive."""
 
 
+class TaskBudgetCreate(BaseModel):
+    bot_id: str
+    external_user_id: str
+    task_id: str = Field(min_length=1)
+    max_amount_minor: int = Field(gt=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+
+
+class TaskBudgetRead(BaseModel):
+    id: str
+    bot_id: str
+    external_user_id: str
+    task_id: str
+    max_amount_minor: int
+    currency: str
+    available_minor: int
+    reserved_minor: int
+    captured_minor: int
+    refunded_minor: int
+    released_minor: int
+    status: str
+    provider: str | None = None
+    checkout_url: str | None = None
+
+
+class TaskBudgetFundResponse(BaseModel):
+    budget: TaskBudgetRead
+    checkout_url: str | None = None
+    message: str
+
+
 class PremiumActionCreate(BaseModel):
     bot_id: str
     external_user_id: str
@@ -241,6 +272,7 @@ class PremiumActionCreate(BaseModel):
     callback_url: str | None = None
     payjent_fulfillment_callback: bool = Field(default=False)
     payjent_managed_execution: bool = Field(default=False)
+    task_budget_id: str | None = None
 
     @field_validator("provider")
     @classmethod
