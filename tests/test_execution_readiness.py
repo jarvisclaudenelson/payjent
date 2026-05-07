@@ -19,7 +19,7 @@ def _x402_payload(**overrides):
 
 
 def test_paysponge_unauthenticated_blocked_no_payment_session(client, bot_headers, engine):
-    r = client.post("/api/v1/premium-actions/pay-sh", json=_x402_payload(), headers=bot_headers)
+    r = client.post("/api/v1/premium-actions/pay-sh", json=_x402_payload(readiness_mode="enforced"), headers=bot_headers)
     assert r.status_code == 409
     detail = r.json()["detail"]
     assert detail["ready_for_payment"] is False
@@ -50,6 +50,7 @@ def test_provider_preset_requires_agent_side_readiness(client, bot_headers, engi
         "cost_breakdown": [{"label": "quote", "amount_minor": 300}],
         "input": {"query": "agent payments"},
         "request_hash": "exa-not-ready",
+        "readiness_mode": "enforced",
     }
     blocked = client.post("/api/v1/premium-action-presets/exa.deep_search/actions", json=payload, headers=bot_headers)
     assert blocked.status_code == 409

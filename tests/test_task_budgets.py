@@ -9,6 +9,7 @@ def _premium_payload(amount=25, budget_id=None, request_hash="micro-1"):
         "cost_breakdown": [{"label": "provider", "amount_minor": amount}],
         "provider": "exa",
         "target_url": "https://payjent.com/provider/action",
+        "execution_readiness": {"provider_connected": True},
     }
     if budget_id:
         payload["task_budget_id"] = budget_id

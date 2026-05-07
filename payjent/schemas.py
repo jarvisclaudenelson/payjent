@@ -204,7 +204,7 @@ class X402PaidActionCreate(BaseModel):
     provider: str | None = "pay_sh"
     rail: str | None = "x402"
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
-    readiness_mode: Literal["enforced", "advisory"] = "enforced"
+    readiness_mode: Literal["enforced", "advisory"] = "advisory"
     execution_readiness: dict[str, Any] = Field(default_factory=dict)
     payjent_fulfillment_callback: bool = Field(
         default=False,
@@ -271,7 +271,7 @@ class PremiumActionCreate(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     description: str | None = None
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
-    readiness_mode: Literal["enforced", "advisory"] = "enforced"
+    readiness_mode: Literal["enforced", "advisory"] = "advisory"
     execution_readiness: dict[str, Any] = Field(default_factory=dict)
     callback_url: str | None = None
     payjent_fulfillment_callback: bool = Field(default=False)
@@ -417,7 +417,7 @@ class PremiumActionPresetActionCreate(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
     cost_breakdown: list[CostItem]
     input: dict[str, Any] = Field(default_factory=dict)
-    readiness_mode: Literal["enforced", "advisory"] = "enforced"
+    readiness_mode: Literal["enforced", "advisory"] = "advisory"
     execution_readiness: dict[str, Any] = Field(default_factory=dict)
     callback_url: str | None = None
 
@@ -436,7 +436,7 @@ class ExecutionReadinessRequest(BaseModel):
 class ExecutionReadinessCheckRequest(BaseModel):
     bot_id: str = Field(min_length=1)
     provider: str = Field(default="generic", min_length=1, max_length=64)
-    readiness_mode: Literal["enforced", "advisory"] = "enforced"
+    readiness_mode: Literal["enforced", "advisory"] = "advisory"
     execution_readiness: dict[str, Any] = Field(default_factory=dict)
 
 

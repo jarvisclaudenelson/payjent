@@ -14,6 +14,7 @@ def _preset_payload(**overrides):
         "cost_breakdown": [{"label": "exact provider quote", "amount_minor": 300}],
         "input": {"query": "agent payments"},
         "request_hash": "preset-hash",
+        "execution_readiness": {"provider_connected": True},
     }
     payload.update(overrides)
     return payload

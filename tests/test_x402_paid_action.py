@@ -19,6 +19,7 @@ def _payload(**overrides):
         "service_fqn": "example/provider",
         "resource": "task",
         "provider_metadata": {"catalog": "test", "quote_id": "provider-quote-1"},
+        "execution_readiness": {"runtime_ready": True, "can_execute_without_device_auth": True},
     }
     payload.update(overrides)
     return payload
