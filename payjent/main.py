@@ -58,6 +58,7 @@ from .models import (
 from .money import quote_hash, validate_breakdown
 from .providers.base import issue_receipt_and_grant
 from .providers.exa import ExaProviderError, ExaProviderNotConfigured, run_deep_search as run_exa_deep_search
+from .providers.elevenlabs import ElevenLabsProviderError, ElevenLabsProviderNotConfigured, run_text_to_speech as run_elevenlabs_text_to_speech
 from .providers.firecrawl import FirecrawlProviderError, FirecrawlProviderNotConfigured, run_scrape as run_firecrawl_scrape
 from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest
 from .providers.link import (
@@ -489,7 +490,7 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
     if not execution:
         raise HTTPException(404, "tool execution not found")
     _enforce_bot_scope(credential, execution.bot_id)
-    if execution.tool_id not in {"exa.deep_search", "firecrawl.scrape"}:
+    if execution.tool_id not in {"exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech"}:
         raise HTTPException(status_code=501, detail="managed execution adapter not implemented for tool")
     if execution.status == "executing":
         raise HTTPException(status_code=409, detail="tool execution is already executing")
@@ -503,9 +504,11 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
     try:
         if execution.tool_id == "exa.deep_search":
             result = run_exa_deep_search(execution.arguments_json or {}, api_key=settings.exa_api_key)
-        else:
+        elif execution.tool_id == "firecrawl.scrape":
             result = run_firecrawl_scrape(execution.arguments_json or {}, api_key=settings.firecrawl_api_key)
-    except (ExaProviderNotConfigured, FirecrawlProviderNotConfigured):
+        else:
+            result = run_elevenlabs_text_to_speech(execution.arguments_json or {}, api_key=settings.elevenlabs_api_key)
+    except (ExaProviderNotConfigured, FirecrawlProviderNotConfigured, ElevenLabsProviderNotConfigured):
         execution.status = "failed"
         execution.error_metadata_json = {"code": "provider_not_configured", "message": "managed provider is not configured"}
         execution.updated_at = datetime.now(timezone.utc)
@@ -517,7 +520,7 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
         execution.updated_at = datetime.now(timezone.utc)
         session.add(execution); session.commit(); session.refresh(execution)
         raise HTTPException(status_code=422, detail=str(exc))
-    except (ExaProviderError, FirecrawlProviderError):
+    except (ExaProviderError, FirecrawlProviderError, ElevenLabsProviderError):
         execution.status = "failed"
         execution.error_metadata_json = {"code": "provider_execution_failed", "message": "managed provider execution failed"}
         execution.updated_at = datetime.now(timezone.utc)
