@@ -179,7 +179,15 @@ def test_agent_action_stripe_provider_returns_hosted_payment_prompt(client, quot
         stripe_secret_key="sk_test_fake",
         public_base_url="https://payjent.example",
     )
-    monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_test_prompt", "https://checkout.stripe.test/prompt"))
+    captured = {}
+
+    def fake_stripe_checkout(quote, payment_session, settings):
+        captured["request_hash"] = quote.request_hash
+        captured["payment_session_id"] = payment_session.id
+        captured["payment_session_idempotency_key"] = payment_session.idempotency_key
+        return "cs_test_prompt", "https://checkout.stripe.test/prompt"
+
+    monkeypatch.setattr(main_module, "create_stripe_checkout_session", fake_stripe_checkout)
 
     response = client.post("/api/v1/agent-actions", json=quote_payload, headers=bot_headers)
 
@@ -188,6 +196,9 @@ def test_agent_action_stripe_provider_returns_hosted_payment_prompt(client, quot
     assert data["payment_url"] == "https://checkout.stripe.test/prompt"
     assert data["payment_prompt"]["payment_url"] == "https://checkout.stripe.test/prompt"
     assert "https://checkout.stripe.test/prompt" in data["payment_prompt"]["message"]
+    assert captured["request_hash"] == quote_payload["request_hash"]
+    assert captured["payment_session_id"].startswith("ps_")
+    assert captured["payment_session_idempotency_key"] is None
 
 
 def test_production_mock_and_local_checkout_fail_closed(client, engine, quote_payload):

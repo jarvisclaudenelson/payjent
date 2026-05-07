@@ -1318,7 +1318,7 @@ def create_agent_action(
     stored_quote = session.get(Quote, q.id)
     if not stored_quote:
         raise HTTPException(500, "agent action quote was not persisted")
-    ps = _create_checkout_for_quote(stored_quote, idempotency_key=idempotency_key or stored_quote.request_hash, provider=provider, session=session, settings=settings)
+    ps = _create_checkout_for_quote(stored_quote, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings)
     return create_paid_action_response(quote=stored_quote, payment_session=ps)
 
 
