@@ -96,7 +96,6 @@ def test_fail_endpoint_records_failed_event_and_mock_refund_idempotent(client, e
     failed = client.post(
         f"/api/v1/agent-actions/{action['action_id']}/fail",
         json={
-            "refund": True,
             "metadata": {
                 "error_code": "provider_500",
                 "api_key": "***",
@@ -115,12 +114,29 @@ def test_fail_endpoint_records_failed_event_and_mock_refund_idempotent(client, e
     assert "api_key" not in data["metadata"]
     assert data["metadata"]["nested"] == {"safe": "kept"}
     assert data["metadata"]["items"] == [{"message": "ok"}, {}]
-    duplicate = client.post(f"/api/v1/agent-actions/{action['action_id']}/fail", json={"refund": True}, headers=bot_headers)
+    duplicate = client.post(f"/api/v1/agent-actions/{action['action_id']}/fail", json={}, headers=bot_headers)
     assert duplicate.status_code == 200, duplicate.text
     assert duplicate.json()["refund_status"] == "already_refunded"
     with Session(engine) as session:
         refund_events = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == action["action_id"], FulfillmentEvent.status == "refunded")).all()
     assert len(refund_events) == 1
+
+
+def test_fail_endpoint_can_explicitly_opt_out_of_default_refund(client, engine, bot_headers, operator_headers):
+    payload = _preset_payload(request_hash="fail-no-refund-hash", input={"query": "no refund"})
+    action = client.post("/api/v1/premium-action-presets/exa.deep_search/actions", json=payload, headers=bot_headers).json()
+    client.post(f"/api/v1/payment-sessions/{action['payment_session_id']}/mock-pay", headers=operator_headers)
+
+    failed = client.post(f"/api/v1/agent-actions/{action['action_id']}/fail", json={"refund": False}, headers=bot_headers)
+
+    assert failed.status_code == 200, failed.text
+    data = failed.json()
+    assert data["refund_status"] == "not_requested"
+    assert data["payment_status"] == "paid"
+    assert data["quote_status"] == "failed"
+    with Session(engine) as session:
+        refund_events = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == action["action_id"], FulfillmentEvent.status == "refunded")).all()
+    assert refund_events == []
 
 
 def test_fail_endpoint_cross_bot_scope_blocked(client, engine, bot_headers, operator_headers):

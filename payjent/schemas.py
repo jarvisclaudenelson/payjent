@@ -372,7 +372,7 @@ class PremiumActionCreateResponse(AgentActionCreateResponse):
 
 class AgentActionFailRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
-    refund: bool = False
+    refund: bool = True
     reason: str = Field(default="provider_execution_failed", min_length=1, max_length=300)
 
 
