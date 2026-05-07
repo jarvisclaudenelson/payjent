@@ -27,7 +27,13 @@ def test_public_manifest_returns_safe_tool_discovery(client):
     assert "paid-before-execute" in data["security_invariants"]
     assert "exact provider/merchant quoted price required; no placeholder/default/test amounts" in data["security_invariants"]
     assert data["pricing_policy"]["rule"] == "exact_provider_quote_required"
+    assert data["public_base_url"] == "https://payjent.com"
     manifest_text = json.dumps(data).lower()
+    assert "task budget" in manifest_text
+    assert "execution readiness" in manifest_text
+    assert "auto-resume" in manifest_text
+    assert "refund by default" in manifest_text
+    assert "dashboard/platform connections" in manifest_text
     assert "exact provider/merchant quoted price" in manifest_text
     assert "do not use placeholder" in manifest_text
     assert "if the exact price is unknown, do not create the paid action" in manifest_text
@@ -119,3 +125,9 @@ def test_agent_setup_docs_mention_discovery_endpoints(client):
     assert response.status_code == 200
     assert "/.well-known/payjent-tools.json" in response.text
     assert "/api/v1/agent-capabilities" in response.text
+    assert "https://payjent.com" in response.text
+    assert "task budget" in response.text.lower()
+    assert "spend control" in response.text.lower()
+    assert "dashboard/platform connections" in response.text.lower()
+    assert "do not ask" in response.text.lower()
+    assert "PAYJENT_SIGNING_SECRET" not in response.text

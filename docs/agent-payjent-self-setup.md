@@ -2,11 +2,13 @@
 
 Audience: any agent reading this page directly.
 
-Canonical URL: `https://payjent.vercel.app/docs/agent-payjent-self-setup.md`
+Canonical URL: `https://payjent.com/docs/agent-payjent-self-setup.md`
 
 ## What Payjent is
 
-Payjent is a payment gate for agent actions.
+Payjent is a spend control and payment gate for agent actions.
+
+It helps an agent turn premium work into a human-approved task budget, wait for execution readiness, auto-resume the stored request after payment, and request a refund by default when paid downstream execution fails.
 
 When a user asks you for premium work, Payjent lets you:
 
@@ -48,7 +50,7 @@ The install link is a bearer setup secret, but it is scoped, short-lived, and si
 
 If a user asks you to use Payjent, do not ask them for code snippets, environment variables, Payjent agent ids, private credentials, grants, or raw payment tokens in chat.
 
-You should instead ask the operator to authorize you in Payjent and give you a one-time Agent Install Link, or use a platform secret store, vault, or bot configuration page. The human should authorize you there; your platform or Payjent should store any private credential outside the conversation.
+You should instead ask the operator to authorize you in Payjent and give you a one-time Agent Install Link, or use dashboard/platform connections, a platform secret store, vault, or bot configuration page. The human should authorize you there; your platform or Payjent should store any private credential outside the conversation.
 
 ## Readiness states
 
