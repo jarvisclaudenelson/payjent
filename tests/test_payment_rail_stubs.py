@@ -268,6 +268,37 @@ def test_stripe_adapter_builds_checkout_payload_idempotency_and_metadata():
     assert calls["payload"]["payment_intent_data"]["metadata"] == calls["payload"]["metadata"]
 
 
+def test_stripe_checkout_uses_payjent_com_when_production_env_has_legacy_vercel_base_url():
+    quote = Quote(
+        id="quote_prod_canonical",
+        bot_id="bot-1",
+        external_user_id="user-1",
+        request_summary="do a thing",
+        request_hash="hash-prod-canonical",
+        amount_minor=250,
+        currency="USD",
+        cost_breakdown=[{"label": "work", "amount_minor": 250}],
+        quote_hash="qh-prod-canonical",
+    )
+    payment_session = PaymentSession(id="ps_prod_canonical", quote_id="quote_prod_canonical", provider="stripe")
+    calls = {}
+
+    class FakeStripeClient:
+        def create_checkout_session(self, payload, idempotency_key):
+            calls["payload"] = payload
+            return {"id": "cs_prod_canonical", "url": "https://checkout.stripe.test/session"}
+
+    create_stripe_checkout_session(
+        quote,
+        payment_session,
+        Settings(env="production", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.vercel.app"),
+        client=FakeStripeClient(),
+    )
+
+    assert calls["payload"]["success_url"] == "https://payjent.com/status/ps_prod_canonical?checkout=success"
+    assert calls["payload"]["cancel_url"] == "https://payjent.com/pay/ps_prod_canonical?checkout=cancelled"
+
+
 def test_stripe_adapter_accepts_stripe_sdk_object_response_without_get_method():
     quote = Quote(
         id="quote_sdk_object",

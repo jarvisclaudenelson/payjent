@@ -248,6 +248,11 @@ def _format_money(amount_minor: int, currency: str) -> str:
     return f"{amount_minor / 100:.2f} {currency.upper()}"
 
 
+_STATUS_PAGE_CSS = """<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>
+:root{--bg:#f6f9fc;--card:#fff;--ink:#061b31;--muted:#64748d;--label:#273951;--line:#e5edf5;--accent:#533afd;--accent2:#ea2261;--ok:#108c3d;--okbg:rgba(21,190,83,.16);--warn:#9b6829;--shadow:rgba(50,50,93,.25) 0 30px 45px -30px,rgba(0,0,0,.1) 0 18px 36px -18px}*{box-sizing:border-box}html{background:var(--bg)}body{margin:0;min-height:100vh;color:var(--ink);font-family:'Source Sans 3',Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased;background:radial-gradient(circle at 15% -10%,rgba(83,58,253,.16),transparent 30rem),radial-gradient(circle at 95% 0%,rgba(234,34,97,.12),transparent 24rem),var(--bg)}main{width:min(960px,100%);margin:0 auto;padding:40px 20px 56px}.shell{display:grid;gap:18px}.brand{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}.logo{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:-.01em}.mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),#7b61ff);box-shadow:rgba(83,58,253,.25) 0 14px 28px -12px;display:grid;place-items:center;color:white;font-weight:700}.domain{color:var(--muted);font-size:14px}.hero{padding:30px 28px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.86);box-shadow:var(--shadow);backdrop-filter:blur(14px)}.eyebrow{font-size:13px;text-transform:uppercase;letter-spacing:.11em;color:var(--accent);font-weight:700;margin-bottom:10px}h1{font-size:clamp(34px,7vw,54px);line-height:1.02;letter-spacing:-1.2px;font-weight:300;margin:0 0 12px;color:var(--ink)}p{font-size:17px;line-height:1.48;margin:0}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:20px;box-shadow:rgba(23,23,23,.06) 0 10px 26px}.card h2,.card h3{font-weight:400;letter-spacing:-.02em;margin:0 0 10px;color:var(--ink)}.status-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(21,190,83,.35);background:var(--okbg);color:var(--ok);border-radius:999px;padding:6px 10px;font-weight:700}.dot{width:8px;height:8px;border-radius:999px;background:#15be53;box-shadow:0 0 0 4px rgba(21,190,83,.15)}.kv{display:grid;gap:10px;margin-top:14px}.row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px;align-items:start}.label{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}.value{min-width:0;overflow-wrap:anywhere;color:var(--label)}code{font-family:'Source Code Pro',ui-monospace,SFMono-Regular,Menlo,monospace;background:#f3f6fb;border:1px solid #e8eef7;border-radius:6px;padding:2px 5px;font-size:.9em}.timeline{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:10px}.timeline li{display:flex;gap:10px;align-items:flex-start;color:var(--label)}.check{width:22px;height:22px;border-radius:999px;background:var(--okbg);color:var(--ok);display:grid;place-items:center;font-size:14px;flex:0 0 auto}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}.btn{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:10px 15px;border-radius:8px;background:var(--accent);color:white;text-decoration:none;font-weight:700;box-shadow:rgba(83,58,253,.24) 0 12px 24px -10px}.btn.secondary{background:#fff;color:var(--accent);border:1px solid #d6d9fc;box-shadow:none}.fine{font-size:14px;color:var(--muted);line-height:1.45}.linkbox{border:1px solid #d6d9fc;background:#fbfcff;border-radius:12px;padding:16px}pre{white-space:pre-wrap;overflow:auto;background:#061b31;color:#fff;border-radius:10px;padding:14px}@media(max-width:700px){main{padding:24px 14px 42px}.brand{align-items:flex-start}.hero{padding:24px 20px;border-radius:14px}.grid{grid-template-columns:1fr}.row{grid-template-columns:1fr;gap:3px}.domain{display:none}.actions{display:grid}.btn{width:100%}}
+</style>"""
+
+
 def _checkout_provider(settings: Settings) -> str:
     return (settings.checkout_provider or "mock").lower()
 
@@ -357,7 +362,7 @@ def browser_mock_pay(payment_session_id: str, session: Session = Depends(get_ses
 
 @app.get("/status", response_class=HTMLResponse)
 def status_index():
-    return """<!doctype html><html><head><title>Payjent status</title></head><body><h1>Payjent status</h1><p>Open <code>/status/{payment_session_id}</code> to view a payment session.</p></body></html>"""
+    return f"""<!doctype html><html><head><title>Payjent status · Paid agent action</title>{_STATUS_PAGE_CSS}</head><body><main><div class='brand'><div class='logo'><span class='mark'>P</span><span>Payjent</span></div><span class='domain'>payjent.com</span></div><section class='hero'><div class='eyebrow'>Payment status</div><h1>Track a paid agent action.</h1><p class='muted'>Open <code>/status/{{payment_session_id}}</code> to view payment, grant, and fulfillment state for an approved action.</p></section></main></body></html>"""
 
 
 @app.get("/healthz")
@@ -377,10 +382,12 @@ def healthz(session: Session = Depends(get_session)):
 @app.get("/status/{payment_session_id}", response_class=HTMLResponse)
 def status_page(payment_session_id: str, session: Session = Depends(get_session)):
     ps, q, grant, fulfillment = _find_session_bundle(session, payment_session_id)
-    fulfillment_items = "".join(f"<li>{_html_escape(ev.status)} <code>{_html_escape(ev.id)}</code></li>" for ev in fulfillment) or "<li>none</li>"
-    grant_state = "not issued"
+    fulfillment_items = "".join(f"<li><span class='check'>•</span><span>{_html_escape(ev.status)} <code>{_html_escape(ev.id)}</code></span></li>" for ev in fulfillment) or "<li><span class='check'>•</span><span>No fulfillment has been recorded yet.</span></li>"
+    grant_state = "Access has not been issued yet. Your agent is still waiting for payment confirmation."
     if grant:
-        grant_state = f"issued; consumed: {_html_escape(grant.consumed_at is not None)}; agent will resume automatically"
+        grant_state = "Access granted. Your agent can resume automatically."
+        if grant.consumed_at is not None:
+            grant_state = "Access was used. Your agent has already resumed this action."
     link_instructions = ""
     if ps.provider == "link" and ps.status != "paid":
         link_instructions = f"""
@@ -392,19 +399,11 @@ def status_page(payment_session_id: str, session: Session = Depends(get_session)
         <p>Payjent will return a Link approval URL and polling hint. Approval does not mark this session paid or issue a grant.</p>
       </section>
         """
-    return f"""
-    <!doctype html><html><head><title>Payjent status</title><style>body{{font-family:system-ui;margin:2rem;max-width:760px}}code{{background:#eee;padding:.1rem .25rem}}</style></head>
-    <body>
-      <h1>Payjent status</h1>
-      <p>Payment session: <code>{_html_escape(ps.id)}</code></p>
-      <p>Payment status: <strong>{_html_escape(ps.status)}</strong></p>
-      <p>Quote: <code>{_html_escape(q.id)}</code> ({_html_escape(q.status)})</p>
-      <p>Access: {grant_state}</p>
-      {link_instructions}
-      <h2>Fulfillment</h2><ul>{fulfillment_items}</ul>
-      <p><a href="/pay/{_html_escape(ps.id)}">Back to checkout</a></p>
-    </body></html>
-    """
+    has_failure = q.status == "failed" or any(ev.status == "failed" for ev in fulfillment)
+    checkout_label = "Action needs attention" if has_failure else ("Payment complete" if ps.status == "paid" else "Awaiting payment")
+    hero_copy = "The payment checkpoint succeeded, but the downstream action reported a failure. The agent can request a refund through Payjent." if has_failure else "Payjent has recorded the payment checkpoint. Your agent can resume the exact request once the grant is available."
+    access_copy = _html_escape(grant_state)
+    return f"""<!doctype html><html><head><title>Payjent status · {_html_escape(ps.status)}</title>{_STATUS_PAGE_CSS}</head><body><main><div class='brand'><div class='logo'><span class='mark'>P</span><span>Payjent</span></div><span class='domain'>payjent.com</span></div><div class='shell'><section class='hero'><div class='eyebrow'>Paid agent action</div><h1>{_html_escape(checkout_label)}</h1><p class='muted'>{_html_escape(hero_copy)}</p><div class='actions'><a class='btn' href='/pay/{_html_escape(ps.id)}'>Review approval</a><a class='btn secondary' href='https://payjent.com'>Payjent.com</a></div></section><section class='grid'><div class='card'><h2>Payment</h2><span class='status-pill'><span class='dot'></span>{_html_escape(ps.status)}</span><div class='kv'><div class='row'><div class='label'>Session</div><div class='value'><code>{_html_escape(ps.id)}</code></div></div><div class='row'><div class='label'>Quote</div><div class='value'><code>{_html_escape(q.id)}</code> <span class='fine'>({_html_escape(q.status)})</span></div></div><div class='row'><div class='label'>Amount</div><div class='value'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div></div></div></div><div class='card'><h2>Access</h2><p>{access_copy}</p><ul class='timeline'><li><span class='check'>✓</span><span>Grant details stay hidden on this public page.</span></li><li><span class='check'>✓</span><span>The agent resumes only the stored request hash.</span></li></ul></div></section>{link_instructions}<section class='card'><h2>Fulfillment</h2><ul class='timeline'>{fulfillment_items}</ul><p class='fine'>If the downstream action fails, the agent can report failure and request a refund through Payjent.</p></section></div></main></body></html>"""
 
 
 def _rail_to_read(r: RailConnection) -> RailConnectionRead:
@@ -711,7 +710,7 @@ def _create_agent_profile_from_form(form: dict[str, str], account: Account, sess
 
 
 def _public_base_url(request: Request, settings: Settings) -> str:
-    return (settings.public_base_url or str(request.base_url).rstrip("/")).rstrip("/")
+    return (settings.canonical_public_base_url or settings.public_base_url or str(request.base_url).rstrip("/")).rstrip("/")
 
 
 def _install_token_hash(token: str, settings: Settings) -> str:

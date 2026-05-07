@@ -56,7 +56,7 @@ class StripeSDKCheckoutClient:
 def build_checkout_urls(settings: Settings, payment_session_id: str) -> tuple[str, str]:
     if not settings.public_base_url:
         raise HTTPException(status_code=503, detail="PAYJENT_PUBLIC_BASE_URL is required for Stripe checkout")
-    base = settings.public_base_url.rstrip("/")
+    base = settings.canonical_public_base_url or settings.public_base_url.rstrip("/")
     values = {"payment_session_id": payment_session_id}
     success_template = settings.stripe_success_url_template or f"{base}/status/{{payment_session_id}}?checkout=success"
     cancel_template = settings.stripe_cancel_url_template or f"{base}/pay/{{payment_session_id}}?checkout=cancelled"

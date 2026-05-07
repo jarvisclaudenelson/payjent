@@ -66,7 +66,8 @@ def test_browser_mock_pay_post_action_pays_and_redirects_without_tokens(client, 
     assert status.status_code == 200
     assert bot_status["status"] == "paid"
     assert "Paid — one-time grant issued" in paid_page.text
-    assert "Access: issued" in status.text
+    assert "Access" in status.text
+    assert "Access granted" in status.text
     for html in (paid_page.text, status.text):
         assert payment_session["id"] in html
         assert "payment_token" not in html
@@ -154,9 +155,12 @@ def test_status_pages_show_payment_access_and_fulfillment_without_grant_id(clien
     assert index.status_code == 200
     assert "Payjent status" in index.text
     assert status.status_code == 200
-    assert "Payment status" in status.text
+    assert "Payment" in status.text
+    assert "Payment complete" in status.text
+    assert "payjent.com" in status.text
+    assert "viewport" in status.text
     assert "paid" in status.text
-    assert "Access:" in status.text
+    assert "Access" in status.text
     assert paid["grant"]["id"] not in status.text
     assert "fulfilled" in status.text
 
@@ -177,7 +181,7 @@ def test_public_pay_and_status_hide_paid_payment_token_but_bot_polling_returns_i
         assert "payment_token" not in html
         assert not re.search(r"grant_[A-Za-z0-9_-]+", html)
     assert "agent will resume automatically" in pay_page.text
-    assert "agent will resume automatically" in status_page.text
+    assert "Access granted" in status_page.text
     assert bot_status["payment_token"] == token
     assert bot_status["payment_token_status"] == "available"
 

@@ -2,8 +2,9 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEFAULT_SIGNING_SECRET = "dev-only-change-me"
+DEFAULT_SIGNING_SECRET="dev-on...e-me"
 PRODUCTION_ENV_NAMES = {"prod", "production"}
+CANONICAL_PUBLIC_BASE_URL = "https://payjent.com"
 
 
 class Settings(BaseSettings):
@@ -49,6 +50,15 @@ class Settings(BaseSettings):
         if normalized in {"sqlite:///./payjent.db", "sqlite:///payjent.db", "sqlite:///:memory:", "sqlite://"}:
             return False
         return not normalized.startswith("sqlite:")
+
+    @property
+    def canonical_public_base_url(self) -> str | None:
+        if not self.public_base_url:
+            return None
+        public_base_url = self.public_base_url.rstrip("/")
+        if self.is_production and public_base_url in {"https://payjent.vercel.app", "https://www.payjent.com"}:
+            return CANONICAL_PUBLIC_BASE_URL
+        return public_base_url
 
     def validate_runtime_guardrails(self) -> None:
         """Fail closed for unsafe production configuration before serving traffic."""
