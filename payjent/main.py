@@ -446,7 +446,9 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
     _enforce_bot_scope(credential, execution.bot_id)
     if execution.tool_id != "exa.deep_search":
         raise HTTPException(status_code=501, detail="managed execution adapter not implemented for tool")
-    if execution.status not in {"ready_to_execute", "paid", "executing"}:
+    if execution.status == "executing":
+        raise HTTPException(status_code=409, detail="tool execution is already executing")
+    if execution.status not in {"ready_to_execute", "paid"}:
         raise HTTPException(status_code=409, detail="tool execution must be paid before run")
 
     now = datetime.now(timezone.utc)

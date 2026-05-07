@@ -20,9 +20,22 @@ class ExaProviderError(RuntimeError):
 Transport = Callable[[dict[str, Any], str], dict[str, Any]]
 
 
-def validate_deep_search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+def _is_secret_like_key(key: Any) -> bool:
+    normalized = str(key).lower().replace("-", "_")
     disallowed_secret_keys = {"api_key", "apikey", "authorization", "token", "secret", "password"}
-    if any(str(key).lower().replace("-", "_") in disallowed_secret_keys for key in arguments):
+    return normalized in disallowed_secret_keys
+
+
+def _contains_secret_like_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_is_secret_like_key(key) or _contains_secret_like_key(nested) for key, nested in value.items())
+    if isinstance(value, list):
+        return any(_contains_secret_like_key(item) for item in value)
+    return False
+
+
+def validate_deep_search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    if _contains_secret_like_key(arguments):
         raise ValueError("provider credentials are not accepted in toolbox arguments")
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
@@ -96,8 +109,6 @@ def run_deep_search(arguments: dict[str, Any], *, api_key: str | None, transport
     try:
         data = (transport or _default_transport)(payload, api_key)
     except ExaProviderNotConfigured:
-        raise
-    except ValueError:
         raise
     except Exception as exc:
         raise ExaProviderError("provider_execution_failed") from exc

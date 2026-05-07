@@ -2,6 +2,7 @@ import json
 
 from sqlmodel import Session
 
+from payjent.auth import create_bot_credential
 from payjent.config import Settings, get_settings
 from payjent.main import app
 from payjent.models import ToolExecution
@@ -39,6 +40,36 @@ def test_managed_exa_run_rejects_unpaid(client, bot_headers, engine):
     execution_id = _ready_execution(engine, status="payment_required")
     response = client.post(f"/api/v1/toolbox/executions/{execution_id}/run", headers=bot_headers)
     assert response.status_code == 409
+
+
+def test_managed_exa_run_rejects_executing_without_provider_call(client, bot_headers, engine, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(exa_api_key="test-exa-secret")
+
+    def fail_if_called(arguments, *, api_key):  # pragma: no cover - assertion guard
+        raise AssertionError("provider must not be called for executing replay")
+
+    monkeypatch.setattr("payjent.main.run_exa_deep_search", fail_if_called)
+    execution_id = _ready_execution(engine, status="executing")
+    response = client.post(f"/api/v1/toolbox/executions/{execution_id}/run", headers=bot_headers)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "tool execution is already executing"
+
+
+def test_managed_exa_run_requires_auth(client, engine):
+    execution_id = _ready_execution(engine)
+    response = client.post(f"/api/v1/toolbox/executions/{execution_id}/run")
+    assert response.status_code in {401, 403}
+
+
+def test_managed_exa_run_rejects_wrong_bot(client, engine):
+    with Session(engine) as session:
+        create_bot_credential(session, "bot-2", "test-bot-2-key", get_settings().signing_secret)
+    execution_id = _ready_execution(engine)
+    response = client.post(
+        f"/api/v1/toolbox/executions/{execution_id}/run",
+        headers={"Authorization": "Bearer test-bot-2-key"},
+    )
+    assert response.status_code == 403
 
 
 def test_managed_exa_run_succeeds_with_mocked_provider(client, bot_headers, engine, monkeypatch):
@@ -111,3 +142,47 @@ def test_managed_exa_adapter_validates_and_sanitizes_response():
     assert result["result_count"] == 1
     assert len(result["results"][0]["text"]) == 1000
     _assert_no_secret_or_executable_marker(result)
+
+
+def test_managed_exa_adapter_rejects_invalid_input_before_transport():
+    from payjent.providers.exa import run_deep_search
+
+    calls = 0
+
+    def fake_transport(payload, api_key):  # pragma: no cover - assertion guard
+        nonlocal calls
+        calls += 1
+        return {"results": []}
+
+    invalid_arguments = [
+        ({"query": ""}, "query is required"),
+        ({"query": "x" * 501}, "query must be at most 500 characters"),
+        ({"query": "ok", "num_results": 0}, "num_results must be between 1 and 10"),
+        ({"query": "ok", "num_results": 11}, "num_results must be between 1 and 10"),
+        ({"query": "ok", "num_results": "many"}, "num_results must be an integer"),
+        ({"query": "ok", "api_key": "test-exa-secret"}, "provider credentials are not accepted"),
+        ({"query": "ok", "filters": {"headers": {"Authorization": "Bearer test-exa-secret"}}}, "provider credentials are not accepted"),
+        ({"query": "ok", "items": [{"token": "test-exa-secret"}]}, "provider credentials are not accepted"),
+    ]
+    for arguments, expected in invalid_arguments:
+        try:
+            run_deep_search(arguments, api_key="test-exa-secret", transport=fake_transport)
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:  # pragma: no cover - assertion guard
+            raise AssertionError(f"expected ValueError for {arguments}")
+    assert calls == 0
+
+
+def test_managed_exa_adapter_sanitizes_transport_value_error():
+    from payjent.providers.exa import ExaProviderError, run_deep_search
+
+    def fake_transport(payload, api_key):
+        raise ValueError("raw provider body includes test-exa-secret")
+
+    try:
+        run_deep_search({"query": "valid", "num_results": 1}, api_key="test-exa-secret", transport=fake_transport)
+    except ExaProviderError as exc:
+        assert str(exc) == "provider_execution_failed"
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected ExaProviderError")
