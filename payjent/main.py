@@ -102,6 +102,8 @@ from .schemas import (
     SpendCaptureRequest,
     StripeConnectStartResponse,
     X402ConfigureRequest,
+    X402PaidActionCreate,
+    X402PaidActionCreateResponse,
 )
 from .signing import PAYJENT_SIGNATURE_HEADER, PAYJENT_TIMESTAMP_HEADER, sign_webhook_payload, verify_signature
 
@@ -154,7 +156,8 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
-        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Flow: create action, user pays Stripe/Payjent, agent polls/status, agent consumes the payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then the agent executes externally with its pay.sh/x402 runtime and marks complete. Payjent does not POST service_url or execute the downstream task; payjent_managed_execution is a legacy alias and legacy payjent_fulfillment_callback/payjent_managed_execution flags are ignored for pay.sh actions.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_x402_paid_action", "endpoint": "/api/v1/premium-actions/x402", "method": "POST", "description": "Generic primitive for any x402/pay.sh-compatible paid URL. Requires an exact provider quote up front; creates a request-bound Payjent payment/grant and x402/pay.sh execution envelope. Flow: create action, user pays Stripe/Payjent, agent polls/status, agent consumes payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then agent executes target_url/service_url externally and marks complete. Payjent never POSTs the target URL or stores Authorization/Cookie/API-key headers.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_spend_authorization"},
+        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Backward-compatible alias for payjent.create_x402_paid_action. Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Payjent does not POST service_url or execute the downstream task; payjent_managed_execution is a legacy alias and legacy payjent_fulfillment_callback/payjent_managed_execution flags are ignored for pay.sh actions.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.create_bigquery_paid_query", "endpoint": "/api/v1/premium-actions/pay-sh/bigquery-query", "method": "POST", "description": "Preset for the real pay.sh public catalog BigQuery gateway service solana-foundation/google/bigquery resource jobs. Creates a pay.sh/x402 action for POST https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries with body {query,useLegacySql}. User pays Stripe/Payjent first; agent consumes grant, calls payjent.authorize_x402_spend with capture=true, then agent executes externally using pay curl/pay.sh. Payjent does not execute BigQuery.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "preset": {"provider": "pay_sh", "service_fqn": "solana-foundation/google/bigquery", "resource": "jobs", "gateway": "https://bigquery.google.gateway-402.com/bigquery/v2", "method": "POST", "path_template": "/projects/{project_id}/queries", "execution_boundary": "agent_executes_after_spend_authorization"}},
         {"name": "payjent.create_purchase_fulfillment", "endpoint": "/api/v1/purchase-actions", "method": "POST", "description": "Create an Amazon-style merchant purchase/procurement handoff only after obtaining an exact merchant quote. The human pays Stripe/Payjent; Payjent verifies payment and sends a signed, verified POST fulfillment callback to an allowlisted procurement executor. The executor buys from Amazon or the merchant using its configured procurement/payment method. Payjent does not send funds to the agent and does not directly pay Amazon unless the downstream executor/provider rail does that.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "requires_fulfillment_callback": True},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
@@ -1299,28 +1302,52 @@ def create_agent_action(
     return create_paid_action_response(quote=stored_quote, payment_session=ps)
 
 
-@app.post("/api/v1/premium-actions/pay-sh", response_model=PayShPremiumActionCreateResponse)
-def create_pay_sh_premium_action(
-    payload: PayShPremiumActionCreate,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
-    session: Session = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-    credential: BotCredential = Depends(require_bot_credential),
-):
+def _reject_secret_headers(headers: dict[str, str] | None) -> None:
+    for name in (headers or {}):
+        normalized = str(name).lower().replace("-", "_")
+        if any(marker in normalized for marker in _SECRET_HEADER_MARKERS):
+            raise HTTPException(status_code=422, detail=f"x402 action envelope may not store secret-like outbound header: {name}")
+
+
+def _validate_generic_x402_envelope(envelope: dict, settings: Settings) -> None:
+    # Payjent is not executing the target, so do not require the managed-execution allowlist.
+    # Still reject unsafe/private URLs and secret-like headers in the stored request envelope.
+    if envelope.get("service_url"):
+        ok, reason = _safe_public_https_url(envelope.get("service_url"))
+        if not ok:
+            raise HTTPException(status_code=422, detail=reason)
+    _reject_secret_headers(envelope.get("headers") or {})
+
+
+def _create_x402_action_from_payload(
+    payload: X402PaidActionCreate,
+    *,
+    idempotency_key: str | None,
+    provider: str | None,
+    session: Session,
+    settings: Settings,
+    credential: BotCredential,
+    strict_generic: bool,
+) -> dict:
+    if strict_generic and (payload.payjent_fulfillment_callback or payload.payjent_managed_execution):
+        raise HTTPException(status_code=422, detail="generic x402 actions are authorization-only; Payjent does not execute target_url/service_url")
+    service_url = payload.service_url or payload.target_url
     try:
         envelope = build_paysh_execution_envelope(
-            service_url=payload.service_url,
+            service_url=service_url,
             service_fqn=payload.service_fqn,
             resource=payload.resource,
             method=payload.method,
             body=payload.body,
             headers=payload.headers,
             description=payload.description or payload.request_summary,
-            payjent_fulfillment_callback=payload.payjent_fulfillment_callback,
-            payjent_managed_execution=payload.payjent_managed_execution,
+            payjent_fulfillment_callback=False,
+            payjent_managed_execution=False,
         )
-        _validate_managed_execution_envelope(envelope, settings)
+        envelope["provider_metadata"] = dict(payload.provider_metadata or {})
+        envelope["rail"] = payload.rail or "x402"
+        if strict_generic:
+            _validate_generic_x402_envelope(envelope, settings)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     action_payload = AgentActionCreate(
@@ -1343,7 +1370,47 @@ def create_pay_sh_premium_action(
         credential=credential,
     )
     data = action if isinstance(action, dict) else action.model_dump()
-    return {**data, "provider": "pay_sh", "premium_provider": "pay_sh", "command_preview": envelope["command_preview"]}
+    return {
+        **data,
+        "provider": "pay_sh",
+        "premium_provider": "pay_sh",
+        "command_preview": envelope["command_preview"],
+        "request_fingerprint": data["request_hash"],
+        "execution_boundary": envelope["payjent_execution_boundary"],
+        "provider_metadata": envelope.get("provider_metadata") or {},
+    }
+
+
+@app.post("/api/v1/premium-actions/x402", response_model=X402PaidActionCreateResponse)
+def create_x402_paid_action(
+    payload: X402PaidActionCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    return _create_x402_action_from_payload(
+        payload,
+        idempotency_key=idempotency_key,
+        provider=provider,
+        session=session,
+        settings=settings,
+        credential=credential,
+        strict_generic=True,
+    )
+
+
+@app.post("/api/v1/premium-actions/pay-sh", response_model=PayShPremiumActionCreateResponse)
+def create_pay_sh_premium_action(
+    payload: PayShPremiumActionCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    return _create_x402_action_from_payload(payload, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings, credential=credential, strict_generic=False)
 
 
 @app.post("/api/v1/premium-actions/pay-sh/bigquery-query", response_model=PayShPremiumActionCreateResponse)

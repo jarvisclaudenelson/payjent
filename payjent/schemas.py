@@ -185,7 +185,7 @@ class AgentActionCreate(QuoteCreate):
     """
 
 
-class PayShPremiumActionCreate(BaseModel):
+class X402PaidActionCreate(BaseModel):
     bot_id: str
     external_user_id: str
     request_summary: str
@@ -194,21 +194,29 @@ class PayShPremiumActionCreate(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
     cost_breakdown: list[CostItem]
     service_url: str | None = None
+    target_url: str | None = None
     service_fqn: str | None = None
     resource: str | None = None
     method: str = "POST"
     body: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     description: str | None = None
+    provider: str | None = "pay_sh"
+    rail: str | None = "x402"
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
     payjent_fulfillment_callback: bool = Field(
         default=False,
-        description="Deprecated for pay.sh/x402 premium actions. Payjent does not execute service_url; agents consume the grant, obtain spend authorization, execute externally, then mark complete.",
+        description="Must remain false for generic x402/pay.sh actions. Payjent does not execute target_url/service_url; agents consume the grant, obtain spend authorization, execute externally, then mark complete.",
     )
     payjent_managed_execution: bool = Field(
         default=False,
-        description="Deprecated legacy alias. Ignored for pay.sh/x402 premium actions; Payjent authorizes spend but does not execute downstream tasks.",
+        description="Must remain false for generic x402/pay.sh actions; Payjent authorizes spend but does not execute downstream tasks.",
     )
     callback_url: str | None = None
+
+
+class PayShPremiumActionCreate(X402PaidActionCreate):
+    """Backward-compatible alias for the generic x402/pay.sh paid action primitive."""
 
 
 class BigQueryPaidQueryCreate(BaseModel):
@@ -298,6 +306,13 @@ class PayShPremiumActionCreateResponse(AgentActionCreateResponse):
     provider: Literal["pay_sh"] = "pay_sh"
     premium_provider: Literal["pay_sh"] = "pay_sh"
     command_preview: str
+    request_fingerprint: str | None = None
+    execution_boundary: str | None = None
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class X402PaidActionCreateResponse(PayShPremiumActionCreateResponse):
+    """Response for the public generic x402/pay.sh paid action primitive."""
 
 
 class AgentActionConsumeRequest(BaseModel):
