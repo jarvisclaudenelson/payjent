@@ -1645,10 +1645,12 @@ def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSess
     existing = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id)).all()
     for event in existing:
         meta = event.metadata_json or {}
-        if meta.get("type") in {"payjent_fulfillment_callback", "payjent_downstream_execution"} and meta.get("payment_session_id") == ps.id:
+        if meta.get("type") in {"payjent_x402_service_execution", "payjent_fulfillment_callback", "payjent_downstream_execution"} and meta.get("payment_session_id") == ps.id:
             return event
     if provider == "mock":
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "fulfillment callback handoff is disabled for mock payments"})
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "x402/pay.sh service execution is disabled for mock payments"})
+    if (envelope.get("provider") or "") != "pay_sh":
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "managed downstream execution is limited to pay.sh/x402 service rail actions"})
     if (envelope.get("method") or "POST").upper() != "POST":
         return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "only POST downstream execution is supported"})
     service_url = envelope.get("service_url")
@@ -1659,18 +1661,46 @@ def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSess
     reserved_path = _reserved_downstream_body_key_path(body)
     if reserved_path:
         return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": f"reserved Payjent field in downstream body: {reserved_path}"})
+    if not _mark_grant_consumed(grant.id, session):
+        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "reason": "payment grant was already consumed before x402/pay.sh execution"})
+    session.refresh(grant)
+    operation_id = f"paysh_execute:{ps.id}"
+    spend = SpendLedgerEntry(
+        id=f"spend_{uuid4().hex}",
+        grant_id=grant.id,
+        quote_id=q.id,
+        operation_id=operation_id,
+        tool="payjent.create_pay_sh_premium_action",
+        vendor="pay.sh",
+        rail="x402",
+        amount_minor=q.amount_minor,
+        currency=q.currency.upper(),
+        reason=envelope.get("description") or q.request_summary,
+        status="captured",
+        provider_reference=service_url,
+        metadata_json={"provider": "pay_sh", "service_url": service_url, "payment_session_id": ps.id},
+    )
+    session.add(spend)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        spend = session.exec(select(SpendLedgerEntry).where(SpendLedgerEntry.grant_id == grant.id, SpendLedgerEntry.operation_id == operation_id)).first()
     callback_payload = {
-        "event_type": "payjent.fulfillment_callback",
+        "event_type": "payjent.x402_service_execution",
         "action_id": q.id,
         "quote_id": q.id,
         "payment_session_id": ps.id,
         "bot_id": q.bot_id,
         "external_user_id": q.external_user_id,
-        "provider": provider,
+        "provider": "pay_sh",
+        "rail": "x402",
+        "spend_status": "captured",
+        "spend_id": spend.id if spend else None,
         "amount_minor": q.amount_minor,
         "currency": q.currency,
         "request_hash": q.request_hash,
-        "fulfillment_body": body,
+        "service_body": body,
     }
     timestamp, signature = sign_webhook_payload(callback_payload, settings.signing_secret)
     headers = _sanitized_downstream_headers(envelope.get("headers") or {})
@@ -1681,13 +1711,14 @@ def _execute_managed_downstream_once(session: Session, q: Quote, ps: PaymentSess
     headers["X-Payjent-Quote-Id"] = q.id
     headers["X-Payjent-Payment-Session-Id"] = ps.id
     headers["X-Payjent-Request-Hash"] = q.request_hash
+    headers["X-Payjent-Rail"] = "x402"
     try:
         with httpx.Client(timeout=5.0, follow_redirects=False) as client:
             response = client.post(service_url, json=callback_payload, headers=headers)
         status = "executed" if 200 <= response.status_code < 300 else "failed"
-        return _record_downstream_event(session, q, status, {"payment_session_id": ps.id, "http_status": response.status_code, "service_host": urlparse(service_url).hostname})
+        return _record_downstream_event(session, q, status, {"type": "payjent_x402_service_execution", "payment_session_id": ps.id, "http_status": response.status_code, "service_host": urlparse(service_url).hostname, "spend_id": spend.id if spend else None, "rail": "x402", "provider": "pay_sh"})
     except Exception as exc:
-        return _record_downstream_event(session, q, "failed", {"payment_session_id": ps.id, "error": str(exc)[:500], "service_host": urlparse(service_url).hostname})
+        return _record_downstream_event(session, q, "failed", {"type": "payjent_x402_service_execution", "payment_session_id": ps.id, "error": str(exc)[:500], "service_host": urlparse(service_url).hostname, "spend_id": spend.id if spend else None, "rail": "x402", "provider": "pay_sh"})
 
 
 def _issued_response(ps: PaymentSession, receipt, grant):

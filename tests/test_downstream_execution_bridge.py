@@ -1,7 +1,10 @@
 import json
 
 from payjent.config import DEFAULT_SIGNING_SECRET, Settings, get_settings
+from sqlmodel import Session, select
+
 from payjent.main import app
+from payjent.models import Grant, SpendLedgerEntry
 from payjent.signing import verify_webhook_signature
 import payjent.main as main_module
 
@@ -40,7 +43,7 @@ def _paid_body(payment_session_id, amount=250, currency="usd"):
     }, separators=(",", ":")).encode()
 
 
-def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot_headers, monkeypatch):
+def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot_headers, monkeypatch, engine):
     secret = "whsec_test"
     app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="stripe", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example", stripe_webhook_secret=secret, managed_execution_allowed_hosts="downstream.example")
     monkeypatch.setattr(main_module, "create_stripe_checkout_session", lambda *_: ("cs_downstream", "https://checkout.stripe.test/session"))
@@ -73,8 +76,11 @@ def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot
     assert duplicate.status_code == 200
     assert len(calls) == 1
     assert calls[0]["url"] == "https://downstream.example/run"
-    assert calls[0]["json"]["event_type"] == "payjent.fulfillment_callback"
-    assert calls[0]["json"]["fulfillment_body"] == {"task": "run"}
+    assert calls[0]["json"]["event_type"] == "payjent.x402_service_execution"
+    assert calls[0]["json"]["provider"] == "pay_sh"
+    assert calls[0]["json"]["rail"] == "x402"
+    assert calls[0]["json"]["spend_status"] == "captured"
+    assert calls[0]["json"]["service_body"] == {"task": "run"}
     assert calls[0]["json"]["amount_minor"] == 250
     assert calls[0]["json"]["currency"] == "USD"
     assert calls[0]["json"]["request_hash"] == "downstream-hash"
@@ -82,6 +88,7 @@ def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot
     assert calls[0]["headers"].get("X-Payjent-Signature", "").startswith("v1=")
     assert verify_webhook_signature(calls[0]["json"], calls[0]["headers"]["X-Payjent-Timestamp"], calls[0]["headers"]["X-Payjent-Signature"], DEFAULT_SIGNING_SECRET, tolerance_seconds=-1)
     assert calls[0]["headers"].get("X-Payjent-Action-Id") == action["action_id"]
+    assert calls[0]["headers"].get("X-Payjent-Rail") == "x402"
     sent = json.dumps(calls[0]).lower()
     assert "payment_token" not in sent
     assert "grant_" not in sent
@@ -89,7 +96,17 @@ def test_stripe_paid_webhook_executes_downstream_once_without_tokens(client, bot
     assert "x-api-key" not in {k.lower() for k in calls[0]["headers"]}
     status = client.get(f"/api/v1/agent-actions/{action['action_id']}", headers=bot_headers).json()
     assert status["fulfillment_events"][0]["status"] == "executed"
-    assert status["fulfillment_events"][0]["metadata"]["type"] == "payjent_fulfillment_callback"
+    assert status["fulfillment_events"][0]["metadata"]["type"] == "payjent_x402_service_execution"
+    with Session(engine) as db:
+        grants = db.exec(select(Grant).where(Grant.quote_id == action["action_id"])).all()
+        spends = db.exec(select(SpendLedgerEntry).where(SpendLedgerEntry.quote_id == action["action_id"])).all()
+    assert len(grants) == 1
+    assert grants[0].consumed_at is not None
+    assert len(spends) == 1
+    assert spends[0].rail == "x402"
+    assert spends[0].vendor == "pay.sh"
+    assert spends[0].status == "captured"
+    assert spends[0].amount_minor == 250
 
 
 def test_unsafe_service_url_rejected_before_checkout(client, bot_headers, monkeypatch):
