@@ -1455,7 +1455,9 @@ def _create_x402_action_from_payload(
     readiness.update(payload.execution_readiness or {})
     requested_provider = (provider or settings.checkout_provider or "mock").lower()
     minimum = STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(payload.currency.upper())
-    if requested_provider == "stripe" and minimum is not None and payload.amount_minor < minimum:
+    if not payload.task_budget_id and payload.currency.upper() == "USD" and payload.amount_minor < 50:
+        raise HTTPException(status_code=402, detail="Sub-50 USD minor-unit premium actions require an active funded task_budget_id; create and fund /api/v1/task-budgets first.")
+    if not payload.task_budget_id and requested_provider == "stripe" and minimum is not None and payload.amount_minor < minimum:
         raise HTTPException(status_code=422, detail=f"Stripe checkout minimum for {payload.currency.upper()} is {minimum} minor units; obtain an exact provider quote at or above the card checkout minimum, or batch/top up the paid action before creating checkout")
     enforce_readiness(session, bot_id=payload.bot_id, provider="pay_sh", readiness_mode=payload.readiness_mode, metadata=readiness)
     action_payload = AgentActionCreate(

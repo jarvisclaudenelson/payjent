@@ -96,8 +96,8 @@ def test_stripe_checkout_rejects_usd_amount_below_card_minimum_before_stripe_cal
         json=_payload(amount_minor=1, cost_breakdown=[{"label": "exact provider quote", "amount_minor": 1}]),
     )
 
-    assert response.status_code == 422
-    assert "Stripe checkout minimum for USD is 50 minor units" in response.text
+    assert response.status_code == 402
+    assert "task_budget_id" in response.text
 
 
 def test_generic_x402_full_create_pay_consume_spend_complete_flow(client, bot_headers, operator_headers):
