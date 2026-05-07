@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hmac
 import ipaddress
+import os
 from secrets import token_urlsafe
 import socket
 from typing import Any
@@ -18,6 +19,7 @@ from sqlmodel import Session, select, update
 
 from . import workos_auth
 from .agent_actions import action_result_response, create_paid_action_response, execution_envelope_for_action
+from .artifacts import artifact_pointer, create_artifact, scrub_artifact_value
 from .auth import (
     DASHBOARD_SESSION_COOKIE,
     create_bot_credential,
@@ -43,6 +45,7 @@ from .models import (
     AgentInstallLink,
     AgentProfile,
     BotCredential,
+    ExecutionArtifact,
     FulfillmentEvent,
     Grant,
     PaymentSession,
@@ -59,6 +62,7 @@ from .money import quote_hash, validate_breakdown
 from .providers.base import issue_receipt_and_grant
 from .providers.exa import ExaProviderError, ExaProviderNotConfigured, run_deep_search as run_exa_deep_search
 from .providers.elevenlabs import ElevenLabsProviderError, ElevenLabsProviderNotConfigured, run_text_to_speech as run_elevenlabs_text_to_speech
+from .providers.fal import FalProviderError, FalProviderNotConfigured, run_image_generate as run_fal_image_generate
 from .providers.firecrawl import FirecrawlProviderError, FirecrawlProviderNotConfigured, run_scrape as run_firecrawl_scrape
 from .providers.link import LinkCredentialRequest as LinkProviderCredentialRequest
 from .providers.link import (
@@ -100,6 +104,8 @@ from .schemas import (
     FulfillmentRead,
     GrantPresentation,
     GrantVerifyResponse,
+    ExecutionArtifactListResponse,
+    ExecutionArtifactRead,
     HostedSmokeBootstrapRequest,
     HostedSmokeBootstrapResponse,
     HostedSmokeStatusRequest,
@@ -484,13 +490,52 @@ def toolbox_fail_execution(execution_id: str, payload: ToolExecutionFailRequest,
     return _execution_to_read(execution)
 
 
+def _artifact_to_read(artifact: ExecutionArtifact) -> ExecutionArtifactRead:
+    return ExecutionArtifactRead(
+        artifact_id=artifact.artifact_id,
+        execution_id=artifact.execution_id,
+        kind=artifact.kind,
+        mime_type=artifact.mime_type,
+        size_bytes=artifact.size_bytes,
+        storage_backend=artifact.storage_backend,
+        checksum_sha256=artifact.checksum_sha256,
+        metadata_json=scrub_artifact_value(artifact.metadata_json or {}),
+        created_at=artifact.created_at.isoformat(),
+        content_base64=artifact.content_base64,
+        text_payload=artifact.text_payload,
+        payload_json=scrub_artifact_value(artifact.payload_json),
+    )
+
+
+@app.get("/api/v1/toolbox/executions/{execution_id}/artifacts", response_model=ExecutionArtifactListResponse)
+def toolbox_list_execution_artifacts(execution_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    execution = session.get(ToolExecution, execution_id)
+    if not execution:
+        raise HTTPException(404, "tool execution not found")
+    _enforce_bot_scope(credential, execution.bot_id)
+    artifacts = session.exec(select(ExecutionArtifact).where(ExecutionArtifact.execution_id == execution_id).order_by(ExecutionArtifact.created_at)).all()
+    return ExecutionArtifactListResponse(artifacts=[artifact_pointer(a) for a in artifacts])
+
+
+@app.get("/api/v1/toolbox/executions/{execution_id}/artifacts/{artifact_id}", response_model=ExecutionArtifactRead)
+def toolbox_get_execution_artifact(execution_id: str, artifact_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    execution = session.get(ToolExecution, execution_id)
+    if not execution:
+        raise HTTPException(404, "tool execution not found")
+    _enforce_bot_scope(credential, execution.bot_id)
+    artifact = session.get(ExecutionArtifact, artifact_id)
+    if not artifact or artifact.execution_id != execution_id:
+        raise HTTPException(404, "artifact not found")
+    return _artifact_to_read(artifact)
+
+
 @app.post("/api/v1/toolbox/executions/{execution_id}/run", response_model=ToolExecutionRead)
 def toolbox_run_execution(execution_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
     execution = session.get(ToolExecution, execution_id)
     if not execution:
         raise HTTPException(404, "tool execution not found")
     _enforce_bot_scope(credential, execution.bot_id)
-    if execution.tool_id not in {"exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech"}:
+    if execution.tool_id not in {"exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech", "fal.image.generate"}:
         raise HTTPException(status_code=501, detail="managed execution adapter not implemented for tool")
     if execution.status == "executing":
         raise HTTPException(status_code=409, detail="tool execution is already executing")
@@ -506,9 +551,11 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
             result = run_exa_deep_search(execution.arguments_json or {}, api_key=settings.exa_api_key)
         elif execution.tool_id == "firecrawl.scrape":
             result = run_firecrawl_scrape(execution.arguments_json or {}, api_key=settings.firecrawl_api_key)
+        elif execution.tool_id == "fal.image.generate":
+            result = run_fal_image_generate(execution.arguments_json or {}, api_key=settings.fal_api_key or os.getenv("FAL_KEY"))
         else:
             result = run_elevenlabs_text_to_speech(execution.arguments_json or {}, api_key=settings.elevenlabs_api_key)
-    except (ExaProviderNotConfigured, FirecrawlProviderNotConfigured, ElevenLabsProviderNotConfigured):
+    except (ExaProviderNotConfigured, FirecrawlProviderNotConfigured, ElevenLabsProviderNotConfigured, FalProviderNotConfigured):
         execution.status = "failed"
         execution.error_metadata_json = {"code": "provider_not_configured", "message": "managed provider is not configured"}
         execution.updated_at = datetime.now(timezone.utc)
@@ -520,18 +567,44 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
         execution.updated_at = datetime.now(timezone.utc)
         session.add(execution); session.commit(); session.refresh(execution)
         raise HTTPException(status_code=422, detail=str(exc))
-    except (ExaProviderError, FirecrawlProviderError, ElevenLabsProviderError):
+    except (ExaProviderError, FirecrawlProviderError, ElevenLabsProviderError, FalProviderError):
         execution.status = "failed"
         execution.error_metadata_json = {"code": "provider_execution_failed", "message": "managed provider execution failed"}
         execution.updated_at = datetime.now(timezone.utc)
         session.add(execution); session.commit(); session.refresh(execution)
         return _execution_to_read(execution)
 
+    artifacts = []
+    if execution.tool_id == "fal.image.generate":
+        safe_images = []
+        for image in (result.get("images") or []):
+            if not isinstance(image, dict):
+                continue
+            content_bytes = image.get("content_bytes")
+            metadata = {"provider": "fal"}
+            if image.get("url"):
+                metadata["source_url_hosted_public_https"] = True
+            if isinstance(content_bytes, (bytes, bytearray)):
+                artifact = create_artifact(session, execution_id=execution.id, kind="image", mime_type=image.get("mime_type") or "image/png", content_bytes=bytes(content_bytes), metadata=metadata)
+            else:
+                artifact = create_artifact(session, execution_id=execution.id, kind="json", mime_type="application/json", json_payload={"delivery_mode": "metadata_only", "source_url_available": bool(image.get("url"))}, metadata=metadata)
+            artifacts.append(artifact)
+            safe_images.append({k: v for k, v in image.items() if k not in {"content_bytes", "url"}})
+        result["images"] = safe_images
     execution.status = "succeeded"
     execution.result_metadata_json = _scrub_secret_metadata(result)
+    if artifacts:
+        execution.result_metadata_json["artifacts"] = [artifact_pointer(a) for a in artifacts]
     execution.error_metadata_json = {}
     execution.updated_at = datetime.now(timezone.utc)
     session.add(execution); session.commit(); session.refresh(execution)
+    if execution.quote_id and execution.payment_session_id:
+        q = session.get(Quote, execution.quote_id)
+        ps = session.get(PaymentSession, execution.payment_session_id)
+        if q and ps:
+            event = _enqueue_resume_event(session, q, ps, settings, "managed")
+            event.payload = scrub_artifact_value({**event.payload, "managed_execution": {"execution_id": execution.id, "tool_id": execution.tool_id, "status": execution.status, "artifacts": [artifact_pointer(a) for a in artifacts]}})
+            session.add(event); session.commit()
     return _execution_to_read(execution)
 
 

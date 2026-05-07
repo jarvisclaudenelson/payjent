@@ -125,8 +125,8 @@ def test_managed_exa_provider_failure_records_sanitized_failed_state(client, bot
     _assert_no_secret_or_executable_marker(body)
 
 
-def test_managed_exa_run_rejects_non_exa_tool(client, bot_headers, engine):
-    execution_id = _ready_execution(engine, tool_id="fal.image.generate", arguments={"prompt": "robot"})
+def test_managed_exa_run_rejects_unknown_managed_tool(client, bot_headers, engine):
+    execution_id = _ready_execution(engine, tool_id="unknown.managed_tool", arguments={"prompt": "robot"})
     response = client.post(f"/api/v1/toolbox/executions/{execution_id}/run", headers=bot_headers)
     assert response.status_code == 501
 

@@ -78,6 +78,15 @@ class ToolExecutionCreate(ToolboxQuoteCreate):
     quote_id: str | None = None
 
 
+class ToolExecutionArtifactPointer(BaseModel):
+    artifact_id: str
+    kind: str
+    mime_type: str
+    size_bytes: int
+    checksum_sha256: str
+    url: str
+
+
 class ToolExecutionRead(BaseModel):
     id: str
     tool_id: str
@@ -92,6 +101,25 @@ class ToolExecutionRead(BaseModel):
     status: str
     result_metadata_json: dict[str, Any]
     error_metadata_json: dict[str, Any]
+
+
+class ExecutionArtifactRead(BaseModel):
+    artifact_id: str
+    execution_id: str
+    kind: str
+    mime_type: str
+    size_bytes: int
+    storage_backend: str
+    checksum_sha256: str
+    metadata_json: dict[str, Any]
+    created_at: str
+    content_base64: str | None = None
+    text_payload: str | None = None
+    payload_json: Any | None = None
+
+
+class ExecutionArtifactListResponse(BaseModel):
+    artifacts: list[ToolExecutionArtifactPointer]
 
 
 class ToolExecutionCompleteRequest(BaseModel):

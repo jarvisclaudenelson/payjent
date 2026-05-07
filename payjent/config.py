@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     exa_api_key: str | None = None
     firecrawl_api_key: str | None = None
     elevenlabs_api_key: str | None = None
+    fal_api_key: str | None = None
 
     @property
     def is_production(self) -> bool:

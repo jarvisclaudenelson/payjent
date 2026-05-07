@@ -110,6 +110,21 @@ class ToolExecution(SQLModel, table=True):
     updated_at: datetime | None = None
 
 
+class ExecutionArtifact(SQLModel, table=True):
+    artifact_id: str = Field(primary_key=True)
+    execution_id: str = Field(index=True)
+    kind: str = Field(index=True)
+    mime_type: str
+    size_bytes: int = 0
+    storage_backend: str = "db_inline"
+    content_base64: str | None = None
+    text_payload: str | None = None
+    payload_json: dict[str, Any] | list[Any] | str | int | float | bool | None = Field(default=None, sa_column=Column(JSON))
+    checksum_sha256: str
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class Receipt(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("payment_session_id", name="uq_receipt_payment_session_id"),)
     id: str = Field(primary_key=True)
