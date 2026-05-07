@@ -77,6 +77,7 @@ from .schemas import (
     AgentActionCreateResponse,
     AgentActionExecutionEnvelope,
     AgentActionStatusResponse,
+    BigQueryPaidQueryCreate,
     FulfillmentCreate,
     FulfillmentRead,
     GrantPresentation,
@@ -154,6 +155,7 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Flow: create action, user pays Stripe/Payjent, agent polls/status, agent consumes the payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then the agent executes externally with its pay.sh/x402 runtime and marks complete. Payjent does not POST service_url or execute the downstream task; payjent_managed_execution is a legacy alias and legacy payjent_fulfillment_callback/payjent_managed_execution flags are ignored for pay.sh actions.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
+        {"name": "payjent.create_bigquery_paid_query", "endpoint": "/api/v1/premium-actions/pay-sh/bigquery-query", "method": "POST", "description": "Preset for the real pay.sh public catalog BigQuery gateway service solana-foundation/google/bigquery resource jobs. Creates a pay.sh/x402 action for POST https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries with body {query,useLegacySql}. User pays Stripe/Payjent first; agent consumes grant, calls payjent.authorize_x402_spend with capture=true, then agent executes externally using pay curl/pay.sh. Payjent does not execute BigQuery.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "preset": {"provider": "pay_sh", "service_fqn": "solana-foundation/google/bigquery", "resource": "jobs", "gateway": "https://bigquery.google.gateway-402.com/bigquery/v2", "method": "POST", "path_template": "/projects/{project_id}/queries", "execution_boundary": "agent_executes_after_spend_authorization"}},
         {"name": "payjent.create_purchase_fulfillment", "endpoint": "/api/v1/purchase-actions", "method": "POST", "description": "Create an Amazon-style merchant purchase/procurement handoff only after obtaining an exact merchant quote. The human pays Stripe/Payjent; Payjent verifies payment and sends a signed, verified POST fulfillment callback to an allowlisted procurement executor. The executor buys from Amazon or the merchant using its configured procurement/payment method. Payjent does not send funds to the agent and does not directly pay Amazon unless the downstream executor/provider rail does that.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "requires_fulfillment_callback": True},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
@@ -1342,6 +1344,52 @@ def create_pay_sh_premium_action(
     )
     data = action if isinstance(action, dict) else action.model_dump()
     return {**data, "provider": "pay_sh", "premium_provider": "pay_sh", "command_preview": envelope["command_preview"]}
+
+
+@app.post("/api/v1/premium-actions/pay-sh/bigquery-query", response_model=PayShPremiumActionCreateResponse)
+def create_bigquery_paid_query(
+    payload: BigQueryPaidQueryCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    project_id = payload.project_id.strip()
+    if any(ch in project_id for ch in ("/", "?", "#")):
+        raise HTTPException(status_code=422, detail="project_id must be a BigQuery project id, not a path or URL")
+    service_url = f"https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries"
+    summary = payload.request_summary or f"Run paid BigQuery query through pay.sh/x402 for project {project_id}"
+    premium_payload = PayShPremiumActionCreate(
+        bot_id=payload.bot_id,
+        external_user_id=payload.external_user_id,
+        request_summary=summary,
+        request_hash=payload.request_hash,
+        amount_minor=payload.amount_minor,
+        currency=payload.currency,
+        cost_breakdown=payload.cost_breakdown,
+        service_url=service_url,
+        service_fqn="solana-foundation/google/bigquery",
+        resource="jobs",
+        method="POST",
+        body={"query": payload.query, "useLegacySql": payload.use_legacy_sql},
+        headers={"Content-Type": "application/json"},
+        description=(
+            "Real pay.sh public catalog BigQuery jobs endpoint. Payjent gates Stripe payment "
+            "and x402 spend authorization only; the agent executes externally with pay curl/pay.sh."
+        ),
+        payjent_fulfillment_callback=False,
+        payjent_managed_execution=False,
+        callback_url=payload.callback_url,
+    )
+    return create_pay_sh_premium_action(
+        premium_payload,
+        idempotency_key=idempotency_key,
+        provider=provider,
+        session=session,
+        settings=settings,
+        credential=credential,
+    )
 
 
 @app.post("/api/v1/purchase-actions", response_model=AgentActionCreateResponse)

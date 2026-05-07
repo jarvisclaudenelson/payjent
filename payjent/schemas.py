@@ -211,6 +211,20 @@ class PayShPremiumActionCreate(BaseModel):
     callback_url: str | None = None
 
 
+class BigQueryPaidQueryCreate(BaseModel):
+    bot_id: str
+    external_user_id: str
+    project_id: str = Field(min_length=1)
+    query: str = Field(min_length=1)
+    use_legacy_sql: bool = False
+    request_summary: str | None = None
+    request_hash: str | None = None
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    cost_breakdown: list[CostItem]
+    callback_url: str | None = None
+
+
 class MerchantInfo(BaseModel):
     name: str = Field(min_length=1)
     domain: str = Field(min_length=1)

@@ -146,7 +146,28 @@ If these do not match, stop. Do not execute the downstream action.
 
 If the execution envelope says `provider=pay_sh`, run the pay.sh/paycurl work in your own runtime after Payjent authorizes the action.
 
-Payjent does not execute pay.sh for you.
+Payjent does not execute pay.sh for you. For x402/pay.sh paid APIs, after consuming the grant call `payjent.authorize_x402_spend` with `capture=true` for the exact quoted budget, then execute the gateway call externally (for example with `pay curl`/pay.sh) and mark the action complete.
+
+Concrete real preset: `payjent.create_bigquery_paid_query` (`POST /api/v1/premium-actions/pay-sh/bigquery-query`) creates a pay.sh action for the public catalog service `solana-foundation/google/bigquery`, resource `jobs`, gateway `https://bigquery.google.gateway-402.com/bigquery/v2`, endpoint `POST /projects/{project_id}/queries`. The preset stores `service_url=https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries`, `method=POST`, `body={"query": "...", "useLegacySql": false}`, `provider=pay_sh`, and `payjent_execution_boundary=agent_executes_after_spend_authorization`. Payjent only gates Stripe payment and records/captures spend authorization; the agent executes BigQuery through pay.sh externally after authorization.
+
+Example preset payload after obtaining the exact pay.sh/x402 quote:
+
+```json
+{
+  "bot_id": "your-agent-bot-id",
+  "external_user_id": "user-123",
+  "project_id": "my-gcp-project",
+  "query": "SELECT 1 AS ok",
+  "use_legacy_sql": false,
+  "request_summary": "Run exact paid BigQuery query through pay.sh/x402",
+  "request_hash": "stable-request-hash",
+  "amount_minor": 250,
+  "currency": "USD",
+  "cost_breakdown": [{"label": "pay.sh BigQuery quoted x402 cost", "amount_minor": 250}]
+}
+```
+
+Do not use placeholder pricing; if the exact pay.sh/x402 quote is unknown, do not create the action yet.
 
 ### Step 7: Mark fulfillment
 
