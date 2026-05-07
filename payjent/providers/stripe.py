@@ -94,6 +94,16 @@ def _safe_stripe_checkout_error(exc: Exception) -> str:
     return detail
 
 
+def _stripe_response_value(response: Any, key: str) -> Any:
+    """Read values from Stripe SDK objects and plain dict test doubles."""
+    if isinstance(response, dict):
+        return response.get(key)
+    try:
+        return response[key]
+    except (KeyError, TypeError, AttributeError):
+        return getattr(response, key, None)
+
+
 def create_stripe_checkout_session(
     quote: Quote,
     payment_session: PaymentSession,
@@ -117,8 +127,8 @@ def create_stripe_checkout_session(
     except Exception as exc:
         detail = _safe_stripe_checkout_error(exc)
         raise HTTPException(status_code=502, detail=detail) from exc
-    provider_session_id = created.get("id")
-    hosted_url = created.get("url")
+    provider_session_id = _stripe_response_value(created, "id")
+    hosted_url = _stripe_response_value(created, "url")
     if not provider_session_id or not hosted_url:
         raise HTTPException(status_code=502, detail="Stripe checkout session response missing id or url")
     return str(provider_session_id), str(hosted_url)

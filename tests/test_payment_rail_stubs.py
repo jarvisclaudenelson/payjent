@@ -142,6 +142,42 @@ def test_stripe_adapter_builds_checkout_payload_idempotency_and_metadata():
     assert calls["payload"]["payment_intent_data"]["metadata"] == calls["payload"]["metadata"]
 
 
+def test_stripe_adapter_accepts_stripe_sdk_object_response_without_get_method():
+    quote = Quote(
+        id="quote_sdk_object",
+        bot_id="bot-1",
+        external_user_id="user-1",
+        request_summary="do a thing",
+        request_hash="hash-sdk-object",
+        amount_minor=250,
+        currency="USD",
+        cost_breakdown=[{"label": "work", "amount_minor": 250}],
+        quote_hash="qh-sdk-object",
+    )
+    payment_session = PaymentSession(id="ps_sdk_object", quote_id="quote_sdk_object", provider="stripe")
+
+    class StripeLikeObject:
+        def __init__(self):
+            self._data = {"id": "cs_sdk_object", "url": "https://checkout.stripe.test/sdk-object"}
+
+        def __getitem__(self, key):
+            return self._data[key]
+
+    class FakeStripeClient:
+        def create_checkout_session(self, payload, idempotency_key):
+            return StripeLikeObject()
+
+    provider_session_id, url = create_stripe_checkout_session(
+        quote,
+        payment_session,
+        Settings(stripe_secret_key="sk_test_fake", public_base_url="https://payjent.example"),
+        client=FakeStripeClient(),
+    )
+
+    assert provider_session_id == "cs_sdk_object"
+    assert url == "https://checkout.stripe.test/sdk-object"
+
+
 def test_stripe_checkout_provider_errors_are_mapped_to_safe_502():
     quote = Quote(
         id="quote_stripe_error",
