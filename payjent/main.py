@@ -72,6 +72,7 @@ from .providers.stripe import (
 )
 from .rails import normalize_spend_rail
 from .risk import assess_checkout_risk
+from .readiness import enforce_readiness, readiness_record, safe_metadata
 from .schemas import (
     AgentRead,
     AgentActionFailRequest,
@@ -85,6 +86,9 @@ from .schemas import (
     AgentActionExecutionEnvelope,
     AgentActionStatusResponse,
     BigQueryPaidQueryCreate,
+    ExecutionReadinessCheckRequest,
+    ExecutionReadinessRequest,
+    ExecutionReadinessResponse,
     FulfillmentCreate,
     FulfillmentRead,
     GrantPresentation,
@@ -679,6 +683,41 @@ def configure_x402(agent_id: str, payload: X402ConfigureRequest, session: Sessio
     config = payload.model_dump()
     rail = _upsert_rail(session, agent, "x402", "enabled" if payload.enabled else "disabled", "test", config)
     return _rail_to_read(rail)
+
+
+@app.get("/api/v1/agents/{bot_id}/execution-readiness", response_model=ExecutionReadinessResponse)
+def get_execution_readiness(bot_id: str, provider: str = "generic", session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, bot_id)
+    return readiness_record(session, bot_id, provider)
+
+
+@app.post("/api/v1/agents/{bot_id}/execution-readiness", response_model=ExecutionReadinessResponse)
+def set_execution_readiness(bot_id: str, payload: ExecutionReadinessRequest, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, bot_id)
+    agent = session.exec(select(AgentProfile).where(AgentProfile.bot_id == bot_id)).first()
+    if not agent:
+        agent = AgentProfile(id=f"agent_{uuid4().hex}", bot_id=bot_id, name=bot_id, platform="agent-runtime")
+        session.add(agent); session.commit(); session.refresh(agent)
+    provider_slug = payload.provider.lower().replace("-", "_")
+    safe_extra = safe_metadata(payload.metadata)
+    rail = payload.rail or ("x402" if provider_slug in {"pay_sh", "paysh", "x402"} else f"provider:{provider_slug}")
+    config = {
+        "enabled": payload.status not in {"disabled", "not_ready"},
+        "runtime_ready": payload.runtime_ready,
+        "can_execute_without_device_auth": payload.can_execute_without_device_auth,
+        "provider_connected": payload.provider_connected,
+        "ready": payload.status in {"ready", "connected", "active"},
+        "labels": payload.labels,
+        **safe_extra,
+    }
+    _upsert_rail(session, agent, rail, "active" if config["ready"] else payload.status, "agent_reported", config)
+    return readiness_record(session, bot_id, provider_slug)
+
+
+@app.post("/api/v1/premium-actions/readiness-check", response_model=ExecutionReadinessResponse)
+def premium_action_readiness_check(payload: ExecutionReadinessCheckRequest, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, payload.bot_id)
+    return enforce_readiness(session, bot_id=payload.bot_id, provider=payload.provider, readiness_mode=payload.readiness_mode, metadata=payload.execution_readiness)
 
 
 def _integration_snippet(agent: AgentProfile) -> str:
@@ -1394,6 +1433,13 @@ def _create_x402_action_from_payload(
             _validate_generic_x402_envelope(envelope, settings)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    readiness = dict(payload.provider_metadata or {})
+    readiness.update(payload.execution_readiness or {})
+    requested_provider = (provider or settings.checkout_provider or "mock").lower()
+    minimum = STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(payload.currency.upper())
+    if requested_provider == "stripe" and minimum is not None and payload.amount_minor < minimum:
+        raise HTTPException(status_code=422, detail=f"Stripe checkout minimum for {payload.currency.upper()} is {minimum} minor units; obtain an exact provider quote at or above the card checkout minimum, or batch/top up the paid action before creating checkout")
+    enforce_readiness(session, bot_id=payload.bot_id, provider="pay_sh", readiness_mode=payload.readiness_mode, metadata=readiness)
     action_payload = AgentActionCreate(
         bot_id=payload.bot_id,
         external_user_id=payload.external_user_id,
@@ -1551,6 +1597,9 @@ def _create_premium_action_from_payload(
         "task_budget_id": payload.task_budget_id,
     }
     _validate_premium_action_envelope(payload, envelope)
+    readiness = dict(payload.provider_metadata or {})
+    readiness.update(payload.execution_readiness or {})
+    enforce_readiness(session, bot_id=payload.bot_id, provider=payload.provider, readiness_mode=payload.readiness_mode, metadata=readiness)
     action_payload = AgentActionCreate(
         bot_id=payload.bot_id,
         external_user_id=payload.external_user_id,
@@ -1625,6 +1674,7 @@ def create_premium_action_from_preset(
 ):
     preset = get_preset(preset_id)
     envelope = preset.builder(dict(payload.input or {}))
+    enforce_readiness(session, bot_id=payload.bot_id, provider=preset.provider, readiness_mode=payload.readiness_mode, metadata=payload.execution_readiness or payload.input)
     action_payload = AgentActionCreate(
         bot_id=payload.bot_id,
         external_user_id=payload.external_user_id,

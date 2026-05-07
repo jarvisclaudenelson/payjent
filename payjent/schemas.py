@@ -204,6 +204,8 @@ class X402PaidActionCreate(BaseModel):
     provider: str | None = "pay_sh"
     rail: str | None = "x402"
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    readiness_mode: Literal["enforced", "advisory"] = "enforced"
+    execution_readiness: dict[str, Any] = Field(default_factory=dict)
     payjent_fulfillment_callback: bool = Field(
         default=False,
         description="Must remain false for generic x402/pay.sh actions. Payjent does not execute target_url/service_url; agents consume the grant, obtain spend authorization, execute externally, then mark complete.",
@@ -269,6 +271,8 @@ class PremiumActionCreate(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     description: str | None = None
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    readiness_mode: Literal["enforced", "advisory"] = "enforced"
+    execution_readiness: dict[str, Any] = Field(default_factory=dict)
     callback_url: str | None = None
     payjent_fulfillment_callback: bool = Field(default=False)
     payjent_managed_execution: bool = Field(default=False)
@@ -390,7 +394,37 @@ class PremiumActionPresetActionCreate(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
     cost_breakdown: list[CostItem]
     input: dict[str, Any] = Field(default_factory=dict)
+    readiness_mode: Literal["enforced", "advisory"] = "enforced"
+    execution_readiness: dict[str, Any] = Field(default_factory=dict)
     callback_url: str | None = None
+
+
+class ExecutionReadinessRequest(BaseModel):
+    provider: str = Field(default="generic", min_length=1, max_length=64)
+    rail: str | None = None
+    status: Literal["ready", "connected", "active", "not_ready", "disabled"] = "ready"
+    runtime_ready: bool = False
+    can_execute_without_device_auth: bool = False
+    provider_connected: bool = False
+    labels: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionReadinessCheckRequest(BaseModel):
+    bot_id: str = Field(min_length=1)
+    provider: str = Field(default="generic", min_length=1, max_length=64)
+    readiness_mode: Literal["enforced", "advisory"] = "enforced"
+    execution_readiness: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionReadinessResponse(BaseModel):
+    bot_id: str
+    provider: str
+    ready_for_payment: bool
+    charge_allowed: bool
+    readiness_mode: str
+    evidence: dict[str, Any]
+    setup_guidance: str
 
 
 class PremiumActionCreateResponse(AgentActionCreateResponse):
