@@ -349,6 +349,18 @@ class X402PaidActionCreateResponse(PayShPremiumActionCreateResponse):
     """Response for the public generic x402/pay.sh paid action primitive."""
 
 
+class PremiumActionPresetActionCreate(BaseModel):
+    bot_id: str
+    external_user_id: str
+    request_summary: str | None = None
+    request_hash: str | None = None
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    cost_breakdown: list[CostItem]
+    input: dict[str, Any] = Field(default_factory=dict)
+    callback_url: str | None = None
+
+
 class PremiumActionCreateResponse(AgentActionCreateResponse):
     provider: str
     premium_provider: str
@@ -356,6 +368,12 @@ class PremiumActionCreateResponse(AgentActionCreateResponse):
     request_fingerprint: str | None = None
     execution_boundary: str | None = None
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentActionFailRequest(BaseModel):
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    refund: bool = False
+    reason: str = Field(default="provider_execution_failed", min_length=1, max_length=300)
 
 
 class AgentActionConsumeRequest(BaseModel):
@@ -381,6 +399,14 @@ class AgentActionCompleteResponse(BaseModel):
     fulfillment_id: str
     status: str
     metadata: dict[str, Any]
+
+
+class AgentActionFailResponse(AgentActionCompleteResponse):
+    refund_status: str = "not_requested"
+    refund_id: str | None = None
+    payment_status: str | None = None
+    quote_status: str | None = None
+    message: str | None = None
 
 
 class GrantVerifyResponse(BaseModel):

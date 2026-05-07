@@ -4,6 +4,7 @@ import hmac
 import ipaddress
 from secrets import token_urlsafe
 import socket
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 from pathlib import Path
@@ -60,6 +61,7 @@ from .providers.link import retrieve_link_status as retrieve_link_provider_statu
 from .providers.link import validate_credential_type
 from .providers.mock import complete_mock_payment
 from .providers.paysh import build_execution_envelope as build_paysh_execution_envelope
+from .providers.premium_actions import EXECUTION_BOUNDARY as PREMIUM_PRESET_EXECUTION_BOUNDARY, get_preset, list_presets
 from .providers.stripe import (
     create_stripe_checkout_session,
     create_stripe_refund,
@@ -70,6 +72,8 @@ from .rails import normalize_spend_rail
 from .risk import assess_checkout_risk
 from .schemas import (
     AgentRead,
+    AgentActionFailRequest,
+    AgentActionFailResponse,
     AgentRegisterRequest,
     AgentRegisterResponse,
     AgentActionCompleteResponse,
@@ -97,6 +101,7 @@ from .schemas import (
     PayShPremiumActionCreate,
     PayShPremiumActionCreateResponse,
     PremiumActionCreate,
+    PremiumActionPresetActionCreate,
     PremiumActionCreateResponse,
     PurchaseFulfillmentCreate,
     QuoteCreate,
@@ -162,6 +167,9 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.create_premium_action", "endpoint": "/api/v1/premium-actions", "method": "POST", "description": "Provider-neutral premium action primitive for any external provider-backed paid action. Requires exact provider quote up front; creates a request-bound Payjent payment/grant and neutral execution envelope. Payjent authorizes payment/spend only; the agent executes externally after Payjent authorization. Safe HTTPS target_url/service_url is optional when provider/body/provider_metadata fully describe a provider-backed action. Do not include Authorization, Cookie, or API-key headers.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_payjent_authorization"},
+        {"name": "payjent.list_premium_action_presets", "endpoint": "/api/v1/premium-action-presets", "method": "GET", "description": "List modular premium provider presets for Exa, Firecrawl, and ElevenLabs, including required inputs, quote basis, secret policy, and execution boundary.", "preset_ids": ["exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech"]},
+        {"name": "payjent.create_premium_action_from_preset", "endpoint": "/api/v1/premium-action-presets/{preset_id}/actions", "method": "POST", "description": "Create a payment-gated provider action from a preset. Payjent stores a safe execution envelope only; provider API keys remain agent-side.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_payjent_authorization"},
+        {"name": "payjent.fail_action_request_refund", "endpoint": "/api/v1/agent-actions/{action_id}/fail", "method": "POST", "description": "Mark provider execution failed and optionally request a refund for a paid, bot-scoped, unfulfilled action. Idempotent enough to avoid duplicate refunds."},
         {"name": "payjent.create_x402_paid_action", "endpoint": "/api/v1/premium-actions/x402", "method": "POST", "description": "Generic primitive for any x402/pay.sh-compatible paid URL. Requires an exact provider quote up front; creates a request-bound Payjent payment/grant and x402/pay.sh execution envelope. Flow: create action, user pays Stripe/Payjent, agent polls/status, agent consumes payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then agent executes target_url/service_url externally and marks complete. Payjent never POSTs the target URL or stores Authorization/Cookie/API-key headers.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_spend_authorization"},
         {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Backward-compatible alias for payjent.create_x402_paid_action. Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Payjent does not POST service_url or execute the downstream task; payjent_managed_execution is a legacy alias and legacy payjent_fulfillment_callback/payjent_managed_execution flags are ignored for pay.sh actions.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.create_bigquery_paid_query", "endpoint": "/api/v1/premium-actions/pay-sh/bigquery-query", "method": "POST", "description": "Preset for the real pay.sh public catalog BigQuery gateway service solana-foundation/google/bigquery resource jobs. Creates a pay.sh/x402 action for POST https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries with body {query,useLegacySql}. User pays Stripe/Payjent first; agent consumes grant, calls payjent.authorize_x402_spend with capture=true, then agent executes externally using pay curl/pay.sh. Payjent does not execute BigQuery.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "preset": {"provider": "pay_sh", "service_fqn": "solana-foundation/google/bigquery", "resource": "jobs", "gateway": "https://bigquery.google.gateway-402.com/bigquery/v2", "method": "POST", "path_template": "/projects/{project_id}/queries", "execution_boundary": "agent_executes_after_spend_authorization"}},
@@ -1500,6 +1508,47 @@ def create_premium_action(
     return _create_premium_action_from_payload(payload, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings, credential=credential)
 
 
+@app.get("/api/v1/premium-action-presets")
+def premium_action_presets(_credential: BotCredential = Depends(require_bot_credential)):
+    return {"presets": list_presets()}
+
+
+@app.post("/api/v1/premium-action-presets/{preset_id}/actions", response_model=PremiumActionCreateResponse)
+def create_premium_action_from_preset(
+    preset_id: str,
+    payload: PremiumActionPresetActionCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    provider: str | None = Header(default=None, alias="X-Payjent-Provider"),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    credential: BotCredential = Depends(require_bot_credential),
+):
+    preset = get_preset(preset_id)
+    envelope = preset.builder(dict(payload.input or {}))
+    action_payload = AgentActionCreate(
+        bot_id=payload.bot_id,
+        external_user_id=payload.external_user_id,
+        request_summary=payload.request_summary or envelope.get("description") or preset.name,
+        request_hash=payload.request_hash,
+        amount_minor=payload.amount_minor,
+        currency=payload.currency,
+        cost_breakdown=payload.cost_breakdown,
+        execution_envelope=envelope,
+        callback_url=payload.callback_url,
+    )
+    action = create_agent_action(action_payload, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings, credential=credential)
+    data = action if isinstance(action, dict) else action.model_dump()
+    return {
+        **data,
+        "provider": preset.provider,
+        "premium_provider": preset.provider,
+        "command_preview": envelope["command_preview"],
+        "request_fingerprint": data["request_hash"],
+        "execution_boundary": PREMIUM_PRESET_EXECUTION_BOUNDARY,
+        "provider_metadata": envelope.get("provider_metadata") or {},
+    }
+
+
 @app.post("/api/v1/premium-actions/x402", response_model=X402PaidActionCreateResponse)
 def create_x402_paid_action(
     payload: X402PaidActionCreate,
@@ -1699,6 +1748,68 @@ def complete_agent_action(action_id: str, payload: FulfillmentCreate, session: S
     if not stored:
         raise HTTPException(500, "agent action fulfillment was not persisted")
     return action_result_response(stored)
+
+
+def _safe_failure_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    blocked = ("secret", "token", "key", "authorization", "cookie", "password", "credential")
+    safe = {}
+    for key, value in (metadata or {}).items():
+        if any(marker in str(key).lower() for marker in blocked):
+            continue
+        safe[key] = value if isinstance(value, (str, int, float, bool, type(None), list, dict)) else str(value)
+    return safe
+
+
+@app.post("/api/v1/agent-actions/{action_id}/fail", response_model=AgentActionFailResponse)
+def fail_agent_action(action_id: str, payload: AgentActionFailRequest, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    q = session.get(Quote, action_id)
+    if not q:
+        raise HTTPException(404, "quote not found")
+    _enforce_bot_scope(credential, q.bot_id)
+    if q.status in {"fulfilled", "refunded"}:
+        raise HTTPException(status_code=409, detail="fulfilled or refunded actions cannot be failed/refunded")
+    ps = session.exec(select(PaymentSession).where(PaymentSession.quote_id == q.id).order_by(PaymentSession.created_at.desc())).first()
+    if not ps or ps.status not in {"paid", "refunded"}:
+        raise HTTPException(status_code=409, detail="action must have a paid payment session before failure/refund")
+    existing_refund = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "refunded")).first()
+    existing_failed = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "failed")).first()
+    if not existing_failed:
+        ev = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status="failed", metadata_json={"reason": payload.reason, **_safe_failure_metadata(payload.metadata)})
+        q.status = "failed"
+        session.add(q); session.add(ev); session.commit(); session.refresh(ev)
+    else:
+        ev = existing_failed
+    refund_status = "not_requested"
+    refund_id = None
+    message = "Action marked failed."
+    if payload.refund:
+        if existing_refund or ps.status == "refunded" or q.status == "refunded":
+            refund_status = "already_refunded"
+            message = "Action was already refunded."
+        elif ps.status != "paid":
+            raise HTTPException(status_code=409, detail="payment session must be paid before refund")
+        elif ps.provider in {"mock", "local"}:
+            refund_id = f"mock_ref_{uuid4().hex}"
+            refund_status = "succeeded"
+            rev = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status="refunded", metadata_json={"provider": ps.provider, "refund_id": refund_id, "refund_status": refund_status, "payment_session_id": ps.id, "reason": payload.reason})
+            ps.status = "refunded"; q.status = "refunded"
+            session.add(ps); session.add(q); session.add(rev); session.commit()
+            message = "Mock/local payment marked refunded."
+        elif ps.provider == "stripe":
+            try:
+                refund_id, refund_status = create_stripe_refund(ps, q, settings, reason=payload.reason)
+                rev = FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status="refunded", metadata_json={"provider": "stripe", "refund_id": refund_id, "refund_status": refund_status, "payment_session_id": ps.id, "reason": payload.reason})
+                ps.status = "refunded"; q.status = "refunded"
+                session.add(ps); session.add(q); session.add(rev); session.commit()
+                message = "Stripe refund created and payment marked refunded."
+            except HTTPException:
+                refund_status = "manual_review_required"
+                message = "Automatic Stripe refund unavailable; manual review required."
+        else:
+            refund_status = "manual_review_required"
+            message = f"Automatic refund unsupported for payment provider '{ps.provider}'."
+    session.refresh(q); session.refresh(ps)
+    return AgentActionFailResponse(action_id=q.id, quote_id=q.id, fulfillment_id=ev.id, status="failed", metadata=ev.metadata_json, refund_status=refund_status, refund_id=refund_id, payment_status=ps.status, quote_status=q.status, message=message)
 
 
 @app.get("/api/v1/payment-sessions/{session_id}", response_model=PaymentSessionRead)
