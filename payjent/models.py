@@ -115,6 +115,27 @@ class Grant(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class ResumeEvent(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("payment_session_id", "event_type", name="uq_resume_event_payment_session_type"),)
+
+    id: str = Field(primary_key=True)
+    bot_id: str = Field(index=True)
+    quote_id: str = Field(index=True)
+    action_id: str = Field(index=True)
+    payment_session_id: str = Field(index=True)
+    event_type: str = Field(default="agent_action.ready", index=True)
+    status: str = Field(default="ready", index=True)
+    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    callback_url: str | None = None
+    callback_status: str | None = Field(default=None, index=True)
+    callback_attempt_id: str | None = None
+    signature: str | None = None
+    signature_timestamp: str | None = None
+    acked_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime | None = None
+
+
 class SpendLedgerEntry(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("grant_id", "operation_id", name="uq_spend_grant_operation_id"),)
 

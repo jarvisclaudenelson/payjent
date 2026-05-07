@@ -48,6 +48,7 @@ from .models import (
     PaymentSession,
     Quote,
     RailConnection,
+    ResumeEvent,
     SpendLedgerEntry,
     TaskBudget,
     TaskBudgetLedgerEntry,
@@ -113,6 +114,9 @@ from .schemas import (
     QuoteCreate,
     QuoteRead,
     RailConnectionRead,
+    ResumeEventAckResponse,
+    ResumeEventListResponse,
+    ResumeEventRead,
     SpendAuthorizationCreate,
     SpendAuthorizationRead,
     SpendCaptureRequest,
@@ -2012,10 +2016,8 @@ def get_payment_session(session_id: str, session: Session = Depends(get_session)
     return session_to_read(ps)
 
 
-def _deliver_agent_action_callback(session: Session, q: Quote, ps: PaymentSession, settings: Settings, provider: str) -> WebhookDeliveryAttempt | None:
-    if not q.callback_url:
-        return None
-    payload = {
+def _resume_event_payload(q: Quote, ps: PaymentSession, provider: str) -> dict[str, Any]:
+    return {
         "event_type": "agent_action.ready",
         "action_id": q.id,
         "quote_id": q.id,
@@ -2029,15 +2031,72 @@ def _deliver_agent_action_callback(session: Session, q: Quote, ps: PaymentSessio
         "amount_minor": q.amount_minor,
         "currency": q.currency,
         "request_hash": q.request_hash,
+        "resume_hint": {
+            "poll_url": f"/api/v1/agents/{q.bot_id}/resume-events",
+            "consume_url": f"/api/v1/agent-actions/{q.id}/start",
+            "instruction": "Poll/consume the Payjent action grant for this action_id before executing; this event is a readiness signal only.",
+        },
     }
+
+
+def _event_to_read(event: ResumeEvent) -> ResumeEventRead:
+    return ResumeEventRead(
+        id=event.id,
+        event_type=event.event_type,
+        action_id=event.action_id,
+        quote_id=event.quote_id,
+        payment_session_id=event.payment_session_id,
+        bot_id=event.bot_id,
+        status=event.status,
+        payload=event.payload,
+        callback_status=event.callback_status,
+        created_at=event.created_at.isoformat(),
+    )
+
+
+def _enqueue_resume_event(session: Session, q: Quote, ps: PaymentSession, settings: Settings, provider: str) -> ResumeEvent:
+    existing = session.exec(select(ResumeEvent).where(ResumeEvent.payment_session_id == ps.id, ResumeEvent.event_type == "agent_action.ready")).first()
+    if existing:
+        return existing
+    payload = _resume_event_payload(q, ps, provider)
     timestamp, signature = sign_webhook_payload(payload, settings.signing_secret)
+    event = ResumeEvent(
+        id=f"re_{uuid4().hex}", bot_id=q.bot_id, quote_id=q.id, action_id=q.id,
+        payment_session_id=ps.id, event_type="agent_action.ready", status="ready",
+        payload=payload, callback_url=q.callback_url, signature=signature, signature_timestamp=timestamp,
+    )
+    session.add(event)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        existing = session.exec(select(ResumeEvent).where(ResumeEvent.payment_session_id == ps.id, ResumeEvent.event_type == "agent_action.ready")).first()
+        if existing:
+            return existing
+        raise
+    session.refresh(event)
+    return event
+
+
+def _deliver_resume_event_callback(session: Session, event: ResumeEvent, settings: Settings) -> WebhookDeliveryAttempt | None:
+    if not event.callback_url:
+        return None
+    if event.callback_attempt_id and event.callback_status == "success":
+        return session.get(WebhookDeliveryAttempt, event.callback_attempt_id)
+    timestamp = event.signature_timestamp
+    signature = event.signature
+    if not timestamp or not signature:
+        timestamp, signature = sign_webhook_payload(event.payload, settings.signing_secret)
+        event.signature_timestamp = timestamp
+        event.signature = signature
     attempt = WebhookDeliveryAttempt(
-        id=f"wh_{uuid4().hex}", quote_id=q.id, action_id=q.id, payment_session_id=ps.id,
-        callback_url=q.callback_url, status="pending", payload=payload,
+        id=f"wh_{uuid4().hex}", quote_id=event.quote_id, action_id=event.action_id,
+        payment_session_id=event.payment_session_id, callback_url=event.callback_url,
+        status="pending", payload=event.payload,
     )
     try:
         with httpx.Client(timeout=5.0) as client:
-            response = client.post(q.callback_url, json=payload, headers={PAYJENT_TIMESTAMP_HEADER: timestamp, PAYJENT_SIGNATURE_HEADER: signature})
+            response = client.post(event.callback_url, json=event.payload, headers={PAYJENT_TIMESTAMP_HEADER: timestamp, PAYJENT_SIGNATURE_HEADER: signature})
         attempt.http_status = response.status_code
         attempt.status = "success" if 200 <= response.status_code < 300 else "failed"
         if attempt.status == "failed":
@@ -2045,8 +2104,62 @@ def _deliver_agent_action_callback(session: Session, q: Quote, ps: PaymentSessio
     except Exception as exc:
         attempt.status = "failed"
         attempt.error = str(exc)[:500]
-    session.add(attempt); session.commit(); session.refresh(attempt)
+    event.callback_attempt_id = attempt.id
+    event.callback_status = attempt.status
+    event.updated_at = datetime.now(timezone.utc)
+    session.add(attempt)
+    session.add(event)
+    session.commit()
+    session.refresh(attempt)
     return attempt
+
+
+def _deliver_agent_action_callback(session: Session, q: Quote, ps: PaymentSession, settings: Settings, provider: str) -> WebhookDeliveryAttempt | None:
+    event = _enqueue_resume_event(session, q, ps, settings, provider)
+    return _deliver_resume_event_callback(session, event, settings)
+
+
+@app.get("/api/v1/agents/{bot_id}/resume-events", response_model=ResumeEventListResponse)
+def list_resume_events(bot_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, bot_id)
+    events = session.exec(
+        select(ResumeEvent).where(
+            ResumeEvent.bot_id == bot_id,
+            ResumeEvent.event_type == "agent_action.ready",
+            ResumeEvent.status == "ready",
+            ResumeEvent.acked_at.is_(None),
+        ).order_by(ResumeEvent.created_at)
+    ).all()
+    return ResumeEventListResponse(events=[_event_to_read(event) for event in events])
+
+
+@app.post("/api/v1/resume-events/{event_id}/ack", response_model=ResumeEventAckResponse)
+def ack_resume_event(event_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    event = session.get(ResumeEvent, event_id)
+    if not event:
+        raise HTTPException(404, "resume event not found")
+    _enforce_bot_scope(credential, event.bot_id)
+    if event.acked_at is None:
+        event.acked_at = datetime.now(timezone.utc)
+        event.status = "acked"
+        event.updated_at = event.acked_at
+        session.add(event)
+        session.commit()
+        session.refresh(event)
+    return ResumeEventAckResponse(id=event.id, status=event.status, acked=True)
+
+
+@app.post("/api/v1/resume-events/{event_id}/retry", response_model=ResumeEventRead)
+def retry_resume_event(event_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    event = session.get(ResumeEvent, event_id)
+    if not event:
+        raise HTTPException(404, "resume event not found")
+    _enforce_bot_scope(credential, event.bot_id)
+    if event.acked_at is not None:
+        raise HTTPException(status_code=409, detail="resume event already acked")
+    _deliver_resume_event_callback(session, event, settings)
+    session.refresh(event)
+    return _event_to_read(event)
 
 
 _SECRET_HEADER_MARKERS = ("authorization", "cookie", "token", "secret", "key", "credential")

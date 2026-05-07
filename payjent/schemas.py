@@ -372,6 +372,29 @@ class AgentActionStatusResponse(BaseModel):
     fulfillment_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ResumeEventRead(BaseModel):
+    id: str
+    event_type: str
+    action_id: str
+    quote_id: str
+    payment_session_id: str
+    bot_id: str
+    status: str
+    payload: dict[str, Any]
+    callback_status: str | None = None
+    created_at: str
+
+
+class ResumeEventListResponse(BaseModel):
+    events: list[ResumeEventRead]
+
+
+class ResumeEventAckResponse(BaseModel):
+    id: str
+    status: str
+    acked: bool
+
+
 class PayShPremiumActionCreateResponse(AgentActionCreateResponse):
     provider: Literal["pay_sh"] = "pay_sh"
     premium_provider: Literal["pay_sh"] = "pay_sh"
