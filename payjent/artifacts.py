@@ -82,7 +82,7 @@ def create_artifact(
         size_bytes=len(raw),
         storage_backend="db_inline",
         content_base64=content_base64,
-        payload_json=json_payload if json_payload is not None else None,
+        payload_json=safe_json if json_payload is not None else None,
         text_payload=payload_text if json_payload is None else None,
         checksum_sha256=hashlib.sha256(raw).hexdigest(),
         metadata_json=scrub_artifact_value(metadata or {}),

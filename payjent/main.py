@@ -552,7 +552,7 @@ def toolbox_run_execution(execution_id: str, session: Session = Depends(get_sess
         elif execution.tool_id == "firecrawl.scrape":
             result = run_firecrawl_scrape(execution.arguments_json or {}, api_key=settings.firecrawl_api_key)
         elif execution.tool_id == "fal.image.generate":
-            result = run_fal_image_generate(execution.arguments_json or {}, api_key=settings.fal_api_key or os.getenv("FAL_KEY"))
+            result = run_fal_image_generate(execution.arguments_json or {}, api_key=settings.fal_api_key)
         else:
             result = run_elevenlabs_text_to_speech(execution.arguments_json or {}, api_key=settings.elevenlabs_api_key)
     except (ExaProviderNotConfigured, FirecrawlProviderNotConfigured, ElevenLabsProviderNotConfigured, FalProviderNotConfigured):
