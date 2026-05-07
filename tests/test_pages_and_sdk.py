@@ -39,8 +39,12 @@ def test_pay_page_is_human_approval_document_without_tokens(client, quote_payloa
     assert response.status_code == 200
     assert "Human approval document" in response.text
     assert "should this agent resume this exact paid action" in response.text
-    assert "What resumes after payment" in response.text
+    assert "Auto-resume" in response.text
     assert "one-time grant" in response.text
+    assert "Task budget" in response.text
+    assert "Execution readiness" in response.text
+    assert "Auto-resume" in response.text
+    assert "refund by default" in response.text
     assert "Downstream rails" in response.text
     assert paid["grant"]["id"] not in response.text
     assert "payment_token" not in response.text

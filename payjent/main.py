@@ -31,7 +31,7 @@ from .auth import (
     require_operator_credential,
     verify_password,
 )
-from .config import Settings, get_settings
+from .config import CANONICAL_PUBLIC_BASE_URL, Settings, get_settings
 from .db import (
     WORKOS_UNUSABLE_PASSWORD_HASH,
     account_password_hash_nullable,
@@ -202,8 +202,9 @@ def _discovery_manifest(base_url: str) -> dict:
     return {
         "name": "Payjent",
         "version": "v0",
-        "description": "paid-agent-action control plane",
-        "docs_url": f"{base_url}/docs/agent-payjent-self-setup.md",
+        "description": "Payjent spend control for agent tasks: human-approved task budgets, execution readiness, auto-resume, and refund-default fulfillment tracking.",
+        "public_base_url": CANONICAL_PUBLIC_BASE_URL,
+        "docs_url": f"{CANONICAL_PUBLIC_BASE_URL}/docs/agent-payjent-self-setup.md",
         "authenticated_capabilities_url": f"{base_url}/api/v1/agent-capabilities",
         "auth": {
             "header": "X-Payjent-Bot-Key",
@@ -215,6 +216,18 @@ def _discovery_manifest(base_url: str) -> dict:
             "description": "In production, Stripe Checkout is the intended active payment rail when PAYJENT_CHECKOUT_PROVIDER=stripe and required deployment secrets are configured. Agents must send the returned payment_prompt/payment_url to the user and wait for paid status before resuming.",
         },
         "tools": _tool_descriptors(),
+        "agent_guidance": [
+            "Do not ask users for secrets, API keys, wallet mnemonics, grants, or payment tokens in chat.",
+            "Use dashboard/platform connections, an agent install link, or a private secret store for Payjent credentials and provider credentials.",
+            "Public Payjent URLs use https://payjent.com; do not advertise preview or testserver hosts to users.",
+            "Provider credentials and wallet runtimes are agent-side requirements unless a provider connection is configured in Payjent.",
+        ],
+        "capabilities": {
+            "task_budgets": "Every paid action carries an exact task budget and matching cost_breakdown; unknown prices fail closed.",
+            "execution_readiness": "Authenticated status/capabilities tell the agent when payment and rail prerequisites are ready; public pages hide raw secrets and tokens.",
+            "auto_resume": "After payment, agents poll status or receive a signed callback, then resume the stored request-bound envelope.",
+            "refund_default_behavior": "If paid downstream execution fails, Payjent requests a refund by default unless the agent explicitly opts out.",
+        },
         "security_invariants": [
             "request-bound approvals and grants",
             "paid-before-execute",
@@ -341,7 +354,7 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
         checkout_cta = f"""<section><h2>Complete payment</h2><p>This checkout can be completed from the browser without exposing operator credentials, payment tokens, or raw grant IDs.</p><form method="post" action="/pay/{_html_escape(ps.id)}/mock-pay"><button class="btn" type="submit">Approve and pay {_html_escape(_format_money(q.amount_minor, q.currency))}</button></form><p class="fine">Payjent will issue a single-use grant for the exact stored request after approval.</p></section>"""
     elif ps.provider == "stripe" and ps.status != "paid" and ps.checkout_url and ps.checkout_url.startswith("https://"):
         checkout_cta = f"""<section><h2>Complete secure payment</h2><p>Continue to Stripe hosted checkout to pay securely. Payjent will resume the exact stored agent action after Stripe confirms payment.</p><p><a class="btn" href="{_html_escape(ps.checkout_url)}" rel="noopener noreferrer">Continue to secure payment</a></p><p class="fine">Payjent does not show raw grants, payment tokens, or credentials on this page.</p></section>"""
-    return f"""<!doctype html><html><head><title>Payjent checkout · Approve paid agent action</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Human approval document</div><h1>Approve this exact paid action?</h1><p class='muted'>Key question: should this agent resume this exact paid action after payment?</p></section><div class='grid'><div class='card'><h3>Agent request</h3><p>{_html_escape(q.request_summary)}</p><p class='fine'>External user: <code>{_html_escape(q.external_user_id)}</code><br>Request hash: <code>{_html_escape(q.request_hash)}</code></p></div><div class='card'><h3>Amount</h3><div class='stat'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div><ul>{breakdown}</ul></div><div class='card'><h3>Status</h3><p><b>{_html_escape(status_words)}</b></p><p class='fine'>Payment session: <code>{_html_escape(ps.id)}</code><br>Payment provider/status: {_html_escape(ps.provider)} / {_html_escape(ps.status)}<br>Grant state: {_html_escape(_grant_state(grant))}</p></div><div class='card'><h3>What resumes after payment</h3><p>{resumes}</p><p class='fine'>Approval creates a one-time grant bound to this stored request. Raw grant and payment tokens are not shown on this page.</p></div></div><section><h2>Approval terms</h2><ul><li>Human approval is required before Payjent marks this action ready.</li><li>The grant is single-use and tied to the exact request hash above.</li><li>Downstream rails may still impose their own authorization, settlement, availability, or rejection behavior; Payjent records the checkpoint and does not guarantee a third-party rail outcome.</li><li>Fulfillment events recorded so far: {len(fulfillment)}.</li></ul><p><a class='btn' href="/status/{_html_escape(ps.id)}">View status</a></p></section>{checkout_cta}</main></body></html>"""
+    return f"""<!doctype html><html><head><title>Payjent checkout · Approve paid agent action</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Human approval document</div><h1>Approve this exact paid action?</h1><p class='muted'>Key question: should this agent resume this exact paid action after payment?</p></section><div class='grid'><div class='card'><h3>Agent request</h3><p>{_html_escape(q.request_summary)}</p><p class='fine'>External user: <code>{_html_escape(q.external_user_id)}</code><br>Request hash: <code>{_html_escape(q.request_hash)}</code></p></div><div class='card'><h3>Task budget</h3><div class='stat'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div><p class='fine'>Spend control: this approval covers only the exact stored task budget below.</p><ul>{breakdown}</ul></div><div class='card'><h3>Execution readiness</h3><p><b>{_html_escape(status_words)}</b></p><p class='fine'>Payment session: <code>{_html_escape(ps.id)}</code><br>Payment state: {_html_escape(ps.status)}<br>Grant state: {_html_escape(_grant_state(grant))}</p></div><div class='card'><h3>Auto-resume</h3><p>{resumes}</p><p class='fine'>Approval creates a one-time grant bound to this stored request. Raw grant and payment tokens are not shown on this page.</p></div></div><section><h2>Approval terms</h2><ul><li>Human approval is required before Payjent marks this action ready.</li><li>The grant is single-use and tied to the exact request hash above.</li><li>Downstream rails may still impose their own authorization, settlement, availability, or rejection behavior; Payjent records the checkpoint and does not guarantee a third-party rail outcome.</li><li>Agent-side provider credentials or wallet runtime are required unless a provider connection is configured in Payjent.</li><li>If paid downstream execution fails, Payjent requests a refund by default unless the agent explicitly opts out.</li><li>Fulfillment events recorded so far: {len(fulfillment)}.</li></ul><p><a class='btn' href="/status/{_html_escape(ps.id)}">View status</a></p></section>{checkout_cta}</main></body></html>"""
 
 
 @app.post("/pay/{payment_session_id}/mock-pay")
