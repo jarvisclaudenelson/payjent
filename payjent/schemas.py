@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -38,6 +40,8 @@ class ToolboxQuoteCreate(BaseModel):
     bot_id: str = Field(min_length=1)
     external_user_id: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+    request_hash: str | None = None
+    quote_id: str | None = None
 
 
 class ToolboxQuoteRead(BaseModel):
@@ -54,6 +58,48 @@ class ToolboxQuoteRead(BaseModel):
     execution_mode: str
     provider_type: str
     execution_caveat: str
+
+
+class ToolboxCheckoutRequest(ToolboxQuoteCreate):
+    pass
+
+
+class ToolboxCheckoutResponse(BaseModel):
+    status: str
+    quote: QuoteRead | None = None
+    payment_session: PaymentSessionRead | None = None
+    payment_url: str | None = None
+    toolbox_quote: ToolboxQuoteRead
+    guidance: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolExecutionCreate(ToolboxQuoteCreate):
+    payment_session_id: str | None = None
+    quote_id: str | None = None
+
+
+class ToolExecutionRead(BaseModel):
+    id: str
+    tool_id: str
+    bot_id: str
+    external_user_id: str
+    quote_id: str | None = None
+    payment_session_id: str | None = None
+    amount_minor: int
+    currency: str
+    request_hash: str
+    arguments_json: dict[str, Any]
+    status: str
+    result_metadata_json: dict[str, Any]
+    error_metadata_json: dict[str, Any]
+
+
+class ToolExecutionCompleteRequest(BaseModel):
+    result_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolExecutionFailRequest(BaseModel):
+    error_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentRegisterRequest(BaseModel):

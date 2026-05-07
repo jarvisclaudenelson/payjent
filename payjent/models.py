@@ -92,6 +92,24 @@ class PaymentSession(SQLModel, table=True):
     paid_at: datetime | None = None
 
 
+class ToolExecution(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    tool_id: str = Field(index=True)
+    bot_id: str = Field(index=True)
+    external_user_id: str = Field(index=True)
+    quote_id: str | None = Field(default=None, index=True)
+    payment_session_id: str | None = Field(default=None, index=True)
+    amount_minor: int
+    currency: str = Field(default="USD", index=True)
+    request_hash: str = Field(index=True)
+    arguments_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    status: str = Field(default="quoted", index=True)
+    result_metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    error_metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime | None = None
+
+
 class Receipt(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("payment_session_id", name="uq_receipt_payment_session_id"),)
     id: str = Field(primary_key=True)

@@ -47,6 +47,7 @@ from .models import (
     Grant,
     PaymentSession,
     Quote,
+    ToolExecution,
     RailConnection,
     ResumeEvent,
     SpendLedgerEntry,
@@ -131,6 +132,12 @@ from .schemas import (
     TaskBudgetRead,
     ToolboxQuoteCreate,
     ToolboxQuoteRead,
+    ToolboxCheckoutRequest,
+    ToolboxCheckoutResponse,
+    ToolExecutionCreate,
+    ToolExecutionRead,
+    ToolExecutionCompleteRequest,
+    ToolExecutionFailRequest,
     X402ConfigureRequest,
     X402PaidActionCreate,
     X402PaidActionCreateResponse,
@@ -283,6 +290,96 @@ def toolbox_list():
     return {"tools": list_toolbox_tools(), "count": len(list_toolbox_tools())}
 
 
+def _toolbox_quote_or_404(tool_id: str, payload: ToolboxQuoteCreate) -> tuple[dict[str, Any], dict[str, Any]]:
+    tool = get_toolbox_tool(tool_id)
+    if not tool:
+        raise HTTPException(status_code=404, detail="tool not found")
+    toolbox_quote = build_tool_quote(tool, bot_id=payload.bot_id, external_user_id=payload.external_user_id, arguments=payload.arguments)
+    if payload.request_hash and payload.request_hash != toolbox_quote["request_hash"]:
+        raise HTTPException(status_code=409, detail="request_hash does not match recomputed toolbox quote")
+    return tool, toolbox_quote
+
+
+def _toolbox_execution_envelope(tool: dict[str, Any], toolbox_quote: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tool_id": tool["tool_id"],
+        "provider_type": toolbox_quote["provider_type"],
+        "execution_mode": toolbox_quote["execution_mode"],
+        "arguments": arguments,
+        "payment_options": toolbox_quote["payment_options"],
+        "recommended_payment_rail": toolbox_quote["recommended_payment_rail"],
+        "execution_boundary": "agent_executes_after_payjent_authorization",
+        "execution_caveat": toolbox_quote["execution_caveat"],
+        "arbitrary_url_execution": False,
+    }
+
+
+def _create_quote_for_toolbox(payload: ToolboxQuoteCreate, tool: dict[str, Any], toolbox_quote: dict[str, Any], session: Session) -> Quote:
+    cost_breakdown = [{"label": f"Toolbox action: {tool['tool_id']}", "amount_minor": toolbox_quote["amount_minor"]}]
+    canonical = {
+        "bot_id": payload.bot_id,
+        "external_user_id": payload.external_user_id,
+        "request_summary": f"Toolbox action: {tool['tool_id']}",
+        "request_hash": toolbox_quote["request_hash"],
+        "amount_minor": toolbox_quote["amount_minor"],
+        "currency": toolbox_quote["currency"].upper(),
+        "cost_breakdown": cost_breakdown,
+        "execution_envelope": _toolbox_execution_envelope(tool, toolbox_quote, payload.arguments),
+        "callback_url": None,
+    }
+    q = Quote(id=f"quote_{uuid4().hex}", quote_hash=quote_hash(canonical), **canonical)
+    session.add(q); session.commit(); session.refresh(q)
+    return q
+
+
+def _scrub_secret_metadata(value: Any) -> Any:
+    secret_markers = ("secret", "token", "api_key", "apikey", "authorization", "cookie", "password", "private_key", "credential", "grant")
+    if isinstance(value, dict):
+        return {str(k): ("redacted" if any(m in str(k).lower().replace("-", "_") for m in secret_markers) else _scrub_secret_metadata(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_secret_metadata(v) for v in value]
+    return value
+
+
+def _execution_to_read(execution: ToolExecution) -> ToolExecutionRead:
+    return ToolExecutionRead.model_validate(execution, from_attributes=True)
+
+
+@app.get("/api/v1/toolbox/executions/{execution_id}", response_model=ToolExecutionRead)
+def toolbox_get_execution(execution_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    execution = session.get(ToolExecution, execution_id)
+    if not execution:
+        raise HTTPException(404, "tool execution not found")
+    _enforce_bot_scope(credential, execution.bot_id)
+    return _execution_to_read(execution)
+
+
+@app.post("/api/v1/toolbox/executions/{execution_id}/complete", response_model=ToolExecutionRead)
+def toolbox_complete_execution(execution_id: str, payload: ToolExecutionCompleteRequest, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    execution = session.get(ToolExecution, execution_id)
+    if not execution:
+        raise HTTPException(404, "tool execution not found")
+    _enforce_bot_scope(credential, execution.bot_id)
+    execution.status = "succeeded"
+    execution.result_metadata_json = _scrub_secret_metadata(payload.result_metadata)
+    execution.updated_at = datetime.now(timezone.utc)
+    session.add(execution); session.commit(); session.refresh(execution)
+    return _execution_to_read(execution)
+
+
+@app.post("/api/v1/toolbox/executions/{execution_id}/fail", response_model=ToolExecutionRead)
+def toolbox_fail_execution(execution_id: str, payload: ToolExecutionFailRequest, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    execution = session.get(ToolExecution, execution_id)
+    if not execution:
+        raise HTTPException(404, "tool execution not found")
+    _enforce_bot_scope(credential, execution.bot_id)
+    execution.status = "failed"
+    execution.error_metadata_json = _scrub_secret_metadata(payload.error_metadata)
+    execution.updated_at = datetime.now(timezone.utc)
+    session.add(execution); session.commit(); session.refresh(execution)
+    return _execution_to_read(execution)
+
+
 @app.get("/api/v1/toolbox/{tool_id}")
 def toolbox_detail(tool_id: str):
     tool = get_toolbox_tool(tool_id)
@@ -294,10 +391,45 @@ def toolbox_detail(tool_id: str):
 @app.post("/api/v1/toolbox/{tool_id}/quote", response_model=ToolboxQuoteRead)
 def toolbox_quote(tool_id: str, payload: ToolboxQuoteCreate, credential: BotCredential = Depends(require_bot_credential)):
     _enforce_bot_scope(credential, payload.bot_id)
-    tool = get_toolbox_tool(tool_id)
-    if not tool:
-        raise HTTPException(status_code=404, detail="tool not found")
-    return build_tool_quote(tool, bot_id=payload.bot_id, external_user_id=payload.external_user_id, arguments=payload.arguments)
+    _tool, toolbox_quote = _toolbox_quote_or_404(tool_id, payload)
+    return toolbox_quote
+
+
+@app.post("/api/v1/toolbox/{tool_id}/checkout", response_model=ToolboxCheckoutResponse)
+def toolbox_checkout(tool_id: str, payload: ToolboxCheckoutRequest, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), provider: str | None = Header(default=None, alias="X-Payjent-Provider"), session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, payload.bot_id)
+    tool, toolbox_quote = _toolbox_quote_or_404(tool_id, payload)
+    if toolbox_quote["amount_minor"] < STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(toolbox_quote["currency"].upper(), 50):
+        if toolbox_quote["provider_type"] == "trusted_paysh" and toolbox_quote["recommended_payment_rail"] in {"pay_sh", "x402"}:
+            return JSONResponse(status_code=402, content={"status": "micro_rail_required", "quote": None, "payment_session": None, "payment_url": None, "toolbox_quote": toolbox_quote, "guidance": {"reason": "sub-card-minimum trusted pay.sh/x402 action", "required_rail": toolbox_quote["recommended_payment_rail"], "pay_sh": {"arbitrary_url_execution": False, "instructions": "Use an agent-side funded pay.sh/x402 runtime after Payjent approval; Payjent does not create Stripe checkout for this microcharge by default."}}})
+        return JSONResponse(status_code=402, content={"status": "task_budget_required", "quote": None, "payment_session": None, "payment_url": None, "toolbox_quote": toolbox_quote, "guidance": {"reason": "amount is below Stripe card checkout minimum", "task_budget_required": True, "minimum_amount_minor": STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(toolbox_quote["currency"].upper(), 50)}})
+    q = _create_quote_for_toolbox(payload, tool, toolbox_quote, session)
+    ps = _create_checkout_for_quote(q, idempotency_key=idempotency_key, provider=provider, session=session, settings=settings)
+    return ToolboxCheckoutResponse(status="checkout_created", quote=quote_to_read(q), payment_session=session_to_read(ps), payment_url=ps.checkout_url, toolbox_quote=toolbox_quote)
+
+
+@app.post("/api/v1/toolbox/{tool_id}/executions", response_model=ToolExecutionRead)
+def toolbox_create_execution(tool_id: str, payload: ToolExecutionCreate, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, payload.bot_id)
+    _tool, toolbox_quote = _toolbox_quote_or_404(tool_id, payload)
+    quote_id = payload.quote_id
+    payment_session_id = payload.payment_session_id
+    status = "payment_required"
+    if payment_session_id:
+        ps = session.get(PaymentSession, payment_session_id)
+        if not ps:
+            raise HTTPException(404, "payment session not found")
+        q = session.get(Quote, ps.quote_id)
+        if not q:
+            raise HTTPException(404, "quote not found")
+        _enforce_bot_scope(credential, q.bot_id)
+        if q.request_hash != toolbox_quote["request_hash"]:
+            raise HTTPException(409, "payment session quote does not match recomputed toolbox quote")
+        quote_id = q.id
+        status = "ready_to_execute" if ps.status == "paid" else "payment_required"
+    execution = ToolExecution(id=f"texec_{uuid4().hex}", tool_id=tool_id, bot_id=payload.bot_id, external_user_id=payload.external_user_id, quote_id=quote_id, payment_session_id=payment_session_id, amount_minor=toolbox_quote["amount_minor"], currency=toolbox_quote["currency"], request_hash=toolbox_quote["request_hash"], arguments_json=payload.arguments, status=status)
+    session.add(execution); session.commit(); session.refresh(execution)
+    return _execution_to_read(execution)
 
 @app.get("/", response_class=HTMLResponse)
 def landing_page(settings: Settings = Depends(get_settings)):
