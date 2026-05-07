@@ -79,6 +79,19 @@ def test_pay_sh_premium_action_endpoint_rejects_missing_target(client, bot_heade
     assert "service_url" in r.text
 
 
+def test_pay_sh_premium_action_rejects_fal_site_root_before_checkout(client, bot_headers):
+    payload = _pay_sh_payload(
+        service_url="https://fal.ai",
+        body={},
+        description="Create an image through fal.ai via pay.sh",
+    )
+    r = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
+    assert r.status_code == 422
+    assert "not an executable pay.sh/x402 gateway endpoint" in r.text
+    assert "paysponge/fal" in r.text
+    assert "fal-ai/flux/schnell" in r.text
+
+
 def test_unpaid_agent_action_cannot_start(client, quote_payload, bot_headers):
     action = _create_action(client, quote_payload, bot_headers).json()
     r = client.post(

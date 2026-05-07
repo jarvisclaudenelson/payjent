@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import shlex
 from typing import Any
+from urllib.parse import urlparse
 
 PROVIDER = "pay_sh"
 KIND = "premium_api_call"
@@ -36,6 +37,17 @@ def validate_target(*, service_url: str | None = None, service_fqn: str | None =
     resource = _clean_optional(resource)
     if not service_url and not (service_fqn and resource):
         raise ValueError("provide either service_url or both service_fqn and resource")
+    if service_url:
+        parsed = urlparse(service_url)
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").strip("/")
+        if host in {"fal.ai", "www.fal.ai"} and not path:
+            raise ValueError(
+                "https://fal.ai is a catalog/site root, not an executable pay.sh/x402 gateway endpoint; "
+                "use the public pay.sh catalog target service_fqn='paysponge/fal' with a concrete resource "
+                "such as 'fal-ai/flux/schnell', or provide a resolved gateway URL like "
+                "https://fal.x402.paysponge.com/<resource> plus the required request body"
+            )
     return service_url, service_fqn, resource
 
 
