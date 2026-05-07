@@ -49,6 +49,42 @@ class RailConnectionRead(BaseModel):
     config: dict[str, Any]
 
 
+class SettlementRailManifest(BaseModel):
+    rail: str
+    display_name: str
+    category: str
+    status: str
+    mode: str
+    spend_authorization_rail: str
+    currencies: list[str]
+    networks: list[str]
+    min_amount_minor: int
+    min_amount_decimal: str
+    supports_microspend: bool
+    supports_budget_reservation: bool
+    supports_auto_resume: bool
+    requires_wallet: bool
+    requires_human_checkout: bool | str
+    readiness_checks: list[str]
+    execution_boundary: str
+    facilitator_url: str | None = None
+
+
+class SettlementRailConfigureRequest(BaseModel):
+    rail: str = Field(min_length=1)
+    status: Literal["enabled", "active", "connected", "disabled", "not_ready"] = "enabled"
+    mode: str = Field(default="external_runtime", min_length=1)
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentSettlementRailsResponse(BaseModel):
+    bot_id: str
+    rails: list[SettlementRailManifest]
+    connections: dict[str, RailConnectionRead] = Field(default_factory=dict)
+    spend_instruction: str
+
+
 class AgentRead(BaseModel):
     id: str
     owner_id: str

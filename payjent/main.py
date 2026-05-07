@@ -72,6 +72,7 @@ from .providers.stripe import (
     verify_stripe_signature,
 )
 from .rails import normalize_spend_rail
+from .settlement_rails import list_settlement_rail_manifests, normalize_settlement_rail, settlement_rail_manifest
 from .risk import assess_checkout_risk
 from .readiness import enforce_readiness, readiness_record, safe_metadata
 from .schemas import (
@@ -114,6 +115,9 @@ from .schemas import (
     QuoteCreate,
     QuoteRead,
     RailConnectionRead,
+    AgentSettlementRailsResponse,
+    SettlementRailConfigureRequest,
+    SettlementRailManifest,
     ResumeEventAckResponse,
     ResumeEventListResponse,
     ResumeEventRead,
@@ -205,10 +209,18 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
 
 def _safe_rail_config_summary(rail: RailConnection) -> dict:
     cfg = dict(rail.config_json or {})
-    if rail.rail == "x402":
-        allowed = {"network", "pay_to", "facilitator_url", "max_per_request_minor", "max_per_call_minor", "currency", "enabled"}
-        return {key: cfg[key] for key in allowed if key in cfg}
-    return {}
+    allowed = {
+        "network", "networks", "currency", "currencies", "enabled", "mode", "status",
+        "facilitator_url", "max_per_request_minor", "max_per_call_minor",
+        "wallet_provider", "provider_account", "merchant_allowlist", "spend_limit_minor",
+        "readiness_checks", "runtime_ready", "can_execute_without_device_auth", "provider_connected",
+    }
+    redacted = {key: value for key, value in cfg.items() if key in allowed}
+    for key in cfg:
+        lowered = key.lower()
+        if any(secret_word in lowered for secret_word in ("secret", "token", "key", "password", "credential", "private")):
+            redacted[key] = "redacted"
+    return redacted
 
 
 def _discovery_manifest(base_url: str) -> dict:
@@ -439,7 +451,7 @@ def status_page(payment_session_id: str, session: Session = Depends(get_session)
 
 
 def _rail_to_read(r: RailConnection) -> RailConnectionRead:
-    return RailConnectionRead(rail=r.rail, status=r.status, mode=r.mode, config=r.config_json)
+    return RailConnectionRead(rail=r.rail, status=r.status, mode=r.mode, config=_safe_rail_config_summary(r))
 
 
 def _agent_to_read(agent: AgentProfile, session: Session) -> AgentRead:
@@ -698,7 +710,63 @@ def configure_x402(agent_id: str, payload: X402ConfigureRequest, session: Sessio
     if payload.enabled and payload.max_per_call_minor > payload.max_per_request_minor:
         raise HTTPException(status_code=422, detail="max_per_call_minor must be <= max_per_request_minor")
     config = payload.model_dump()
-    rail = _upsert_rail(session, agent, "x402", "enabled" if payload.enabled else "disabled", "test", config)
+    rail = _upsert_rail(session, agent, "x402", "enabled" if payload.enabled else "disabled", "legacy", config)
+    _upsert_rail(session, agent, "x402_cdp", "enabled" if payload.enabled else "disabled", "test", config)
+    return _rail_to_read(rail)
+
+
+@app.get("/api/v1/settlement-rails", response_model=list[SettlementRailManifest])
+def list_settlement_rails():
+    return [SettlementRailManifest(**manifest) for manifest in list_settlement_rail_manifests()]
+
+
+@app.get("/api/v1/agents/{bot_id}/settlement-rails", response_model=AgentSettlementRailsResponse)
+def get_agent_settlement_rails(bot_id: str, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, bot_id)
+    agent = session.exec(select(AgentProfile).where(AgentProfile.bot_id == bot_id)).first()
+    connections: dict[str, RailConnectionRead] = {}
+    if agent:
+        rows = session.exec(select(RailConnection).where(RailConnection.agent_id == agent.id)).all()
+        connections = {r.rail: _rail_to_read(r) for r in rows}
+    return AgentSettlementRailsResponse(
+        bot_id=bot_id,
+        rails=[SettlementRailManifest(**manifest) for manifest in list_settlement_rail_manifests()],
+        connections=connections,
+        spend_instruction="Create/fund a task budget, create a paid action with task_budget_id, consume the grant, then POST /api/v1/grants/{grant_id}/spend-authorizations using one of the listed spend_authorization_rail values. The agent executes on the external rail; Payjent records authorization/capture/fulfillment evidence.",
+    )
+
+
+@app.post("/api/v1/agents/{agent_id}/settlement-rails", response_model=RailConnectionRead)
+def configure_settlement_rail(agent_id: str, payload: SettlementRailConfigureRequest, session: Session = Depends(get_session), _credential: BotCredential = Depends(require_operator_credential)):
+    agent = session.get(AgentProfile, agent_id)
+    if not agent:
+        raise HTTPException(404, "agent not found")
+    try:
+        rail_name = normalize_settlement_rail(payload.rail)
+        manifest = settlement_rail_manifest(rail_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    config = {**manifest, **safe_metadata(payload.config), "enabled": payload.enabled}
+    status = "disabled" if not payload.enabled else payload.status
+    rail = _upsert_rail(session, agent, rail_name, status, payload.mode, config)
+    return _rail_to_read(rail)
+
+
+@app.post("/api/v1/agents/{bot_id}/settlement-rails/report", response_model=RailConnectionRead)
+def report_agent_settlement_rail(bot_id: str, payload: SettlementRailConfigureRequest, session: Session = Depends(get_session), credential: BotCredential = Depends(require_bot_credential)):
+    _enforce_bot_scope(credential, bot_id)
+    agent = session.exec(select(AgentProfile).where(AgentProfile.bot_id == bot_id)).first()
+    if not agent:
+        agent = AgentProfile(id=f"agent_{uuid4().hex}", bot_id=bot_id, name=bot_id, platform="agent-runtime")
+        session.add(agent); session.commit(); session.refresh(agent)
+    try:
+        rail_name = normalize_settlement_rail(payload.rail)
+        manifest = settlement_rail_manifest(rail_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    config = {**manifest, **safe_metadata(payload.config), "enabled": payload.enabled}
+    status = "disabled" if not payload.enabled else payload.status
+    rail = _upsert_rail(session, agent, rail_name, status, payload.mode or "agent_reported", config)
     return _rail_to_read(rail)
 
 
@@ -1162,6 +1230,8 @@ def agent_capabilities(request: Request, session: Session = Depends(get_session)
         "agent": {"id": agent.id, "bot_id": agent.bot_id, "name": agent.name, "platform": agent.platform, "status": agent.status, "default_currency": agent.default_currency},
         "base_url": base_url,
         "enabled_rails": enabled_rails,
+        "settlement_rails": [manifest for manifest in list_settlement_rail_manifests()],
+        "settlement_rails_url": f"{base_url}/api/v1/agents/{agent.bot_id}/settlement-rails",
         "tools": _tool_descriptors(x402_available=x402_available),
         "active_payment": {
             "provider": _checkout_provider(settings),
