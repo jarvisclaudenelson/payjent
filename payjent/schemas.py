@@ -40,6 +40,9 @@ class ToolboxQuoteCreate(BaseModel):
     bot_id: str = Field(min_length=1)
     external_user_id: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+    amount_minor: int = Field(ge=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    cost_breakdown: list[CostItem] | None = None
     request_hash: str | None = None
     quote_id: str | None = None
 
@@ -51,6 +54,7 @@ class ToolboxQuoteRead(BaseModel):
     amount_minor: int
     currency: str
     request_hash: str
+    cost_breakdown: list[dict[str, Any]]
     expires_at: str
     payment_options: list[dict[str, Any]]
     recommended_payment_rail: str

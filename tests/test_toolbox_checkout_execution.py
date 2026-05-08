@@ -5,10 +5,11 @@ from payjent.main import app
 from sqlmodel import Session, select
 
 from payjent.models import PaymentSession, Quote, ToolExecution
+from payjent.providers.mock import complete_mock_payment
 
 
 def _payload(arguments=None, **extra):
-    body = {"bot_id": "bot-1", "external_user_id": "user-1", "arguments": arguments or {"prompt": "a robot", "quantity": 1}}
+    body = {"bot_id": "bot-1", "external_user_id": "user-1", "arguments": arguments or {"prompt": "a robot", "quantity": 1}, "amount_minor": 80, "currency": "USD"}
     body.update(extra)
     return body
 
@@ -45,7 +46,7 @@ def test_toolbox_checkout_fal_creates_quote_and_payment_session(client, bot_head
 def test_toolbox_checkout_sub_50_managed_requires_task_budget_without_payment_session(client, bot_headers, engine):
     response = client.post(
         "/api/v1/toolbox/exa.deep_search/checkout",
-        json=_payload({"query": "micropayments"}),
+        json=_payload({"query": "micropayments"}, amount_minor=10),
         headers=bot_headers,
     )
     assert response.status_code == 402
@@ -100,7 +101,7 @@ def test_payment_readiness_reports_managed_provider_config_without_secret_values
 def test_toolbox_checkout_sub_50_paysh_requires_micro_rail_without_payment_session(client, bot_headers, engine):
     response = client.post(
         "/api/v1/toolbox/paysh.search/checkout",
-        json=_payload({"instructions": "search latest docs"}),
+        json=_payload({"instructions": "search latest docs"}, amount_minor=10),
         headers=bot_headers,
     )
     assert response.status_code == 402
@@ -124,7 +125,7 @@ def test_toolbox_checkout_rejects_request_hash_tampering(client, bot_headers):
 def test_toolbox_execution_create_get_complete_fail_lifecycle_safe_and_route_order(client, bot_headers, operator_headers, engine):
     created = client.post(
         "/api/v1/toolbox/exa.deep_search/executions",
-        json=_payload({"query": "safe lifecycle"}),
+        json=_payload({"query": "safe lifecycle"}, amount_minor=10),
         headers=bot_headers,
     )
     assert created.status_code == 200
@@ -162,15 +163,17 @@ def test_toolbox_execution_create_get_complete_fail_lifecycle_safe_and_route_ord
         assert len(session.exec(select(ToolExecution)).all()) == 1
 
 
-def test_toolbox_execution_ready_when_paid_payment_session_supplied(client, bot_headers, operator_headers):
+def test_toolbox_execution_ready_when_paid_payment_session_supplied(client, bot_headers, operator_headers, engine):
     checkout = client.post(
         "/api/v1/toolbox/fal.image.generate/checkout",
         json=_payload({"prompt": "paid robot", "quantity": 1}),
         headers=bot_headers,
     ).json()
     ps_id = checkout["payment_session"]["id"]
-    paid = client.post(f"/api/v1/payment-sessions/{ps_id}/mock-pay", headers=operator_headers)
-    assert paid.status_code == 200
+    with Session(engine) as session:
+        ps = session.get(PaymentSession, ps_id)
+        q = session.get(Quote, ps.quote_id)
+        complete_mock_payment(session, q, ps, get_settings().signing_secret, get_settings().grant_ttl_seconds)
 
     created = client.post(
         "/api/v1/toolbox/fal.image.generate/executions",
@@ -207,7 +210,7 @@ def test_toolbox_firecrawl_url_is_summarized_not_persisted(client, bot_headers, 
     raw_url = "https://example.com/private/path?safe=1"
     response = client.post(
         "/api/v1/toolbox/firecrawl.scrape/checkout",
-        json=_payload({"url": raw_url}),
+        json=_payload({"url": raw_url}, amount_minor=20),
         headers=bot_headers,
     )
     assert response.status_code == 402
@@ -220,7 +223,7 @@ def test_toolbox_firecrawl_url_is_summarized_not_persisted(client, bot_headers, 
 
     checkout = client.post(
         "/api/v1/toolbox/firecrawl.scrape/executions",
-        json=_payload({"url": raw_url}),
+        json=_payload({"url": raw_url}, amount_minor=20),
         headers=bot_headers,
     )
     assert checkout.status_code == 200
@@ -241,7 +244,7 @@ def test_toolbox_firecrawl_rejects_secret_like_query_keys_before_quote_or_execut
     raw_url = "https://example.com/page?api_key=redacted"
     quote = client.post(
         "/api/v1/toolbox/firecrawl.scrape/quote",
-        json=_payload({"url": raw_url}),
+        json=_payload({"url": raw_url}, amount_minor=20),
         headers=bot_headers,
     )
     assert quote.status_code == 422
@@ -249,7 +252,7 @@ def test_toolbox_firecrawl_rejects_secret_like_query_keys_before_quote_or_execut
 
     execution = client.post(
         "/api/v1/toolbox/firecrawl.scrape/executions",
-        json=_payload({"url": raw_url}),
+        json=_payload({"url": raw_url}, amount_minor=20),
         headers=bot_headers,
     )
     assert execution.status_code == 422

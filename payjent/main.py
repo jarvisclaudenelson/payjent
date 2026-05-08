@@ -82,7 +82,7 @@ from .providers.stripe import (
 )
 from .rails import normalize_spend_rail
 from .settlement_rails import list_settlement_rail_manifests, normalize_settlement_rail, settlement_rail_manifest
-from .toolbox import build_tool_quote, get_tool as get_toolbox_tool, list_tools as list_toolbox_tools
+from .toolbox import STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY, build_tool_quote, get_tool as get_toolbox_tool, list_tools as list_toolbox_tools
 from .risk import assess_checkout_risk
 from .readiness import enforce_readiness, readiness_record, safe_metadata
 from .schemas import (
@@ -327,7 +327,18 @@ def _toolbox_quote_or_404(tool_id: str, payload: ToolboxQuoteCreate) -> tuple[di
     _reject_secret_argument_keys(payload.arguments)
     if tool_id == "firecrawl.scrape":
         _sanitize_toolbox_arguments(tool_id, payload.arguments)
-    toolbox_quote = build_tool_quote(tool, bot_id=payload.bot_id, external_user_id=payload.external_user_id, arguments=payload.arguments)
+    try:
+        toolbox_quote = build_tool_quote(
+            tool,
+            bot_id=payload.bot_id,
+            external_user_id=payload.external_user_id,
+            arguments=payload.arguments,
+            amount_minor=payload.amount_minor,
+            currency=payload.currency,
+            cost_breakdown=[item.model_dump() for item in payload.cost_breakdown] if payload.cost_breakdown is not None else None,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     if payload.request_hash and payload.request_hash != toolbox_quote["request_hash"]:
         raise HTTPException(status_code=409, detail="request_hash does not match recomputed toolbox quote")
     return tool, toolbox_quote
@@ -442,7 +453,7 @@ def _toolbox_execution_envelope(tool: dict[str, Any], toolbox_quote: dict[str, A
 
 
 def _create_quote_for_toolbox(payload: ToolboxQuoteCreate, tool: dict[str, Any], toolbox_quote: dict[str, Any], session: Session) -> Quote:
-    cost_breakdown = [{"label": f"Toolbox action: {tool['tool_id']}", "amount_minor": toolbox_quote["amount_minor"]}]
+    cost_breakdown = toolbox_quote["cost_breakdown"]
     canonical = {
         "bot_id": payload.bot_id,
         "external_user_id": payload.external_user_id,

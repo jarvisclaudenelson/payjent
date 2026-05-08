@@ -4,7 +4,7 @@ from payjent.toolbox import build_tool_quote, get_tool
 
 
 def _quote_payload(arguments=None):
-    return {"bot_id": "bot-1", "external_user_id": "user-1", "arguments": arguments or {"query": "micropayments"}}
+    return {"bot_id": "bot-1", "external_user_id": "user-1", "arguments": arguments or {"query": "micropayments"}, "amount_minor": 35, "currency": "USD"}
 
 
 def _assert_no_secrets(value):
@@ -21,6 +21,10 @@ def test_toolbox_list_and_detail_are_public_and_secret_free(client):
     tool_ids = {tool["tool_id"] for tool in body["tools"]}
     assert {"exa.deep_search", "firecrawl.scrape", "fal.image.generate", "elevenlabs.text_to_speech", "paysh.search"}.issubset(tool_ids)
     _assert_no_secrets(body)
+    serialized = json.dumps(body)
+    assert "base_amount_minor" not in serialized
+    assert "min_amount_minor" not in serialized
+    assert "max_amount_minor" not in serialized
 
     detail = client.get("/api/v1/toolbox/paysh.search")
     assert detail.status_code == 200
@@ -45,7 +49,7 @@ def test_toolbox_quote_requires_bot_auth(client):
 def test_toolbox_quote_enforces_bot_scope(client, bot_headers):
     response = client.post(
         "/api/v1/toolbox/exa.deep_search/quote",
-        json={"bot_id": "different-bot", "external_user_id": "user-1", "arguments": {"query": "scope check"}},
+        json={"bot_id": "different-bot", "external_user_id": "user-1", "arguments": {"query": "scope check"}, "amount_minor": 35, "currency": "USD"},
         headers=bot_headers,
     )
     assert response.status_code == 403
@@ -59,7 +63,7 @@ def test_toolbox_public_metadata_has_no_executable_urls(client):
 
 
 def test_sub_50_managed_quote_recommends_task_budget_not_stripe(client, bot_headers):
-    response = client.post("/api/v1/toolbox/exa.deep_search/quote", json=_quote_payload({"query": "small search"}), headers=bot_headers)
+    response = client.post("/api/v1/toolbox/exa.deep_search/quote", json={**_quote_payload({"query": "small search"}), "amount_minor": 10}, headers=bot_headers)
     assert response.status_code == 200
     quote = response.json()
     assert quote["amount_minor"] < 50
@@ -73,7 +77,7 @@ def test_sub_50_managed_quote_recommends_task_budget_not_stripe(client, bot_head
 
 
 def test_trusted_paysh_sub_50_quote_recommends_pay_sh_or_x402(client, bot_headers):
-    response = client.post("/api/v1/toolbox/paysh.search/quote", json=_quote_payload({"instructions": "search latest docs"}), headers=bot_headers)
+    response = client.post("/api/v1/toolbox/paysh.search/quote", json={**_quote_payload({"instructions": "search latest docs"}), "amount_minor": 10}, headers=bot_headers)
     assert response.status_code == 200
     quote = response.json()
     assert quote["amount_minor"] < 50
@@ -84,7 +88,7 @@ def test_trusted_paysh_sub_50_quote_recommends_pay_sh_or_x402(client, bot_header
 
 
 def test_fal_managed_quote_includes_stripe_when_amount_meets_stripe_minimum(client, bot_headers):
-    response = client.post("/api/v1/toolbox/fal.image.generate/quote", json=_quote_payload({"prompt": "a robot", "quantity": 1}), headers=bot_headers)
+    response = client.post("/api/v1/toolbox/fal.image.generate/quote", json={**_quote_payload({"prompt": "a robot", "quantity": 1}), "amount_minor": 80}, headers=bot_headers)
     assert response.status_code == 200
     quote = response.json()
     assert quote["amount_minor"] == 80
@@ -95,13 +99,13 @@ def test_fal_managed_quote_includes_stripe_when_amount_meets_stripe_minimum(clie
     assert quote["stripe_minimum_applies"] is False
 
 
-def test_fal_has_no_toolbox_minimum_and_stripe_minimum_applies_for_sub_50_quote():
+def test_fal_runtime_amount_can_be_sub_stripe_minimum_and_uses_task_budget():
     tool = get_tool("fal.image.generate")
     assert tool is not None
-    assert tool["min_amount_minor"] == 0
+    assert "min_amount_minor" not in tool
+    assert tool["pricing_source"] == "agent_runtime"
 
-    tool["base_amount_minor"] = 10
-    quote = build_tool_quote(tool, bot_id="bot-1", external_user_id="user-1", arguments={"prompt": "a robot", "quantity": 1})
+    quote = build_tool_quote(tool, bot_id="bot-1", external_user_id="user-1", arguments={"prompt": "a robot", "quantity": 1}, amount_minor=10)
 
     assert quote["amount_minor"] == 10
     assert quote["recommended_payment_rail"] == "task_budget"
@@ -113,7 +117,7 @@ def test_fal_has_no_toolbox_minimum_and_stripe_minimum_applies_for_sub_50_quote(
 
 
 def test_stablecoin_option_is_scaffold_not_live_settlement(client, bot_headers):
-    response = client.post("/api/v1/toolbox/exa.deep_search/quote", json=_quote_payload({"query": "small search"}), headers=bot_headers)
+    response = client.post("/api/v1/toolbox/exa.deep_search/quote", json={**_quote_payload({"query": "small search"}), "amount_minor": 10}, headers=bot_headers)
     assert response.status_code == 200
     stablecoin = next(option for option in response.json()["payment_options"] if option["rail"] == "stablecoin")
     assert stablecoin["status"] == "beta_scaffold"

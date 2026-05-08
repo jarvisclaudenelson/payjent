@@ -27,11 +27,8 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "provider_type": "managed_api",
         "status": "enabled",
         "input_schema": {"type": "object", "properties": {"query": {"type": "string"}, "num_results": {"type": "integer", "minimum": 1, "maximum": 10}}, "required": ["query"]},
-        "pricing_model": "per_search",
-        "base_amount_minor": 35,
-        "min_amount_minor": 25,
-        "max_amount_minor": 2000,
-        "currency": "USD",
+        "pricing_model": "agent_runtime_quote",
+        "pricing_source": "agent_runtime",
         "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],
         "recommended_payment_rail": "task_budget",
         "risk_level": "low",
@@ -45,11 +42,8 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "provider_type": "managed_api",
         "status": "enabled",
         "input_schema": {"type": "object", "properties": {"url": {"type": "string", "format": "uri"}}, "required": ["url"]},
-        "pricing_model": "per_page",
-        "base_amount_minor": 20,
-        "min_amount_minor": 10,
-        "max_amount_minor": 1000,
-        "currency": "USD",
+        "pricing_model": "agent_runtime_quote",
+        "pricing_source": "agent_runtime",
         "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],
         "recommended_payment_rail": "task_budget",
         "risk_level": "medium",
@@ -63,11 +57,8 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "provider_type": "managed_api",
         "status": "enabled",
         "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1, "maximum": 4}}, "required": ["prompt"]},
-        "pricing_model": "per_image",
-        "base_amount_minor": 80,
-        "min_amount_minor": 0,
-        "max_amount_minor": 2000,
-        "currency": "USD",
+        "pricing_model": "agent_runtime_quote",
+        "pricing_source": "agent_runtime",
         "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],
         "recommended_payment_rail": "stripe",
         "risk_level": "medium",
@@ -81,11 +72,8 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "provider_type": "managed_api",
         "status": "enabled",
         "input_schema": {"type": "object", "properties": {"text": {"type": "string"}, "voice": {"type": "string"}}, "required": ["text"]},
-        "pricing_model": "per_request",
-        "base_amount_minor": 45,
-        "min_amount_minor": 30,
-        "max_amount_minor": 3000,
-        "currency": "USD",
+        "pricing_model": "agent_runtime_quote",
+        "pricing_source": "agent_runtime",
         "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],
         "recommended_payment_rail": "task_budget",
         "risk_level": "low",
@@ -94,12 +82,12 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
     },
 }
 
-for tool_id, name, desc, amount in [
-    ("paysh.fal_image", "Trusted pay.sh FAL Image", "Allowlisted pay.sh/x402 image generation metadata.", 35),
-    ("paysh.web_scrape", "Trusted pay.sh Web Scrape", "Allowlisted pay.sh/x402 web scraping metadata.", 15),
-    ("paysh.search", "Trusted pay.sh Search", "Allowlisted pay.sh/x402 search metadata.", 10),
-    ("paysh.data_extract", "Trusted pay.sh Data Extract", "Allowlisted pay.sh/x402 data extraction metadata.", 25),
-    ("paysh.file_convert", "Trusted pay.sh File Convert", "Allowlisted pay.sh/x402 file conversion metadata.", 20),
+for tool_id, name, desc in [
+    ("paysh.fal_image", "Trusted pay.sh FAL Image", "Allowlisted pay.sh/x402 image generation metadata."),
+    ("paysh.web_scrape", "Trusted pay.sh Web Scrape", "Allowlisted pay.sh/x402 web scraping metadata."),
+    ("paysh.search", "Trusted pay.sh Search", "Allowlisted pay.sh/x402 search metadata."),
+    ("paysh.data_extract", "Trusted pay.sh Data Extract", "Allowlisted pay.sh/x402 data extraction metadata."),
+    ("paysh.file_convert", "Trusted pay.sh File Convert", "Allowlisted pay.sh/x402 file conversion metadata."),
 ]:
     _TOOLBOX[tool_id] = {
         "tool_id": tool_id,
@@ -108,11 +96,8 @@ for tool_id, name, desc, amount in [
         "provider_type": "trusted_paysh",
         "status": "enabled",
         "input_schema": {"type": "object", "properties": {"instructions": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1, "maximum": 10}}, "required": ["instructions"]},
-        "pricing_model": "allowlisted_x402_microcharge",
-        "base_amount_minor": amount,
-        "min_amount_minor": amount,
-        "max_amount_minor": 500,
-        "currency": "USD",
+        "pricing_model": "agent_runtime_quote",
+        "pricing_source": "agent_runtime",
         "supported_payment_rails": ["pay_sh", "x402", "task_budget", "stablecoin", "stripe"],
         "recommended_payment_rail": "pay_sh",
         "risk_level": "medium",
@@ -136,15 +121,21 @@ def public_tool(tool: dict[str, Any]) -> dict[str, Any]:
     return deepcopy(tool)
 
 
-def compute_tool_amount(tool: dict[str, Any], arguments: dict[str, Any]) -> int:
-    quantity = arguments.get("quantity", arguments.get("units", 1))
-    try:
-        quantity_int = int(quantity)
-    except (TypeError, ValueError):
-        quantity_int = 1
-    quantity_int = max(1, min(quantity_int, 10))
-    amount = int(tool["base_amount_minor"]) * quantity_int
-    return max(int(tool["min_amount_minor"]), min(amount, int(tool["max_amount_minor"])))
+def normalize_cost_breakdown(cost_breakdown: list[dict[str, Any]] | None, amount_minor: int) -> list[dict[str, Any]]:
+    if cost_breakdown is None:
+        return [{"label": "Agent runtime quoted toolbox action", "amount_minor": amount_minor}]
+    normalized: list[dict[str, Any]] = []
+    total = 0
+    for item in cost_breakdown:
+        label = str(item.get("label") or "Toolbox action")
+        line_amount = int(item.get("amount_minor", 0))
+        if line_amount < 0:
+            raise ValueError("cost_breakdown amount_minor must be >= 0")
+        normalized.append({"label": label, "amount_minor": line_amount})
+        total += line_amount
+    if total != amount_minor:
+        raise ValueError("cost_breakdown must sum to amount_minor")
+    return normalized
 
 
 def choose_payment_options(tool: dict[str, Any], amount_minor: int, currency: str) -> tuple[list[dict[str, Any]], str, bool]:
@@ -166,10 +157,13 @@ def choose_payment_options(tool: dict[str, Any], amount_minor: int, currency: st
     return options, recommended, stripe_minimum_applies
 
 
-def build_tool_quote(tool: dict[str, Any], *, bot_id: str, external_user_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    amount_minor = compute_tool_amount(tool, arguments)
-    currency = tool["currency"].upper()
-    request_hash = quote_hash({"tool_id": tool["tool_id"], "bot_id": bot_id, "external_user_id": external_user_id, "arguments": arguments, "amount_minor": amount_minor, "currency": currency})
+def build_tool_quote(tool: dict[str, Any], *, bot_id: str, external_user_id: str, arguments: dict[str, Any], amount_minor: int, currency: str = "USD", cost_breakdown: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    amount_minor = int(amount_minor)
+    if amount_minor < 0:
+        raise ValueError("amount_minor must be >= 0")
+    currency = currency.upper()
+    normalized_breakdown = normalize_cost_breakdown(cost_breakdown, amount_minor)
+    request_hash = quote_hash({"tool_id": tool["tool_id"], "bot_id": bot_id, "external_user_id": external_user_id, "arguments": arguments, "amount_minor": amount_minor, "currency": currency, "cost_breakdown": normalized_breakdown})
     payment_options, recommended, stripe_minimum_applies = choose_payment_options(tool, amount_minor, currency)
     return {
         "tool_quote_id": f"tool_quote_{request_hash[:24]}",
@@ -178,6 +172,7 @@ def build_tool_quote(tool: dict[str, Any], *, bot_id: str, external_user_id: str
         "amount_minor": amount_minor,
         "currency": currency,
         "request_hash": request_hash,
+        "cost_breakdown": normalized_breakdown,
         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
         "payment_options": payment_options,
         "recommended_payment_rail": recommended,
