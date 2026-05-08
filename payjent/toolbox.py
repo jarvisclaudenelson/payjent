@@ -65,7 +65,7 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1, "maximum": 4}}, "required": ["prompt"]},
         "pricing_model": "per_image",
         "base_amount_minor": 80,
-        "min_amount_minor": 50,
+        "min_amount_minor": 0,
         "max_amount_minor": 2000,
         "currency": "USD",
         "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],

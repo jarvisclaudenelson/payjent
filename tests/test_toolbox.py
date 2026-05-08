@@ -1,5 +1,7 @@
 import json
 
+from payjent.toolbox import build_tool_quote, get_tool
+
 
 def _quote_payload(arguments=None):
     return {"bot_id": "bot-1", "external_user_id": "user-1", "arguments": arguments or {"query": "micropayments"}}
@@ -81,16 +83,33 @@ def test_trusted_paysh_sub_50_quote_recommends_pay_sh_or_x402(client, bot_header
     assert "does not execute arbitrary URLs" in quote["execution_caveat"]
 
 
-def test_gte_50_managed_quote_includes_stripe_allowed_or_recommended(client, bot_headers):
+def test_fal_managed_quote_includes_stripe_when_amount_meets_stripe_minimum(client, bot_headers):
     response = client.post("/api/v1/toolbox/fal.image.generate/quote", json=_quote_payload({"prompt": "a robot", "quantity": 1}), headers=bot_headers)
     assert response.status_code == 200
     quote = response.json()
-    assert quote["amount_minor"] >= 50
+    assert quote["amount_minor"] == 80
     stripe = next(option for option in quote["payment_options"] if option["rail"] == "stripe")
     assert stripe["status"] == "available"
     assert quote["recommended_payment_rail"] == "stripe"
     assert stripe["recommended"] is True
     assert quote["stripe_minimum_applies"] is False
+
+
+def test_fal_has_no_toolbox_minimum_and_stripe_minimum_applies_for_sub_50_quote():
+    tool = get_tool("fal.image.generate")
+    assert tool is not None
+    assert tool["min_amount_minor"] == 0
+
+    tool["base_amount_minor"] = 10
+    quote = build_tool_quote(tool, bot_id="bot-1", external_user_id="user-1", arguments={"prompt": "a robot", "quantity": 1})
+
+    assert quote["amount_minor"] == 10
+    assert quote["recommended_payment_rail"] == "task_budget"
+    assert quote["stripe_minimum_applies"] is True
+    stripe = next(option for option in quote["payment_options"] if option["rail"] == "stripe")
+    assert stripe["status"] == "unavailable"
+    assert stripe["reason"] == "minimum_applies"
+    assert stripe["minimum_amount_minor"] == 50
 
 
 def test_stablecoin_option_is_scaffold_not_live_settlement(client, bot_headers):
