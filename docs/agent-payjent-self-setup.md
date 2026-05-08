@@ -229,7 +229,7 @@ premium user ask
 
 Use this Payjent deployment unless the operator gives you a different one:
 
-`https://payjent.vercel.app`
+`https://www.payjent.com`
 
 ## Current integration status
 

@@ -9,7 +9,7 @@ For pay.sh-backed premium data, Payjent only gates the payment and returns a pay
 Use real values only in your secret manager or untracked local `.env`. Do not paste public user tokens into chat; the default flow has no public token paste step.
 
 ```bash
-PAYJENT_BASE_URL="https://payjent.example.com"
+PAYJENT_BASE_URL="https://www.payjent.com"
 PAYJENT_BOT_ID="agent_<your_agent_id>"
 PAYJENT_BOT_KEY="payjent_<redacted_bot_key>"
 
@@ -176,7 +176,7 @@ payjent hosted-agent-webhook-smoke --in-process
 Hosted/base-URL smoke against a running Payjent deployment:
 
 ```bash
-export PAYJENT_BASE_URL="https://payjent.vercel.app"   # or your staging Payjent URL
+export PAYJENT_BASE_URL="https://www.payjent.com"   # or your staging Payjent URL
 export PAYJENT_BOOTSTRAP_TOKEN="$PAYJENT_OPERATOR_PROVIDED_VALUE"
 export PAYJENT_BOT_ID="agent-smoke-1"
 

@@ -91,6 +91,38 @@ class PayjentClient:
         """Create a Payjent-gated pay.sh action; Payjent does not execute paycurl."""
         return self._request("POST", "/api/v1/premium-actions/pay-sh", headers=self._headers(), json=payload)
 
+    def list_toolbox_tools(self) -> dict[str, Any]:
+        """List Payjent toolbox tools available for runtime-priced paid actions."""
+        return self._request("GET", "/api/v1/toolbox", headers=self._headers())
+
+    def get_toolbox_tool(self, tool_id: str) -> dict[str, Any]:
+        """Fetch metadata for one toolbox tool."""
+        return self._request("GET", f"/api/v1/toolbox/{tool_id}", headers=self._headers())
+
+    def quote_toolbox_action(self, tool_id: str, **payload: Any) -> dict[str, Any]:
+        """Get the exact runtime quote for a toolbox action before checkout/execution."""
+        return self._request("POST", f"/api/v1/toolbox/{tool_id}/quote", headers=self._headers(), json=payload)
+
+    def create_toolbox_checkout(self, tool_id: str, idempotency_key: str | None = None, **payload: Any) -> dict[str, Any]:
+        """Create checkout for a previously quoted toolbox action payload."""
+        return self._request("POST", f"/api/v1/toolbox/{tool_id}/checkout", headers=self._headers(idempotency_key), json=payload)
+
+    def create_toolbox_execution(self, tool_id: str, **payload: Any) -> dict[str, Any]:
+        """Create a toolbox execution record after payment context is available."""
+        return self._request("POST", f"/api/v1/toolbox/{tool_id}/executions", headers=self._headers(), json=payload)
+
+    def get_toolbox_execution(self, execution_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/v1/toolbox/executions/{execution_id}", headers=self._headers())
+
+    def run_toolbox_execution(self, execution_id: str) -> dict[str, Any]:
+        return self._request("POST", f"/api/v1/toolbox/executions/{execution_id}/run", headers=self._headers())
+
+    def complete_toolbox_execution(self, execution_id: str, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", f"/api/v1/toolbox/executions/{execution_id}/complete", headers=self._headers(), json=payload)
+
+    def fail_toolbox_execution(self, execution_id: str, **payload: Any) -> dict[str, Any]:
+        return self._request("POST", f"/api/v1/toolbox/executions/{execution_id}/fail", headers=self._headers(), json=payload)
+
     def get_agent_action_status(self, action_id: str) -> dict[str, Any]:
         """Fetch bot-scoped action/payment readiness, including an unconsumed token when paid."""
         return self._request("GET", f"/api/v1/agent-actions/{action_id}", headers=self._headers())
@@ -204,6 +236,42 @@ def create_agent_action(client: PayjentClient, **kwargs: Any) -> dict[str, Any]:
 
 def create_pay_sh_premium_action(client: PayjentClient, **payload: Any) -> dict[str, Any]:
     return client.create_pay_sh_premium_action(**payload)
+
+
+def list_toolbox_tools(client: PayjentClient) -> dict[str, Any]:
+    return client.list_toolbox_tools()
+
+
+def get_toolbox_tool(client: PayjentClient, tool_id: str) -> dict[str, Any]:
+    return client.get_toolbox_tool(tool_id)
+
+
+def quote_toolbox_action(client: PayjentClient, tool_id: str, **payload: Any) -> dict[str, Any]:
+    return client.quote_toolbox_action(tool_id, **payload)
+
+
+def create_toolbox_checkout(client: PayjentClient, tool_id: str, idempotency_key: str | None = None, **payload: Any) -> dict[str, Any]:
+    return client.create_toolbox_checkout(tool_id, idempotency_key=idempotency_key, **payload)
+
+
+def create_toolbox_execution(client: PayjentClient, tool_id: str, **payload: Any) -> dict[str, Any]:
+    return client.create_toolbox_execution(tool_id, **payload)
+
+
+def get_toolbox_execution(client: PayjentClient, execution_id: str) -> dict[str, Any]:
+    return client.get_toolbox_execution(execution_id)
+
+
+def run_toolbox_execution(client: PayjentClient, execution_id: str) -> dict[str, Any]:
+    return client.run_toolbox_execution(execution_id)
+
+
+def complete_toolbox_execution(client: PayjentClient, execution_id: str, **payload: Any) -> dict[str, Any]:
+    return client.complete_toolbox_execution(execution_id, **payload)
+
+
+def fail_toolbox_execution(client: PayjentClient, execution_id: str, **payload: Any) -> dict[str, Any]:
+    return client.fail_toolbox_execution(execution_id, **payload)
 
 
 def consume_agent_action(

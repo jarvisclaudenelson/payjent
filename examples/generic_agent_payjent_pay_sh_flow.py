@@ -9,9 +9,9 @@ for a payment-gated action, sends the user a payment prompt, waits/polls via bot
 auth, resumes the stored request after payment, and marks fulfillment. In
 production, replace the TestClient setup with:
 
-    PayjentClient(os.environ["PAYJENT_BASE_URL"], api_key=os.environ["PAYJENT_BOT_KEY"])
+    PayjentClient(os.getenv("PAYJENT_BASE_URL", "https://www.payjent.com"), api_key=os.environ["PAYJENT_BOT_KEY"])
 
-and execute the resumed envelope in your agent's own pay.sh runtime. This script
+and execute the resumed envelope in your agent's own pay.sh runtime after obtaining an exact runtime quote (`amount_minor`, `currency`, and matching `cost_breakdown`). This script
 never calls paycurl, never exposes the raw payment token to the user, and never
 performs pay.sh settlement.
 """

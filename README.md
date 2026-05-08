@@ -2,9 +2,9 @@
 
 Payjent v0 is a small FastAPI gateway skeleton for paid, bounded bot requests: quote -> checkout -> mock payment -> signed receipt/grant -> consume -> fulfillment.
 
-Payjent is the paid execution and spend authorization control plane, not the card or payment rail itself. User funding, Decal checkout, x402-style paid calls, Link one-time credentials, legacy Stripe checkout, and card credentials are downstream rails under the same bounded grant and spend ledger model.
+Payjent is the paid action control plane for quotes, checkout, grants, runtime-priced toolbox execution records, and spend authorization; it is not the card or payment rail itself. User funding, Decal checkout, x402-style paid calls, Link one-time credentials, legacy Stripe checkout, and card credentials are downstream rails under the same bounded grant and spend ledger model.
 
-**v0 defaults to mock/local payment rails for local development, while Decal is the primary active hosted checkout rail.** Configure production with `PAYJENT_CHECKOUT_PROVIDER=decal`, `PAYJENT_DECAL_API_KEY`, and `PAYJENT_PUBLIC_BASE_URL=https://payjent.com`. Stripe Checkout remains a legacy fallback only when explicitly configured (`PAYJENT_CHECKOUT_PROVIDER=stripe` or `X-Payjent-Provider: stripe`) and the optional Stripe SDK extra is installed for live calls. Link is available as an experimental one-time credential rail (`X-Payjent-Provider: link`) for downstream agent-mediated merchant purchases, not as Payjent settlement. Checkout creation never marks a session paid; Decal receipt/grant issuance happens only after Payjent verifies the Decal checkout session server-side. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
+**v0 defaults to mock/local payment rails for local development, while Decal is the primary active hosted checkout rail.** Configure production with `PAYJENT_CHECKOUT_PROVIDER=decal`, `PAYJENT_DECAL_API_KEY`, and `PAYJENT_PUBLIC_BASE_URL=https://www.payjent.com`. Stripe Checkout remains a legacy fallback only when explicitly configured (`PAYJENT_CHECKOUT_PROVIDER=stripe` or `X-Payjent-Provider: stripe`) and the optional Stripe SDK extra is installed for live calls. Link is available as an experimental one-time credential rail (`X-Payjent-Provider: link`) for downstream agent-mediated merchant purchases, not as Payjent settlement. Checkout creation never marks a session paid; Decal receipt/grant issuance happens only after Payjent verifies the Decal checkout session server-side. Crypto support is a dev/operator manual `mark-paid` placeholder only; there is no wallet monitoring, on-chain confirmation, custody, or live crypto settlement.
 
 ## Agent owner quickstart (10 minutes)
 
@@ -41,10 +41,8 @@ By default the service uses SQLite at `sqlite:///./payjent.db`, `PAYJENT_ENV=loc
 
 SQLite is fine for local demos, but Vercel serverless filesystems are ephemeral and are not suitable for durable Payjent state. For hosted deployments, set `PAYJENT_DATABASE_URL` to a managed, pooled Postgres connection string such as a Vercel/Supabase pooler URL. Payjent accepts provider-style `postgres://...` and driverless `postgresql://...` URLs and normalizes them internally to SQLAlchemy's psycopg3 driver form.
 
-Example shape only; do not commit or chat-paste a real URL:
-
 ```bash
-PAYJENT_DATABASE_URL="postgres://<user>:<password>@<pooler-host>:6543/<database>?sslmode=require"
+PAYJENT_DATABASE_URL="postgres://<user>:***@<pooler-host>:6543/<database>?sslmode=require"
 ```
 
 Store the real value only in your deployment secret manager or local untracked `.env`. Treat the full database URL as a secret because it contains credentials and host details. The `/healthz` endpoint reports only a non-secret database backend label and whether `select 1` succeeds; it never returns the configured URL, host, username, or password.
@@ -90,7 +88,7 @@ Any agent owner can add a Payjent payment gate around premium pay.sh work with t
 Give your agent these Payjent settings (store real values in your secret manager):
 
 ```bash
-export PAYJENT_BASE_URL="https://payjent.example.com"
+export PAYJENT_BASE_URL="https://www.payjent.com"
 export PAYJENT_BOT_KEY="payjent_bot_key_..."
 export PAYJENT_BOT_ID="my-agent"      # or export AGENT_ID="my-agent" and map it to bot_id
 ```
@@ -132,7 +130,7 @@ The default payment prompt text is user-facing and looks like:
 
 ```text
 Payment required for premium pay.sh data: Premium pay.sh forecast for Lisbon
-Pay here: https://payjent.example.com/pay/ps_...
+Pay here: https://www.payjent.com/pay/ps_...
 Action: q_...
 After payment, your agent can poll Payjent and resume this stored request automatically.
 ```
@@ -166,7 +164,7 @@ python -m payjent.demo agent-pay-sh-poll
 For the hosted/base-URL agent-owner smoke rail, first bootstrap staging/test credentials from an authenticated operator-only action, then run the smoke against a running Payjent API:
 
 ```bash
-export PAYJENT_BASE_URL="https://payjent.vercel.app"
+export PAYJENT_BASE_URL="https://www.payjent.com"
 export PAYJENT_BOOTSTRAP_TOKEN="$PAYJENT_OPERATOR_PROVIDED_VALUE"
 export PAYJENT_BOT_ID="agent-smoke-1"
 # Optional public HTTPS receiver for signed, token-free callbacks:
@@ -248,15 +246,15 @@ Payjent can optionally use WorkOS AuthKit hosted login for the dashboard. Config
 ```bash
 PAYJENT_WORKOS_API_KEY=<set in your secret manager>
 PAYJENT_WORKOS_CLIENT_ID=<your WorkOS client id>
-PAYJENT_PUBLIC_BASE_URL=https://payjent.vercel.app
+PAYJENT_PUBLIC_BASE_URL=https://www.payjent.com
 # Optional override if it differs from PUBLIC_BASE_URL + /auth/workos/callback:
-PAYJENT_WORKOS_REDIRECT_URI=https://payjent.vercel.app/auth/workos/callback
+PAYJENT_WORKOS_REDIRECT_URI=https://www.payjent.com/auth/workos/callback
 ```
 
 In the WorkOS Dashboard, add this redirect URI to the AuthKit application:
 
 ```text
-https://payjent.vercel.app/auth/workos/callback
+https://www.payjent.com/auth/workos/callback
 ```
 
 When `PAYJENT_WORKOS_API_KEY` and `PAYJENT_WORKOS_CLIENT_ID` are configured, `/auth/register` and `/auth/login` show a **Sign in with WorkOS AuthKit** CTA that redirects through `/auth/workos/login`. If WorkOS is not configured, the WorkOS route fails closed with `503` and the first-party Payjent account form remains usable for local/dev and deployed smoke checks. Do not commit WorkOS API keys or paste them into chat/logs; tests use fakes and never call WorkOS.
@@ -337,7 +335,7 @@ Payjent treats rails as replaceable downstream categories underneath the same pa
 `card_credential` means a downstream card-credential rail category: for example, a MoonAgents-style agent card could sit under Payjent's controls as the credential used at a merchant. This repository does not integrate MoonPay or MoonAgents, does not issue cards, and does not claim support for MoonAgents Card.
 
 - Mock/local remains the default in local/dev. `POST /api/v1/quotes/{quote_id}/checkout` returns a local `/pay/{payment_session_id}` URL unless Decal, Stripe, or another provider is requested. Mock completion endpoints are disabled in production even if dev flags are accidentally left enabled.
-- Decal Checkout is the primary active hosted checkout rail: set `PAYJENT_CHECKOUT_PROVIDER=decal`, `PAYJENT_DECAL_API_KEY`, and `PAYJENT_PUBLIC_BASE_URL=https://payjent.com`. Optional Decal settings include `PAYJENT_DECAL_PAYMENT_DESTINATION`, `PAYJENT_DECAL_SUCCESS_URL_TEMPLATE`, and `PAYJENT_DECAL_CALLBACK_URL_TEMPLATE`. Payjent creates Decal checkout sessions, stores Decal's session id and hosted URL, receives callbacks at `/api/v1/webhooks/decal`, then verifies the Decal session with Decal's API before issuing receipts/grants.
+- Decal Checkout is the primary active hosted checkout rail: set `PAYJENT_CHECKOUT_PROVIDER=decal`, `PAYJENT_DECAL_API_KEY`, and `PAYJENT_PUBLIC_BASE_URL=https://www.payjent.com`. Optional Decal settings include `PAYJENT_DECAL_PAYMENT_DESTINATION`, `PAYJENT_DECAL_SUCCESS_URL_TEMPLATE`, and `PAYJENT_DECAL_CALLBACK_URL_TEMPLATE`. Payjent creates Decal checkout sessions, stores Decal's session id and hosted URL, receives callbacks at `/api/v1/webhooks/decal`, then verifies the Decal session with Decal's API before issuing receipts/grants.
 - Decal feature gaps to track before deleting legacy rails entirely: automatic paid refunds, disputes/chargebacks lifecycle, documented webhook signature/retry semantics, and missed-webhook reconciliation/polling. See `docs/decal-checkout.md`.
 - Stripe Checkout remains a legacy fallback: install `pip install -e '.[stripe]'`, set `PAYJENT_CHECKOUT_PROVIDER=stripe` (or send `X-Payjent-Provider: stripe` per request), `PAYJENT_STRIPE_SECRET_KEY`, `PAYJENT_PUBLIC_BASE_URL`, and `PAYJENT_STRIPE_WEBHOOK_SECRET`. Checkout sessions are created with quote amount/currency/summary metadata and an idempotency key; Payjent stores Stripe's Checkout Session id and hosted URL.
 - Stripe webhook URL: configure Stripe to send Checkout events to `https://<your-payjent-host>/api/v1/webhooks/stripe`.

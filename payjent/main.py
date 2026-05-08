@@ -163,7 +163,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Payjent", lifespan=lifespan)
+app = FastAPI(title="Payjent", lifespan=lifespan, docs_url="/api-docs", redoc_url="/redoc")
 
 DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
 

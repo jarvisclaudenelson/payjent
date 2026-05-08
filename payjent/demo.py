@@ -1089,7 +1089,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_webhook_resume.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
     hosted_smoke = sub.add_parser("hosted-agent-webhook-smoke", help="run generic agent-owner pay.sh smoke against PAYJENT_BASE_URL or hosted Payjent")
-    hosted_smoke.add_argument("--base-url", default=os.getenv("PAYJENT_BASE_URL", "https://payjent.vercel.app"))
+    hosted_smoke.add_argument("--base-url", default=os.getenv("PAYJENT_BASE_URL", "https://www.payjent.com"))
     hosted_smoke.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
     hosted_smoke.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     hosted_smoke.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
@@ -1097,7 +1097,7 @@ def build_parser() -> argparse.ArgumentParser:
     hosted_smoke.add_argument("--in-process", action="store_true", help="safe local test fallback using TestClient and in-process callback capture")
 
     hosted_bootstrap = sub.add_parser("hosted-smoke-bootstrap", help="bootstrap staging/test credentials for hosted-agent-webhook-smoke")
-    hosted_bootstrap.add_argument("--base-url", default=os.getenv("PAYJENT_BASE_URL", "https://payjent.vercel.app"))
+    hosted_bootstrap.add_argument("--base-url", default=os.getenv("PAYJENT_BASE_URL", "https://www.payjent.com"))
     hosted_bootstrap.add_argument("--bootstrap-token", default=os.getenv("PAYJENT_BOOTSTRAP_TOKEN"))
     hosted_bootstrap.add_argument("--bot-id", default=os.getenv("PAYJENT_BOT_ID", os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID)))
     hosted_bootstrap.add_argument("--operator-id", default=os.getenv("PAYJENT_OPERATOR_ID", DEFAULT_OPERATOR_ID))
