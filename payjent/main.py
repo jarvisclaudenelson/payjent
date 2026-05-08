@@ -71,6 +71,7 @@ from .providers.link import (
 from .providers.link import retrieve_link_status as retrieve_link_provider_status
 from .providers.link import validate_credential_type
 from .providers.mock import complete_mock_payment
+from .providers.decal import create_decal_checkout_session, retrieve_decal_checkout_session
 from .providers.paysh import build_execution_envelope as build_paysh_execution_envelope
 from .providers.premium_actions import EXECUTION_BOUNDARY as PREMIUM_PRESET_EXECUTION_BOUNDARY, get_preset, list_presets
 from .providers.stripe import (
@@ -175,6 +176,14 @@ def agent_payjent_self_setup_doc():
     return FileResponse(path, media_type="text/markdown; charset=utf-8", filename="agent-payjent-self-setup.md")
 
 
+@app.get("/docs/decal-checkout.md", response_class=FileResponse)
+def decal_checkout_doc():
+    path = DOCS_DIR / "decal-checkout.md"
+    if not path.exists():
+        raise HTTPException(404, "document not found")
+    return FileResponse(path, media_type="text/markdown; charset=utf-8", filename="decal-checkout.md")
+
+
 @app.get("/docs/c3po-payjent-self-setup.md", response_class=FileResponse)
 def c3po_payjent_self_setup_doc_redirect():
     return RedirectResponse("/docs/agent-payjent-self-setup.md", status_code=308)
@@ -270,8 +279,8 @@ def _discovery_manifest(base_url: str) -> dict:
         },
         "pricing_policy": _EXACT_PRICING_POLICY,
         "active_payment_rail": {
-            "provider": "stripe_when_configured",
-            "description": "In production, Stripe Checkout is the intended active payment rail when PAYJENT_CHECKOUT_PROVIDER=stripe and required deployment secrets are configured. Agents must send the returned payment_prompt/payment_url to the user and wait for paid status before resuming.",
+            "provider": "decal_when_configured",
+            "description": "In production, Decal hosted checkout is the primary active payment rail when PAYJENT_CHECKOUT_PROVIDER=decal and required deployment settings are configured. Agents must send the returned payment_prompt/payment_url to the user and wait for paid status before resuming. Stripe remains a legacy fallback only when explicitly configured.",
         },
         "tools": _tool_descriptors(),
         "agent_guidance": [
@@ -755,9 +764,18 @@ def _payment_readiness(settings: Settings) -> dict:
     database_configured = bool(settings.database_url)
     production_persistent_database_configured = settings.production_persistent_database_configured if settings.is_production else database_configured
     managed_providers = _managed_provider_readiness(settings)
+    decal_api_key_configured = bool(settings.decal_api_key)
+    active_payment_ready = (
+        provider == "decal" and decal_api_key_configured and public_base_url_configured and production_persistent_database_configured
+    ) or (
+        provider == "stripe" and stripe_secret_configured and stripe_webhook_configured and public_base_url_configured and production_persistent_database_configured
+    )
     return {
-        "active_payment_ready": provider == "stripe" and stripe_secret_configured and stripe_webhook_configured and public_base_url_configured and production_persistent_database_configured,
+        "active_payment_ready": active_payment_ready,
         "checkout_provider": provider,
+        "decal_api_key_configured": decal_api_key_configured,
+        "decal_public_base_url_configured": public_base_url_configured,
+        "decal_database_configured": production_persistent_database_configured,
         "stripe_secret_configured": stripe_secret_configured,
         "stripe_webhook_configured": stripe_webhook_configured,
         "public_base_url_configured": public_base_url_configured,
@@ -832,8 +850,9 @@ def pay_page(payment_session_id: str, session: Session = Depends(get_session), s
     checkout_cta = ""
     if ps.provider == "mock" and ps.status != "paid" and settings.effective_mock_provider_enabled:
         checkout_cta = f"""<section><h2>Complete payment</h2><p>This checkout can be completed from the browser without exposing operator credentials, payment tokens, or raw grant IDs.</p><form method="post" action="/pay/{_html_escape(ps.id)}/mock-pay"><button class="btn" type="submit">Approve and pay {_html_escape(_format_money(q.amount_minor, q.currency))}</button></form><p class="fine">Payjent will issue a single-use grant for the exact stored request after approval.</p></section>"""
-    elif ps.provider == "stripe" and ps.status != "paid" and ps.checkout_url and ps.checkout_url.startswith("https://"):
-        checkout_cta = f"""<section><h2>Complete secure payment</h2><p>Continue to Stripe hosted checkout to pay securely. Payjent will resume the exact stored agent action after Stripe confirms payment.</p><p><a class="btn" href="{_html_escape(ps.checkout_url)}" rel="noopener noreferrer">Continue to secure payment</a></p><p class="fine">Payjent does not show raw grants, payment tokens, or credentials on this page.</p></section>"""
+    elif ps.provider in {"stripe", "decal"} and ps.status != "paid" and ps.checkout_url and ps.checkout_url.startswith("https://"):
+        provider_name = "Decal" if ps.provider == "decal" else "Stripe"
+        checkout_cta = f"""<section><h2>Complete secure payment</h2><p>Continue to {provider_name} hosted checkout to pay securely. Payjent will resume the exact stored agent action after payment is confirmed.</p><p><a class="btn" href="{_html_escape(ps.checkout_url)}" rel="noopener noreferrer">Continue to secure payment</a></p><p class="fine">Payjent does not show raw grants, payment tokens, or credentials on this page.</p></section>"""
     return f"""<!doctype html><html><head><title>Payjent checkout · Approve paid agent action</title>{_DASHBOARD_CSS}</head><body><main><section class='hero'><div class='eyebrow'>Human approval document</div><h1>Approve this exact paid action?</h1><p class='muted'>Key question: should this agent resume this exact paid action after payment?</p></section><div class='grid'><div class='card'><h3>Agent request</h3><p>{_html_escape(q.request_summary)}</p><p class='fine'>External user: <code>{_html_escape(q.external_user_id)}</code><br>Request hash: <code>{_html_escape(q.request_hash)}</code></p></div><div class='card'><h3>Task budget</h3><div class='stat'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div><p class='fine'>Spend control: this approval covers only the exact stored task budget below.</p><ul>{breakdown}</ul></div><div class='card'><h3>Execution readiness</h3><p><b>{_html_escape(status_words)}</b></p><p class='fine'>Payment session: <code>{_html_escape(ps.id)}</code><br>Payment state: {_html_escape(ps.status)}<br>Grant state: {_html_escape(_grant_state(grant))}</p></div><div class='card'><h3>Auto-resume</h3><p>{resumes}</p><p class='fine'>Approval creates a one-time grant bound to this stored request. Raw grant and payment tokens are not shown on this page.</p></div></div><section><h2>Approval terms</h2><ul><li>Human approval is required before Payjent marks this action ready.</li><li>The grant is single-use and tied to the exact request hash above.</li><li>Downstream rails may still impose their own authorization, settlement, availability, or rejection behavior; Payjent records the checkpoint and does not guarantee a third-party rail outcome.</li><li>Agent-side provider credentials or wallet runtime are required unless a provider connection is configured in Payjent.</li><li>If paid downstream execution fails, Payjent requests a refund by default unless the agent explicitly opts out.</li><li>Fulfillment events recorded so far: {len(fulfillment)}.</li></ul><p><a class='btn' href="/status/{_html_escape(ps.id)}">View status</a></p></section>{checkout_cta}</main></body></html>"""
 
 
@@ -1865,7 +1884,7 @@ def _create_checkout_for_quote(
         if existing:
             return existing
     requested_provider = (provider or settings.checkout_provider or "mock").lower()
-    if requested_provider not in {"mock", "local", "stripe", "link"}:
+    if requested_provider not in {"mock", "local", "stripe", "decal", "link"}:
         raise HTTPException(status_code=422, detail="unsupported checkout provider")
     _enforce_checkout_amount_supported(q, requested_provider)
     if settings.is_production and requested_provider in {"mock", "local"}:
@@ -1887,6 +1906,10 @@ def _create_checkout_for_quote(
     if requested_provider == "stripe":
         _enforce_stripe_checkout_guardrails(settings)
         provider_session_id, hosted_url = create_stripe_checkout_session(q, ps, settings)
+        ps.provider_session_id = provider_session_id
+        ps.checkout_url = hosted_url
+    if requested_provider == "decal":
+        provider_session_id, hosted_url = create_decal_checkout_session(q, ps, settings)
         ps.provider_session_id = provider_session_id
         ps.checkout_url = hosted_url
     session.add(ps); session.commit(); session.refresh(ps)
@@ -2965,6 +2988,66 @@ def _validate_stripe_paid_event(session: Session, ps: PaymentSession, data_objec
         raise HTTPException(status_code=409, detail="Stripe currency mismatch")
 
 
+def _decal_session_object(payload: dict) -> dict:
+    return payload.get("session", payload) if isinstance(payload, dict) else {}
+
+
+def _decal_amount_paid_minor(session_object: dict) -> int | None:
+    amounts = session_object.get("order", {}).get("amounts", {}) if isinstance(session_object.get("order"), dict) else {}
+    paid = amounts.get("paid")
+    return int(paid) if paid is not None else None
+
+
+def _validate_decal_paid_session(db_session: Session, ps: PaymentSession, decal_session: dict) -> None:
+    if ps.provider != "decal":
+        raise HTTPException(status_code=409, detail="payment session provider is not decal")
+    session_object = _decal_session_object(decal_session)
+    provider_session_id = session_object.get("id")
+    if provider_session_id and ps.provider_session_id and provider_session_id != ps.provider_session_id:
+        raise HTTPException(status_code=409, detail="Decal provider_session_id mismatch")
+    order = session_object.get("order", {}) if isinstance(session_object.get("order"), dict) else {}
+    if str(order.get("paymentStatus", "")).lower() != "paid":
+        raise HTTPException(status_code=409, detail="Decal session is not paid")
+    q = db_session.get(Quote, ps.quote_id)
+    if not q:
+        raise HTTPException(404, "quote not found")
+    paid = _decal_amount_paid_minor(session_object)
+    if paid is None or paid < q.amount_minor:
+        raise HTTPException(status_code=409, detail="Decal amount paid mismatch")
+    currency = order.get("currency")
+    if not isinstance(currency, str) or currency.upper() != q.currency.upper():
+        raise HTTPException(status_code=409, detail="Decal currency mismatch")
+
+
+@app.post("/api/v1/webhooks/decal")
+async def decal_webhook(request: Request, payment_session_id: str | None = None, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    try:
+        event = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid webhook payload") from exc
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=400, detail="invalid webhook payload")
+    if event.get("event") != "checkout.session.completed":
+        return {"received": True, "processed": False, "reason": "event ignored"}
+    session_object = event.get("session", {}) if isinstance(event.get("session"), dict) else {}
+    provider_session_id = session_object.get("id")
+    body_payment_session_id = event.get("payment_session_id") or session_object.get("payment_session_id")
+    lookup_id = payment_session_id or body_payment_session_id
+    ps = session.get(PaymentSession, lookup_id) if lookup_id else None
+    if not ps and provider_session_id:
+        ps = session.exec(select(PaymentSession).where(PaymentSession.provider_session_id == provider_session_id)).first()
+    if not ps:
+        raise HTTPException(404 if (lookup_id or provider_session_id) else 400, "payment session not found" if (lookup_id or provider_session_id) else "missing payment_session_id")
+    if ps.status == "paid":
+        return {"received": True, "processed": False, "reason": "payment session already paid", "payment_session": session_to_read(ps)}
+    if not ps.provider_session_id:
+        raise HTTPException(status_code=409, detail="Decal provider_session_id missing")
+    verified = retrieve_decal_checkout_session(ps.provider_session_id, settings)
+    _validate_decal_paid_session(session, ps, verified)
+    _issue_paid_session(session, ps, settings, provider="decal")
+    return {"received": True, "processed": True}
+
+
 @app.post("/api/v1/webhooks/stripe")
 async def stripe_webhook(request: Request, stripe_signature: str | None = Header(default=None, alias="Stripe-Signature"), session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
     raw_body = await request.body()
@@ -3006,6 +3089,8 @@ def refund_payment_session(
     q = session.get(Quote, ps.quote_id)
     if not q:
         raise HTTPException(404, "quote not found")
+    if ps.provider == "decal":
+        raise HTTPException(status_code=501, detail="Decal automatic refunds are not implemented yet; feature gap tracked")
     if ps.provider != "stripe":
         raise HTTPException(status_code=409, detail="only Stripe payment sessions can be refunded automatically")
     existing_refund = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status == "refunded")).first()

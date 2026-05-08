@@ -9,6 +9,7 @@ from payjent.auth import create_bot_credential
 from payjent.config import Settings, get_settings
 from payjent.models import FulfillmentEvent, PaymentSession, Quote
 from payjent.providers.stripe import create_stripe_checkout_session, create_stripe_refund
+from payjent.providers.decal import create_decal_checkout_session
 import payjent.main as main_module
 from payjent.main import app
 
@@ -492,6 +493,9 @@ def test_payment_readiness_reports_booleans_without_secret_values(client):
     assert data == {
         "active_payment_ready": True,
         "checkout_provider": "stripe",
+        "decal_api_key_configured": False,
+        "decal_public_base_url_configured": True,
+        "decal_database_configured": True,
         "stripe_secret_configured": True,
         "stripe_webhook_configured": True,
         "public_base_url_configured": True,
@@ -709,3 +713,72 @@ def test_stripe_pay_page_requires_https_checkout_url(client, quote_payload, bot_
     assert response.status_code == 200
     assert "Continue to secure payment" not in response.text
     assert "http://checkout.stripe.test/insecure" not in response.text
+
+
+def test_decal_adapter_builds_checkout_payload_and_urls():
+    quote = Quote(id="quote_decal_adapter", bot_id="bot-1", external_user_id="user-1", request_summary="decal work", request_hash="hash", amount_minor=250, currency="USD", cost_breakdown=[{"label":"work","amount_minor":250}], quote_hash="qh")
+    payment_session = PaymentSession(id="ps_decal_adapter", quote_id=quote.id, provider="decal")
+    calls = {}
+
+    class FakeDecalClient:
+        def create_checkout_session(self, payload, idempotency_key):
+            calls["payload"] = payload
+            calls["idempotency_key"] = idempotency_key
+            return {"id": "dcs_123", "url": "https://checkout.usedecal.test/session"}
+        def retrieve_checkout_session(self, session_id):
+            raise AssertionError("not used")
+
+    provider_session_id, url = create_decal_checkout_session(
+        quote,
+        payment_session,
+        Settings(decal_api_key="decal_test", public_base_url="https://payjent.example", decal_payment_destination="wallet_123"),
+        client=FakeDecalClient(),
+    )
+
+    assert provider_session_id == "dcs_123"
+    assert url == "https://checkout.usedecal.test/session"
+    assert calls["idempotency_key"] == "ps_decal_adapter"
+    assert calls["payload"]["items"] == [{"name": "decal work", "quantity": 1, "unitPrice": 250}]
+    assert calls["payload"]["successUrl"] == "https://payjent.example/status/ps_decal_adapter?checkout=success"
+    assert calls["payload"]["callbackUrl"] == "https://payjent.example/api/v1/webhooks/decal?payment_session_id=ps_decal_adapter"
+    assert calls["payload"]["paymentDestination"] == "wallet_123"
+
+
+def test_decal_checkout_webhook_refund_and_readiness(client, quote_payload, bot_headers, operator_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", public_base_url="https://payjent.example")
+    monkeypatch.setattr(main_module, "create_decal_checkout_session", lambda *_: ("dcs_paid", "https://checkout.usedecal.test/session"))
+    q, ps = _checkout(client, quote_payload, bot_headers)
+    assert ps["provider"] == "decal"
+    assert ps["checkout_url"] == "https://checkout.usedecal.test/session"
+    readiness = client.get("/api/v1/payment-readiness").json()
+    assert readiness["checkout_provider"] == "decal"
+    assert readiness["decal_api_key_configured"] is True
+    assert readiness["active_payment_ready"] is True
+
+    verified = {"id": "dcs_paid", "url": ps["checkout_url"], "order": {"currency": "USD", "paymentStatus": "paid", "amounts": {"total": 250, "paid": 250}, "items": []}}
+    monkeypatch.setattr(main_module, "retrieve_decal_checkout_session", lambda session_id, settings: verified)
+    body = {"event": "checkout.session.completed", "session": {"id": "dcs_paid"}}
+    paid = client.post(f"/api/v1/webhooks/decal?payment_session_id={ps['id']}", json=body)
+    assert paid.status_code == 200, paid.text
+    assert paid.json() == {"received": True, "processed": True}
+    stored = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
+    assert stored["status"] == "paid"
+
+    duplicate = client.post(f"/api/v1/webhooks/decal?payment_session_id={ps['id']}", json=body)
+    assert duplicate.status_code == 200
+    assert duplicate.json()["processed"] is False
+
+    refund = client.post(f"/api/v1/payment-sessions/{ps['id']}/refund", headers=operator_headers, json={"reason": "downstream failed", "force": True})
+    assert refund.status_code == 501
+    assert "Decal automatic refunds are not implemented" in refund.json()["detail"]
+
+
+def test_decal_webhook_rejects_unpaid_or_mismatch(client, quote_payload, bot_headers, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", public_base_url="https://payjent.example")
+    monkeypatch.setattr(main_module, "create_decal_checkout_session", lambda *_: ("dcs_unpaid", "https://checkout.usedecal.test/session"))
+    _, ps = _checkout(client, quote_payload, bot_headers)
+    monkeypatch.setattr(main_module, "retrieve_decal_checkout_session", lambda *_: {"id": "dcs_unpaid", "order": {"currency": "USD", "paymentStatus": "pending", "amounts": {"paid": 0}}})
+    response = client.post(f"/api/v1/webhooks/decal?payment_session_id={ps['id']}", json={"event": "checkout.session.completed", "session": {"id": "dcs_unpaid"}})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Decal session is not paid"
+    assert client.get(f"/api/v1/payment-sessions/{ps['id']}").json()["status"] == "checkout_created"

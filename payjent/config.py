@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str | None = None
     stripe_success_url_template: str | None = None
     stripe_cancel_url_template: str | None = None
+    decal_api_key: str | None = None
+    decal_api_base_url: str = "https://api.usedecal.com"
+    decal_success_url_template: str | None = None
+    decal_callback_url_template: str | None = None
+    decal_payment_destination: str | None = None
     workos_api_key: str | None = None
     workos_client_id: str | None = None
     workos_redirect_uri: str | None = None
@@ -79,6 +84,9 @@ class Settings(BaseSettings):
                 problems.append("PAYJENT_STRIPE_SECRET_KEY is required when Stripe is selected in production")
             if not self.stripe_webhook_secret:
                 problems.append("PAYJENT_STRIPE_WEBHOOK_SECRET is required when Stripe is selected in production")
+        # Decal is Payjent's primary checkout rail, but missing Decal credentials should not
+        # take the whole API offline: readiness and checkout preflight report the inactive
+        # rail until PAYJENT_DECAL_API_KEY is configured.
         if problems:
             raise RuntimeError("Payjent production guardrails failed: " + "; ".join(problems))
 

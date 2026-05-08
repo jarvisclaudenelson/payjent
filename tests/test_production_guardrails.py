@@ -34,14 +34,23 @@ def test_production_guardrails_require_stripe_secrets_when_stripe_selected():
     assert "PAYJENT_STRIPE_WEBHOOK_SECRET" in message
 
 
-def test_production_guardrails_accept_https_and_required_stripe_placeholders():
+def test_production_guardrails_accept_https_and_required_decal_placeholders():
     settings = Settings(
         env="production",
         signing_secret="<replace-with-strong-secret>",
         public_base_url="https://payjent.example",
-        checkout_provider="stripe",
-        stripe_secret_key="<stripe-secret-key>",
-        stripe_webhook_secret="<stripe-webhook-secret>",
+        checkout_provider="decal",
+        decal_api_key="<decal-api-key>",
+    )
+    settings.validate_runtime_guardrails()
+
+
+def test_production_guardrails_keep_api_online_when_decal_key_missing():
+    settings = Settings(
+        env="production",
+        signing_secret="<replace-with-strong-secret>",
+        public_base_url="https://payjent.example",
+        checkout_provider="decal",
     )
     settings.validate_runtime_guardrails()
 
