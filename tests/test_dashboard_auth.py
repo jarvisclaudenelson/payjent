@@ -11,30 +11,14 @@ from payjent.models import Account
 def test_public_root_renders_landing_page(client):
     root = client.get("/", follow_redirects=False)
     assert root.status_code == 200
-    assert "Payment-gate agent actions" in root.text
-    assert "Register your agent" in root.text
-    assert "/docs/agent-payjent-self-setup.md" in root.text
-    assert "Payjent does not execute downstream pay.sh" in root.text
-    assert "prefers-reduced-motion" in root.text
-    assert "IntersectionObserver" in root.text
-    assert "typing-dots" in root.text
-    assert "transitionTimer=null" in root.text
-    assert "function queueNextScenario()" in root.text
-    assert "if(transitionTimer)return" in root.text
-    assert "setTimeout(()=>reset((si+1)%scenarios.length),1200)" not in root.text
-    assert "class='ribbon'" in root.text
-    assert "class='stats'" in root.text
-    assert "class='wedge-grid'" in root.text
-    assert "class='receipt'" in root.text
-    assert "class='final'" in root.text
-    assert "Why Payjent" in root.text
-    assert "Trust &amp; safety" in root.text
-    assert "No SDK snippets on the landing page" in root.text
-    assert "Register an &lt;em&gt;agent" not in root.text
-    assert "Register an <em>agent" in root.text
-    assert "Payjent does not execute downstream pay.sh" in root.text
-    assert "200+" not in root.text
-    assert "38ms" not in root.text
+    assert "When your agent needs to spend" in root.text
+    assert "Register an agent" in root.text
+    assert "one-time install link" in root.text
+    assert "Ask your agent" in root.text or "ask your agent" in root.text
+    assert "/demo" in root.text
+    assert "SDK" not in root.text
+    assert "<pre" not in root.text
+    assert "curl -X" not in root.text
     assert "payjent.dev" not in root.text
     assert "grant_" not in root.text
     assert "payment_token" not in root.text

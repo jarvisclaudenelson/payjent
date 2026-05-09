@@ -98,22 +98,25 @@ def test_dashboard_and_agent_detail_render_key_copy(client, operator_headers):
     assert created.status_code == 200
     overview = client.get("/dashboard")
 
-    for copy in ["Payment operations", "Agent registration", "Stripe Connect", "x402", "integration snippets"]:
+    for copy in ["Payment operations", "Agent registration", "install link", "Ask the agent"]:
         assert copy.lower().split()[0] in overview.text.lower()
+    assert "integration snippets" not in overview.text
 
     assert overview.status_code == 200
     agent_id = overview.text.split("data-agent-id='", 1)[1].split("'", 1)[0]
     detail = client.get(f"/dashboard/agents/{agent_id}")
     assert detail.status_code == 200
 
-    for copy in ["Stripe Connect", "x402 rail configuration", "Integration snippet", "Recent payments / spend ledger", "discord-aggregator-stripe-smoke"]:
+    for copy in ["Payment rails", "Agent-readable setup checklist", "Recent payments / spend ledger"]:
         assert copy in detail.text
+    assert "Integration snippet" not in detail.text
+    assert "curl -X" not in detail.text
 
 
 def test_root_landing_is_public_and_dashboard_shows_how_paid_currency_safe(client, engine):
     landing = client.get("/")
     assert landing.status_code == 200
-    assert "Payment-gate agent actions" in landing.text
+    assert "approve paid agent actions" in landing.text
     assert "Register your agent" in landing.text
 
     assert client.post("/auth/register", data={"email": "dev@example.com", "password": "correct horse battery staple"}, follow_redirects=False).status_code == 303
