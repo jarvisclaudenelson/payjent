@@ -759,22 +759,26 @@ def test_decal_adapter_builds_checkout_payload_and_urls():
     assert calls["payload"]["paymentDestination"] == "wallet_123"
 
 
-def test_production_decal_checkout_requires_payment_destination():
+def test_production_decal_checkout_can_use_decal_dashboard_default_destination():
     quote = Quote(id="quote_decal_no_destination", bot_id="bot-1", external_user_id="user-1", request_summary="decal work", request_hash="hash", amount_minor=1, currency="USD", cost_breakdown=[{"label":"work","amount_minor":1}], quote_hash="qh")
     payment_session = PaymentSession(id="ps_decal_no_destination", quote_id=quote.id, provider="decal")
+    calls = {}
 
-    try:
-        create_decal_checkout_session(
-            quote,
-            payment_session,
-            Settings(env="production", decal_api_key="decal_test", public_base_url="https://payjent.example"),
-            client=None,
-        )
-    except HTTPException as exc:
-        assert exc.status_code == 503
-        assert "PAYJENT_DECAL_PAYMENT_DESTINATION" in exc.detail
-    else:
-        raise AssertionError("expected Decal destination guardrail")
+    class FakeDecalClient:
+        def create_checkout_session(self, payload, idempotency_key):
+            calls["payload"] = payload
+            return {"id": "dcs_default_destination", "url": "https://checkout.usedecal.test/session"}
+        def retrieve_checkout_session(self, session_id):
+            raise AssertionError("not used")
+
+    create_decal_checkout_session(
+        quote,
+        payment_session,
+        Settings(env="production", decal_api_key="decal_test", public_base_url="https://payjent.example"),
+        client=FakeDecalClient(),
+    )
+
+    assert "paymentDestination" not in calls["payload"]
 
 
 def test_decal_checkout_webhook_refund_and_readiness(client, quote_payload, bot_headers, operator_headers, monkeypatch):
