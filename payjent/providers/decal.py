@@ -54,6 +54,8 @@ def _safe_decal_error(exc: Exception, action: str) -> str:
     sanitized = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", message.replace("\n", " ")).strip()
     sanitized = re.sub(r"(?i)(decal|api)[-_ ]?key[:= ]+[A-Za-z0-9._~+/=-]+", r"\1_key=[redacted]", sanitized)
     sanitized = re.sub(r"(?i)(authorization|token|secret|password)\"?\s*[:=]\s*\"?[^\",}\s]+", r"\1=[redacted]", sanitized)
+    sanitized = re.sub(r'(?i)(paymentDestination)"?\s*[:=]\s*"?[^",}\s]+', r"\1=[redacted]", sanitized)
+    sanitized = re.sub(r"\b[1-9A-HJ-NP-Za-km-z]{32,64}\b", "[redacted-wallet]", sanitized)
     if len(sanitized) > 500:
         sanitized = sanitized[:497] + "..."
     parts = [f"status={status}"] if status else []
