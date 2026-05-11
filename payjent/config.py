@@ -65,7 +65,7 @@ class Settings(BaseSettings):
         if not self.public_base_url:
             return None
         public_base_url = self.public_base_url.rstrip("/")
-        if self.is_production and public_base_url in {"https://payjent.vercel.app", "https://www.payjent.com"}:
+        if self.is_production and public_base_url == "https://www.payjent.com":
             return CANONICAL_PUBLIC_BASE_URL
         return public_base_url
 

@@ -55,13 +55,13 @@ def test_register_page_shows_workos_cta_only_when_configured(client):
 
 
 def test_workos_login_redirects_to_hosted_authkit_url(client, monkeypatch):
-    app.dependency_overrides[get_settings] = lambda: workos_settings(workos_redirect_uri="https://payjent.vercel.app/auth/workos/callback")
+    app.dependency_overrides[get_settings] = lambda: workos_settings(workos_redirect_uri="https://payjent.com/auth/workos/callback")
     monkeypatch.setattr(workos_auth, "create_workos_client", lambda settings: FakeWorkOSClient())
 
     response = client.get("/auth/workos/login", follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "https://authkit.workos.test/authorize?provider=authkit&redirect_uri=https://payjent.vercel.app/auth/workos/callback"
+    assert response.headers["location"] == "https://authkit.workos.test/authorize?provider=authkit&redirect_uri=https://payjent.com/auth/workos/callback"
 
 
 def test_workos_login_missing_config_fails_closed_without_secrets(client):

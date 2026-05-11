@@ -269,7 +269,7 @@ def test_stripe_adapter_builds_checkout_payload_idempotency_and_metadata():
     assert calls["payload"]["payment_intent_data"]["metadata"] == calls["payload"]["metadata"]
 
 
-def test_stripe_checkout_uses_payjent_com_when_production_env_has_legacy_vercel_base_url():
+def test_stripe_checkout_uses_payjent_com_in_production():
     quote = Quote(
         id="quote_prod_canonical",
         bot_id="bot-1",
@@ -292,7 +292,7 @@ def test_stripe_checkout_uses_payjent_com_when_production_env_has_legacy_vercel_
     create_stripe_checkout_session(
         quote,
         payment_session,
-        Settings(env="production", stripe_secret_key="sk_test_fake", public_base_url="https://payjent.vercel.app"),
+        Settings(env="production", stripe_secret_key="sk_test_fake", public_base_url="https://www.payjent.com"),
         client=FakeStripeClient(),
     )
 
