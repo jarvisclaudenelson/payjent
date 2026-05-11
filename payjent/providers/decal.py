@@ -39,16 +39,23 @@ class DecalHTTPClient:
 
 
 def _safe_decal_error(exc: Exception, action: str) -> str:
+    response = getattr(exc, "response", None) if isinstance(exc, httpx.HTTPError) else None
+    status = getattr(response, "status_code", None)
+    body = ""
+    if response is not None:
+        try:
+            body = response.text or ""
+        except Exception:
+            body = ""
     if isinstance(exc, httpx.HTTPError):
-        message = f"Decal {action} network request failed"
-        status = getattr(getattr(exc, "response", None), "status_code", None)
+        message = body or f"Decal {action} network request failed"
     else:
         message = str(exc)
-        status = None
     sanitized = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", message.replace("\n", " ")).strip()
     sanitized = re.sub(r"(?i)(decal|api)[-_ ]?key[:= ]+[A-Za-z0-9._~+/=-]+", r"\1_key=[redacted]", sanitized)
-    if len(sanitized) > 300:
-        sanitized = sanitized[:297] + "..."
+    sanitized = re.sub(r"(?i)(authorization|token|secret|password)\"?\s*[:=]\s*\"?[^\",}\s]+", r"\1=[redacted]", sanitized)
+    if len(sanitized) > 500:
+        sanitized = sanitized[:497] + "..."
     parts = [f"status={status}"] if status else []
     if sanitized:
         parts.append(sanitized)
