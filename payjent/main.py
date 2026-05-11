@@ -71,7 +71,7 @@ from .providers.link import retrieve_link_status as retrieve_link_provider_statu
 from .providers.link import validate_credential_type
 from .providers.mock import complete_mock_payment
 from .providers.decal import create_decal_checkout_session, retrieve_decal_checkout_session
-from .providers.paysh import build_execution_envelope as build_paysh_execution_envelope
+from .providers.paysh import FAL_LEGACY_SERVICE_FQN, FAL_MPP_TEMPO_BASE_URL, build_execution_envelope as build_paysh_execution_envelope
 from .providers.premium_actions import EXECUTION_BOUNDARY as PREMIUM_PRESET_EXECUTION_BOUNDARY, get_preset, list_presets
 from .providers.stripe import (
     create_stripe_checkout_session,
@@ -2027,6 +2027,40 @@ def _validate_generic_x402_envelope(envelope: dict, settings: Settings) -> None:
     _reject_secret_headers(envelope.get("headers") or {})
 
 
+_FAL_EXTERNAL_RUNTIME_OPT_IN_DETAIL = {
+    "code": "external_runtime_opt_in_required",
+    "recommended_tool_id": "fal.image.generate",
+    "required_argument": "external_runtime",
+    "guidance": "Use /api/v1/toolbox/fal.image.generate/checkout for normal Payjent-managed FAL image generation. Set provider_metadata.external_runtime=true or execution_readiness.external_runtime=true only when intentionally using the external pay.sh/x402 FAL runtime.",
+}
+
+
+def _truthy_external_runtime_opt_in(payload: Any) -> bool:
+    for source in (getattr(payload, "provider_metadata", None), getattr(payload, "execution_readiness", None)):
+        if isinstance(source, dict) and source.get("external_runtime") is True:
+            return True
+    return False
+
+
+def _is_fal_external_runtime_target(*, service_url: str | None = None, target_url: str | None = None, service_fqn: str | None = None, provider: str | None = None) -> bool:
+    if service_fqn and service_fqn.strip().lower() == FAL_LEGACY_SERVICE_FQN:
+        return True
+    for url in (service_url, target_url):
+        if not url:
+            continue
+        host = (urlparse(url).netloc or "").lower()
+        if host == "fal.mpp.tempo.xyz" or url.rstrip("/").lower().startswith(FAL_MPP_TEMPO_BASE_URL):
+            return True
+        if (provider and "fal" in provider.strip().lower().replace("-", "_")) and (host.endswith(".paysponge.com") or host == "paysponge.com"):
+            return True
+    return False
+
+
+def _require_external_runtime_opt_in_for_fal_target(payload: Any, *, service_url: str | None = None, target_url: str | None = None, service_fqn: str | None = None, provider: str | None = None) -> None:
+    if _is_fal_external_runtime_target(service_url=service_url, target_url=target_url, service_fqn=service_fqn, provider=provider) and not _truthy_external_runtime_opt_in(payload):
+        raise HTTPException(status_code=422, detail=dict(_FAL_EXTERNAL_RUNTIME_OPT_IN_DETAIL))
+
+
 def _create_x402_action_from_payload(
     payload: X402PaidActionCreate,
     *,
@@ -2040,6 +2074,13 @@ def _create_x402_action_from_payload(
     if strict_generic and (payload.payjent_fulfillment_callback or payload.payjent_managed_execution):
         raise HTTPException(status_code=422, detail="generic x402 actions are authorization-only; Payjent does not execute target_url/service_url")
     service_url = payload.service_url or payload.target_url
+    _require_external_runtime_opt_in_for_fal_target(
+        payload,
+        service_url=service_url,
+        target_url=payload.target_url,
+        service_fqn=payload.service_fqn,
+        provider=payload.provider,
+    )
     try:
         envelope = build_paysh_execution_envelope(
             service_url=service_url,
@@ -2210,6 +2251,12 @@ def _create_premium_action_from_payload(
     credential: BotCredential,
 ) -> dict:
     service_url = payload.service_url or payload.target_url
+    _require_external_runtime_opt_in_for_fal_target(
+        payload,
+        service_url=payload.service_url,
+        target_url=payload.target_url,
+        provider=payload.provider,
+    )
     kind = payload.kind or payload.action_type or "premium_action"
     envelope = {
         "provider": payload.provider,

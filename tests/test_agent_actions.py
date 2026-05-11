@@ -1,3 +1,8 @@
+from sqlmodel import Session, select
+
+from payjent.models import PaymentSession
+
+
 def _create_action(client, quote_payload, bot_headers):
     return client.post("/api/v1/agent-actions", json=quote_payload, headers=bot_headers)
 
@@ -179,6 +184,7 @@ def test_obsolete_paysponge_fal_with_stale_url_is_rejected_before_checkout(clien
         service_fqn="paysponge/fal",
         resource="fal-ai/fast-sdxl",
         body={"prompt": "Lisbon at sunset"},
+        provider_metadata={"external_runtime": True},
     )
     r = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
     assert r.status_code == 422
@@ -187,13 +193,46 @@ def test_obsolete_paysponge_fal_with_stale_url_is_rejected_before_checkout(clien
     assert "pay discover fal" in r.text
 
 
-def test_obsolete_paysponge_fal_catalog_target_is_remediated_to_mpp_url(client, bot_headers):
+def test_pay_sh_fal_mpp_requires_external_runtime_opt_in_before_checkout(client, bot_headers, engine):
+    payload = _pay_sh_payload(
+        request_hash="paysponge-fal-no-opt-in",
+        service_url="https://fal.mpp.tempo.xyz/fal-ai/fast-sdxl",
+        resource="fal-ai/fast-sdxl",
+        body={"prompt": "Lisbon at sunset"},
+    )
+    r = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert detail["code"] == "external_runtime_opt_in_required"
+    assert detail["recommended_tool_id"] == "fal.image.generate"
+    assert detail["required_argument"] == "external_runtime"
+    assert "/api/v1/toolbox/fal.image.generate/checkout" in detail["guidance"]
+    assert "payment_session_id" not in r.text
+    with Session(engine) as session:
+        assert len(session.exec(select(PaymentSession)).all()) == 0
+
+
+def test_x402_fal_mpp_requires_external_runtime_opt_in_before_checkout(client, bot_headers):
+    payload = _pay_sh_payload(
+        request_hash="x402-fal-no-opt-in",
+        service_url="https://fal.mpp.tempo.xyz/fal-ai/fast-sdxl",
+        resource="fal-ai/fast-sdxl",
+        body={"prompt": "Lisbon at sunset"},
+    )
+    r = client.post("/api/v1/premium-actions/x402", json=payload, headers=bot_headers)
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "external_runtime_opt_in_required"
+    assert "payment_session_id" not in r.text
+
+
+def test_obsolete_paysponge_fal_catalog_target_is_remediated_to_mpp_url_with_external_opt_in(client, bot_headers):
     payload = _pay_sh_payload(
         request_hash="paysponge-fal-remediated",
         service_url=None,
         service_fqn="paysponge/fal",
         resource="fal-ai/fast-sdxl",
         body={"prompt": "Lisbon at sunset"},
+        provider_metadata={"external_runtime": True},
     )
     action = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
     assert action.status_code == 200
@@ -211,6 +250,7 @@ def test_fal_mpp_tempo_envelope_uses_sponge_wallet_runtime_not_plain_paycurl(cli
         service_fqn=None,
         resource="fal-ai/fast-sdxl",
         body={"prompt": "Lisbon at sunset"},
+        execution_readiness={"external_runtime": True},
     )
     action = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
     assert action.status_code == 200

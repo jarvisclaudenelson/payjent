@@ -34,6 +34,9 @@ def test_toolbox_checkout_fal_creates_quote_and_payment_session(client, bot_head
     assert body["quote"]["request_summary"] == "Toolbox action: fal.image.generate"
     assert body["quote"]["execution_envelope"]["tool_id"] == "fal.image.generate"
     assert body["quote"]["execution_envelope"]["arbitrary_url_execution"] is False
+    serialized = json.dumps(body).lower()
+    assert "fal.mpp" not in serialized
+    assert "sponge" not in serialized
     assert body["payment_session"]["status"] == "checkout_created"
     assert body["payment_url"]
     _assert_no_secret_value(body)
