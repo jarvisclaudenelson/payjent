@@ -16,6 +16,8 @@ PROVIDER = "pay_sh"
 KIND = "premium_api_call"
 SETUP_HINT = "Use a funded downstream x402/pay.sh runtime after Payjent authorization. For Sponge/PaySponge gateways, configure SPONGE_API_KEY in the agent runtime and execute with SpongeWallet.paidFetch/x402Fetch or `npx spongewallet pay fetch`; plain paycurl may return the expected HTTP 402 challenge without settling it."
 SETTLEMENT = "external_x402_runtime"
+FAL_MPP_TEMPO_BASE_URL = "https://fal.mpp.tempo.xyz"
+FAL_LEGACY_SERVICE_FQN = "paysponge/fal"
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -25,18 +27,36 @@ def _clean_optional(value: str | None) -> str | None:
     return cleaned or None
 
 
-def validate_target(*, service_url: str | None = None, service_fqn: str | None = None, resource: str | None = None) -> tuple[str | None, str | None, str | None]:
-    """Validate the supported pay.sh target forms.
+def _fal_mpp_tempo_url(resource: str) -> str:
+    return f"{FAL_MPP_TEMPO_BASE_URL}/{resource.strip('/')}"
 
-    Accept either a direct service_url, or service_fqn + resource for gateway
-    resolution by the external pay.sh runtime.
-    """
+
+def validate_target(*, service_url: str | None = None, service_fqn: str | None = None, resource: str | None = None) -> tuple[str | None, str | None, str | None]:
+    """Validate and normalize the supported pay.sh target forms."""
 
     service_url = _clean_optional(service_url)
     service_fqn = _clean_optional(service_fqn)
     resource = _clean_optional(resource)
     if not service_url and not (service_fqn and resource):
         raise ValueError("provide either service_url or both service_fqn and resource")
+    if service_fqn and service_fqn.lower() == FAL_LEGACY_SERVICE_FQN:
+        if not resource:
+            raise ValueError(
+                "paysponge/fal is an obsolete SpongeWallet catalog id and cannot be used without a resource; "
+                "discover the current fal.ai service with `npx spongewallet pay discover fal` and use "
+                "service_url='https://fal.mpp.tempo.xyz/<resource>' (for example "
+                "https://fal.mpp.tempo.xyz/fal-ai/fast-sdxl)"
+            )
+        current_url = _fal_mpp_tempo_url(resource)
+        if service_url and service_url != current_url:
+            raise ValueError(
+                "paysponge/fal is obsolete and must not be emitted as a downstream x402 target; use the "
+                f"current fal.ai MPP executable URL {current_url} or discover it with "
+                "`npx spongewallet pay discover fal`"
+            )
+        # Remediate the legacy catalog target to the current executable MPP URL
+        # so downstream agents never receive paysponge/fal:<resource>.
+        service_url = current_url
     if service_url:
         parsed = urlparse(service_url)
         host = (parsed.netloc or "").lower()
@@ -44,9 +64,8 @@ def validate_target(*, service_url: str | None = None, service_fqn: str | None =
         if host in {"fal.ai", "www.fal.ai"} and not path:
             raise ValueError(
                 "https://fal.ai is a catalog/site root, not an executable pay.sh/x402 gateway endpoint; "
-                "use the public pay.sh catalog target service_fqn='paysponge/fal' with a concrete resource "
-                "such as 'fal-ai/flux/schnell', or provide a resolved gateway URL like "
-                "https://fal.x402.paysponge.com/<resource> plus the required request body"
+                "use the current SpongeWallet fal.ai MPP executable URL like "
+                "https://fal.mpp.tempo.xyz/fal-ai/fast-sdxl plus the required request body"
             )
     return service_url, service_fqn, resource
 
@@ -57,7 +76,7 @@ def _is_paysponge_gateway(service_url: str | None, service_fqn: str | None) -> b
     if not service_url:
         return False
     host = (urlparse(service_url).netloc or "").lower()
-    return host.endswith(".paysponge.com") or host == "paysponge.com"
+    return host.endswith(".paysponge.com") or host == "paysponge.com" or host == "fal.mpp.tempo.xyz"
 
 
 def build_command_preview(*, service_url: str | None, service_fqn: str | None, resource: str | None, method: str, body: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> str:

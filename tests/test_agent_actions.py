@@ -169,14 +169,28 @@ def test_pay_sh_premium_action_rejects_fal_site_root_before_checkout(client, bot
     r = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
     assert r.status_code == 422
     assert "not an executable pay.sh/x402 gateway endpoint" in r.text
-    assert "paysponge/fal" in r.text
-    assert "fal-ai/flux/schnell" in r.text
+    assert "fal.mpp.tempo.xyz/fal-ai/fast-sdxl" in r.text
 
 
-def test_paysponge_fal_envelope_uses_sponge_wallet_runtime_not_plain_paycurl(client, bot_headers, operator_headers):
+def test_obsolete_paysponge_fal_with_stale_url_is_rejected_before_checkout(client, bot_headers):
     payload = _pay_sh_payload(
-        request_hash="paysponge-fal-hash-1",
+        request_hash="paysponge-fal-stale-url",
         service_url="https://fal.x402.paysponge.com/fal-ai/fast-sdxl",
+        service_fqn="paysponge/fal",
+        resource="fal-ai/fast-sdxl",
+        body={"prompt": "Lisbon at sunset"},
+    )
+    r = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
+    assert r.status_code == 422
+    assert "paysponge/fal is obsolete" in r.text
+    assert "https://fal.mpp.tempo.xyz/fal-ai/fast-sdxl" in r.text
+    assert "pay discover fal" in r.text
+
+
+def test_obsolete_paysponge_fal_catalog_target_is_remediated_to_mpp_url(client, bot_headers):
+    payload = _pay_sh_payload(
+        request_hash="paysponge-fal-remediated",
+        service_url=None,
         service_fqn="paysponge/fal",
         resource="fal-ai/fast-sdxl",
         body={"prompt": "Lisbon at sunset"},
@@ -185,21 +199,25 @@ def test_paysponge_fal_envelope_uses_sponge_wallet_runtime_not_plain_paycurl(cli
     assert action.status_code == 200
     created = action.json()
     assert created["command_preview"].startswith("npx spongewallet pay fetch")
-    assert "fal.x402.paysponge.com/fal-ai/fast-sdxl" in created["command_preview"]
+    assert "https://fal.mpp.tempo.xyz/fal-ai/fast-sdxl" in created["command_preview"]
+    assert "paysponge/fal:fal-ai/fast-sdxl" not in created["command_preview"]
     assert "paycurl" not in created["command_preview"]
 
-    paid = client.post(f"/api/v1/payment-sessions/{created['payment_session_id']}/mock-pay", headers=operator_headers).json()
-    consumed = client.post(
-        f"/api/v1/agent-actions/{created['action_id']}/consume",
-        json={"payment_token": paid["grant"]["id"], "presentation": _presentation(payload)},
-        headers=bot_headers,
+
+def test_fal_mpp_tempo_envelope_uses_sponge_wallet_runtime_not_plain_paycurl(client, bot_headers, operator_headers):
+    payload = _pay_sh_payload(
+        request_hash="paysponge-fal-hash-1",
+        service_url="https://fal.mpp.tempo.xyz/fal-ai/fast-sdxl",
+        service_fqn=None,
+        resource="fal-ai/fast-sdxl",
+        body={"prompt": "Lisbon at sunset"},
     )
-    assert consumed.status_code == 200
-    envelope = consumed.json()["execution_envelope"]
-    assert envelope["x402_runtime"] == "sponge"
-    assert envelope["settlement"] == "external_x402_runtime"
-    assert envelope["agent_runtime_requirements"]["credential"] == "SPONGE_API_KEY in the agent runtime only"
-    assert "does not satisfy the downstream x402 HTTP 402 challenge" in envelope["agent_runtime_requirements"]["execution_note"]
+    action = client.post("/api/v1/premium-actions/pay-sh", json=payload, headers=bot_headers)
+    assert action.status_code == 200
+    created = action.json()
+    assert created["command_preview"].startswith("npx spongewallet pay fetch")
+    assert "fal.mpp.tempo.xyz/fal-ai/fast-sdxl" in created["command_preview"]
+    assert "paycurl" not in created["command_preview"]
 
 
 def test_unpaid_agent_action_cannot_start(client, quote_payload, bot_headers):
