@@ -114,6 +114,32 @@ def test_toolbox_checkout_sub_50_paysh_creates_checkout_without_card_minimum(cli
         assert len(session.exec(select(PaymentSession)).all()) == 1
 
 
+def test_paysh_fal_checkout_and_execution_require_external_runtime_opt_in(client, bot_headers):
+    checkout = client.post(
+        "/api/v1/toolbox/paysh.fal_image/checkout",
+        json=_payload({"instructions": "make a robot image"}, amount_minor=80),
+        headers=bot_headers,
+    )
+    assert checkout.status_code == 422
+    assert checkout.json()["detail"]["recommended_tool_id"] == "fal.image.generate"
+
+    execution = client.post(
+        "/api/v1/toolbox/paysh.fal_image/executions",
+        json=_payload({"instructions": "make a robot image"}, amount_minor=80),
+        headers=bot_headers,
+    )
+    assert execution.status_code == 422
+    assert execution.json()["detail"]["required_argument"] == "external_runtime"
+
+    allowed = client.post(
+        "/api/v1/toolbox/paysh.fal_image/executions",
+        json=_payload({"instructions": "make a robot image", "external_runtime": True}, amount_minor=80),
+        headers=bot_headers,
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["tool_id"] == "paysh.fal_image"
+
+
 def test_toolbox_checkout_rejects_request_hash_tampering(client, bot_headers):
     response = client.post(
         "/api/v1/toolbox/fal.image.generate/checkout",

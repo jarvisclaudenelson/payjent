@@ -15,8 +15,15 @@ TRUSTED_PAYSH_EXECUTION_CAVEAT = (
 )
 
 MANAGED_EXECUTION_CAVEAT = (
-    "Managed provider action metadata only. Payjent quotes and gates a bounded task budget; "
-    "provider execution happens in the agent/provider runtime without exposing sensitive values."
+    "Payjent-managed provider runtime. Payjent quotes and gates a bounded task budget; "
+    "provider execution uses Payjent-managed provider credentials/runtime without exposing sensitive values."
+)
+
+FAL_EXTERNAL_RUNTIME_OPT_IN_FIELD = "external_runtime"
+FAL_EXTERNAL_RUNTIME_GUIDANCE = (
+    "paysh.fal_image is an external pay.sh/x402 fallback for advanced agents only. "
+    "Use fal.image.generate for Payjent-managed FAL image generation, or pass "
+    "external_runtime=true to explicitly opt into the external runtime."
 )
 
 _TOOLBOX: dict[str, dict[str, Any]] = {
@@ -53,7 +60,7 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
     "fal.image.generate": {
         "tool_id": "fal.image.generate",
         "display_name": "FAL Image Generate",
-        "description": "Generate an image using an agent-managed FAL provider integration.",
+        "description": "Canonical/default FAL image generation through Payjent-managed FAL provider runtime.",
         "provider_type": "managed_api",
         "status": "enabled",
         "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1, "maximum": 4}}, "required": ["prompt"]},
@@ -61,6 +68,8 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "pricing_source": "agent_runtime",
         "supported_payment_rails": ["task_budget", "decal", "stablecoin"],
         "recommended_payment_rail": "decal",
+        "default_for": ["fal", "fal.image", "fal.image.generate", "image_generation"],
+        "agent_recommendation": "Use this Payjent-managed tool for normal/default FAL image generation. Do not route FAL image requests to paysh.fal_image unless the caller explicitly opts into external_runtime=true.",
         "risk_level": "medium",
         "execution_mode": "agent_managed_provider_runtime",
         "settlement_caveat": MANAGED_EXECUTION_CAVEAT,
@@ -83,7 +92,7 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
 }
 
 for tool_id, name, desc in [
-    ("paysh.fal_image", "Trusted pay.sh FAL Image", "Allowlisted pay.sh/x402 image generation metadata."),
+    ("paysh.fal_image", "External pay.sh FAL Image Fallback", "Advanced external pay.sh/x402 FAL image fallback metadata; not the default FAL path."),
     ("paysh.web_scrape", "Trusted pay.sh Web Scrape", "Allowlisted pay.sh/x402 web scraping metadata."),
     ("paysh.search", "Trusted pay.sh Search", "Allowlisted pay.sh/x402 search metadata."),
     ("paysh.data_extract", "Trusted pay.sh Data Extract", "Allowlisted pay.sh/x402 data extraction metadata."),
@@ -105,6 +114,25 @@ for tool_id, name, desc in [
         "trusted_metadata": {"allowlisted": True, "arbitrary_url_execution": False, "live_settlement_claim": False},
         "settlement_caveat": TRUSTED_PAYSH_EXECUTION_CAVEAT,
     }
+
+_TOOLBOX["paysh.fal_image"].update(
+    {
+        "status": "advanced_external_fallback",
+        "default_for": [],
+        "external_fallback_for": "fal.image.generate",
+        "requires_explicit_opt_in": FAL_EXTERNAL_RUNTIME_OPT_IN_FIELD,
+        "agent_recommendation": FAL_EXTERNAL_RUNTIME_GUIDANCE,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "instructions": {"type": "string"},
+                "quantity": {"type": "integer", "minimum": 1, "maximum": 10},
+                FAL_EXTERNAL_RUNTIME_OPT_IN_FIELD: {"type": "boolean", "const": True, "description": "Required to use the external pay.sh/x402 FAL fallback instead of Payjent-managed fal.image.generate."},
+            },
+            "required": ["instructions", FAL_EXTERNAL_RUNTIME_OPT_IN_FIELD],
+        },
+    }
+)
 
 
 def list_tools() -> list[dict[str, Any]]:

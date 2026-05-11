@@ -69,6 +69,12 @@ python -m payjent.demo paid-action
 
 This calls `/api/v1/agent-actions` to create a quote and checkout in one bot-authenticated request, prints `action_id`, `payment_url`, and a user-facing payment prompt, completes local dev mock payment, consumes the returned `payment_token` for that exact action/request hash, resumes the stored execution envelope, and records completion. MVP note: `action_id` is currently an alias for the underlying `quote_id` so the existing quote/grant request-hash binding is preserved without a migration.
 
+## Payjent-managed FAL image generation
+
+For normal/default FAL image generation, agents should use the toolbox tool `fal.image.generate` (`POST /api/v1/toolbox/fal.image.generate/quote`, `/checkout`, and `/executions`). This is the canonical Payjent-managed FAL route: Payjent gates the exact agent-supplied runtime quote and the managed execution adapter uses the Payjent-managed FAL provider runtime.
+
+`paysh.fal_image` is not the default FAL path. It remains only as an advanced external pay.sh/x402 fallback. Checkout, quote, or execution creation for `paysh.fal_image` must include `external_runtime: true` in `arguments`; otherwise Payjent rejects the request with `422` guidance to use `fal.image.generate`.
+
 ## Pay.sh premium action provider
 
 Payjent can scaffold a downstream pay.sh premium action without replacing Payjent's payment gate. A bot calls `POST /api/v1/premium-actions/pay-sh` with the usual paid action fields plus either `service_url` or `service_fqn` + `resource`, optional `method`, `body`, `headers`, and `description`. Payjent stores a normalized execution envelope with `provider=pay_sh`, `kind=premium_api_call`, `command_preview` such as `paycurl https://api.weather.ai/forecast` for generic x402 or `npx spongewallet pay fetch --url https://fal.mpp.tempo.xyz/fal-ai/fast-sdxl ...` for SpongeWallet MPP/Tempo endpoints, setup guidance, and `settlement=external_x402_runtime`. Payjent never POSTs `service_url` or runs `paycurl`/SpongeWallet; it only gates payment and authorizes bounded x402/pay.sh spend. Do not use the obsolete `paysponge/fal:...` target; discover current fal.ai catalog details with `npx spongewallet pay discover fal` and pass the executable URL `https://fal.mpp.tempo.xyz/<resource>`.

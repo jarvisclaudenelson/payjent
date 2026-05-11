@@ -97,6 +97,11 @@ def test_fal_managed_quote_uses_decal_without_stripe_minimum(client, bot_headers
     assert quote["recommended_payment_rail"] == "decal"
     assert decal["recommended"] is True
     assert quote["stripe_minimum_applies"] is False
+    serialized = json.dumps(quote).lower()
+    assert "spongewallet" not in serialized
+    assert "paysponge" not in serialized
+    assert "x402" not in serialized
+    assert "fal.mpp.tempo.xyz" not in serialized
 
 
 def test_fal_runtime_amount_can_be_sub_50_and_uses_decal_without_minimum():
@@ -139,6 +144,34 @@ def test_well_known_manifest_exposes_toolbox_url_or_count(client):
     assert manifest["toolbox_tool_count"] >= 9
     toolbox_tool_ids = {tool.get("tool_id") for tool in manifest["tools"] if tool.get("tool_id")}
     assert "fal.image.generate" in toolbox_tool_ids
-    fal_descriptor = next(tool for tool in manifest["tools"] if tool.get("tool_id") == "fal.image.generate")
-    assert fal_descriptor["endpoint"] == "/api/v1/toolbox/fal.image.generate"
-    assert fal_descriptor["execution_mode"] == "agent_managed_provider_runtime"
+    fal = next(tool for tool in manifest["tools"] if tool.get("tool_id") == "fal.image.generate")
+    assert fal["endpoint"] == "/api/v1/toolbox/fal.image.generate"
+    assert fal["execution_mode"] == "agent_managed_provider_runtime"
+    assert fal["default_for"]
+    assert "Payjent-managed" in fal["agent_recommendation"]
+    paysh_fal = next(tool for tool in manifest["tools"] if tool.get("tool_id") == "paysh.fal_image")
+    assert paysh_fal["external_fallback_for"] == "fal.image.generate"
+    assert paysh_fal["requires_explicit_opt_in"] == "external_runtime"
+    assert paysh_fal["default_for"] == []
+    assert any("fal.image.generate" in item for item in manifest["agent_guidance"])
+
+
+def test_paysh_fal_quote_requires_external_runtime_opt_in(client, bot_headers):
+    response = client.post(
+        "/api/v1/toolbox/paysh.fal_image/quote",
+        json={**_quote_payload({"instructions": "make a robot image"}), "amount_minor": 80},
+        headers=bot_headers,
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "external_runtime_opt_in_required"
+    assert detail["recommended_tool_id"] == "fal.image.generate"
+    assert detail["required_argument"] == "external_runtime"
+
+    allowed = client.post(
+        "/api/v1/toolbox/paysh.fal_image/quote",
+        json={**_quote_payload({"instructions": "make a robot image", "external_runtime": True}), "amount_minor": 80},
+        headers=bot_headers,
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["tool_id"] == "paysh.fal_image"

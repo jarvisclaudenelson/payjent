@@ -34,6 +34,12 @@ Before creating paid actions, discover what this Payjent instance supports:
 
 Never ask a user to paste `X-Payjent-Bot-Key`, grants, payment tokens, deployment secrets, or install-link redemption output in chat.
 
+### FAL image generation default
+
+For normal FAL image requests, prefer toolbox tool `fal.image.generate`. It is the canonical Payjent-managed FAL path and should be treated as the default/recommended route in discovery metadata.
+
+Do not use `paysh.fal_image` for ordinary FAL image generation. It is an advanced external pay.sh/x402 fallback only; requests to quote, checkout, or create executions for it must include `external_runtime: true` in `arguments`, otherwise Payjent returns `422` guidance to use `fal.image.generate`.
+
 ## Primary setup flow: one-time Agent Install Link
 
 Use the dashboard-created **Agent Install Link** as the primary setup flow:

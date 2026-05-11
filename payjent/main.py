@@ -81,7 +81,7 @@ from .providers.stripe import (
 )
 from .rails import normalize_spend_rail
 from .settlement_rails import list_settlement_rail_manifests, normalize_settlement_rail, settlement_rail_manifest
-from .toolbox import STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY, build_tool_quote, get_tool as get_toolbox_tool, list_tools as list_toolbox_tools
+from .toolbox import FAL_EXTERNAL_RUNTIME_GUIDANCE, FAL_EXTERNAL_RUNTIME_OPT_IN_FIELD, STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY, build_tool_quote, get_tool as get_toolbox_tool, list_tools as list_toolbox_tools
 from .risk import assess_checkout_risk
 from .readiness import enforce_readiness, readiness_record, safe_metadata
 from .schemas import (
@@ -283,6 +283,8 @@ def _discovery_manifest(base_url: str) -> dict:
         },
         "tools": _tool_descriptors(),
         "agent_guidance": [
+            "For normal/default FAL image generation, use toolbox tool fal.image.generate; it is the Payjent-managed FAL route.",
+            "Use paysh.fal_image only as an advanced external pay.sh/x402 fallback and only when the request arguments include external_runtime=true.",
             "Do not ask users for secrets, API keys, wallet mnemonics, grants, or payment tokens in chat.",
             "Use dashboard/platform connections, an agent install link, or a private secret store for Payjent credentials and provider credentials.",
             "Public Payjent URLs use https://payjent.com; do not advertise preview or testserver hosts to users.",
@@ -324,6 +326,7 @@ def _toolbox_quote_or_404(tool_id: str, payload: ToolboxQuoteCreate) -> tuple[di
     if not tool:
         raise HTTPException(status_code=404, detail="tool not found")
     _reject_secret_argument_keys(payload.arguments)
+    _enforce_paysh_fal_external_runtime_opt_in(tool_id, payload.arguments)
     if tool_id == "firecrawl.scrape":
         _sanitize_toolbox_arguments(tool_id, payload.arguments)
     try:
@@ -345,6 +348,23 @@ def _toolbox_quote_or_404(tool_id: str, payload: ToolboxQuoteCreate) -> tuple[di
 
 _SECRET_ARGUMENT_MARKERS = ("secret", "token", "api_key", "apikey", "authorization", "cookie", "password", "private_key", "credential", "grant")
 _EXECUTABLE_URL_KEY_MARKERS = ("target_url", "service_url", "callback", "webhook", "api_url")
+
+
+def _enforce_paysh_fal_external_runtime_opt_in(tool_id: str, arguments: dict[str, Any]) -> None:
+    if tool_id != "paysh.fal_image":
+        return
+    if arguments.get(FAL_EXTERNAL_RUNTIME_OPT_IN_FIELD) is True:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "external_runtime_opt_in_required",
+            "tool_id": "paysh.fal_image",
+            "recommended_tool_id": "fal.image.generate",
+            "required_argument": FAL_EXTERNAL_RUNTIME_OPT_IN_FIELD,
+            "guidance": FAL_EXTERNAL_RUNTIME_GUIDANCE,
+        },
+    )
 
 
 def _secret_like_marker(value: Any) -> bool:
