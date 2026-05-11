@@ -3,6 +3,7 @@ from sqlalchemy import inspect, text
 from sqlmodel import Session, create_engine, select
 from sqlmodel.pool import StaticPool
 
+from payjent import db as payjent_db
 from payjent import workos_auth
 from payjent.auth import DASHBOARD_SESSION_COOKIE
 from payjent.config import Settings, get_settings
@@ -157,6 +158,46 @@ def test_workos_callback_migrates_old_sqlite_account_schema(monkeypatch):
         assert account.auth_provider == "workos"
         assert account.workos_user_id == "user_legacy"
         assert account.password_hash == WORKOS_UNUSABLE_PASSWORD_HASH
+
+
+def test_workos_account_auth_migration_runs_for_existing_postgres_schema(monkeypatch):
+    statements = []
+
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeConnection:
+        def execute(self, statement):
+            statements.append(str(statement))
+
+    class FakeBegin:
+        def __enter__(self):
+            return FakeConnection()
+
+        def __exit__(self, *exc):
+            return False
+
+    class FakeEngine:
+        dialect = FakeDialect()
+
+        def begin(self):
+            return FakeBegin()
+
+    class FakeInspector:
+        def get_table_names(self):
+            return ["account"]
+
+        def get_columns(self, table_name):
+            assert table_name == "account"
+            return [{"name": "id"}, {"name": "email"}, {"name": "password_hash"}, {"name": "created_at"}]
+
+    monkeypatch.setattr(payjent_db, "inspect", lambda engine: FakeInspector())
+
+    migrate_sqlite_account_auth_columns(FakeEngine())
+
+    assert "ALTER TABLE account ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'password'" in statements
+    assert "ALTER TABLE account ADD COLUMN workos_user_id TEXT" in statements
+
 
 
 def test_workos_callback_missing_or_failed_code_is_safe(client, monkeypatch):

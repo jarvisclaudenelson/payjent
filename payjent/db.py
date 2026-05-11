@@ -41,14 +41,14 @@ def make_engine(database_url: str | None = None):
 
 
 def migrate_sqlite_account_auth_columns(db_engine: Engine) -> None:
-    """Add WorkOS-era Account columns to pre-migration SQLite databases.
+    """Add WorkOS-era Account columns to pre-migration SQLite/Postgres databases.
 
     SQLModel.create_all() intentionally does not alter existing tables. The
-    demo/pre-live deployment path uses SQLite without Alembic, so keep this
-    compatibility shim tightly scoped to the Account auth columns that were
-    added for WorkOS.
+    demo/pre-live deployment path has used both SQLite and Postgres without
+    Alembic, so keep this compatibility shim tightly scoped to the Account auth
+    columns that were added for WorkOS.
     """
-    if db_engine.dialect.name != "sqlite":
+    if db_engine.dialect.name not in {"sqlite", "postgresql"}:
         return
 
     inspector = inspect(db_engine)
