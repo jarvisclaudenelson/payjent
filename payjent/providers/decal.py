@@ -67,6 +67,8 @@ def build_decal_checkout_urls(settings: Settings, payment_session_id: str) -> tu
 
 def build_decal_checkout_payload(quote: Quote, payment_session: PaymentSession, settings: Settings) -> dict[str, Any]:
     success_url, callback_url = build_decal_checkout_urls(settings, payment_session.id)
+    if settings.is_production and not settings.decal_payment_destination:
+        raise HTTPException(status_code=503, detail="PAYJENT_DECAL_PAYMENT_DESTINATION is required for production Decal checkout")
     payload: dict[str, Any] = {
         "items": [{"name": quote.request_summary[:120] or "Payjent request", "quantity": 1, "unitPrice": quote.amount_minor}],
         "successUrl": success_url,

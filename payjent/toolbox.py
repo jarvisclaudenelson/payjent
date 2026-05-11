@@ -6,7 +6,7 @@ from typing import Any
 
 from .money import quote_hash
 
-STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY = {"USD": 50}
+STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY: dict[str, int] = {}
 
 TRUSTED_PAYSH_EXECUTION_CAVEAT = (
     "Trusted allowlisted pay.sh/x402 metadata only. Payjent does not execute arbitrary URLs "
@@ -29,7 +29,7 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "input_schema": {"type": "object", "properties": {"query": {"type": "string"}, "num_results": {"type": "integer", "minimum": 1, "maximum": 10}}, "required": ["query"]},
         "pricing_model": "agent_runtime_quote",
         "pricing_source": "agent_runtime",
-        "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],
+        "supported_payment_rails": ["task_budget", "decal", "stablecoin"],
         "recommended_payment_rail": "task_budget",
         "risk_level": "low",
         "execution_mode": "agent_managed_provider_runtime",
@@ -44,7 +44,7 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "input_schema": {"type": "object", "properties": {"url": {"type": "string", "format": "uri"}}, "required": ["url"]},
         "pricing_model": "agent_runtime_quote",
         "pricing_source": "agent_runtime",
-        "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],
+        "supported_payment_rails": ["task_budget", "decal", "stablecoin"],
         "recommended_payment_rail": "task_budget",
         "risk_level": "medium",
         "execution_mode": "agent_managed_provider_runtime",
@@ -59,8 +59,8 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1, "maximum": 4}}, "required": ["prompt"]},
         "pricing_model": "agent_runtime_quote",
         "pricing_source": "agent_runtime",
-        "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],
-        "recommended_payment_rail": "stripe",
+        "supported_payment_rails": ["task_budget", "decal", "stablecoin"],
+        "recommended_payment_rail": "decal",
         "risk_level": "medium",
         "execution_mode": "agent_managed_provider_runtime",
         "settlement_caveat": MANAGED_EXECUTION_CAVEAT,
@@ -74,7 +74,7 @@ _TOOLBOX: dict[str, dict[str, Any]] = {
         "input_schema": {"type": "object", "properties": {"text": {"type": "string"}, "voice": {"type": "string"}}, "required": ["text"]},
         "pricing_model": "agent_runtime_quote",
         "pricing_source": "agent_runtime",
-        "supported_payment_rails": ["task_budget", "stripe", "stablecoin"],
+        "supported_payment_rails": ["task_budget", "decal", "stablecoin"],
         "recommended_payment_rail": "task_budget",
         "risk_level": "low",
         "execution_mode": "agent_managed_provider_runtime",
@@ -98,7 +98,7 @@ for tool_id, name, desc in [
         "input_schema": {"type": "object", "properties": {"instructions": {"type": "string"}, "quantity": {"type": "integer", "minimum": 1, "maximum": 10}}, "required": ["instructions"]},
         "pricing_model": "agent_runtime_quote",
         "pricing_source": "agent_runtime",
-        "supported_payment_rails": ["pay_sh", "x402", "task_budget", "stablecoin", "stripe"],
+        "supported_payment_rails": ["pay_sh", "x402", "task_budget", "decal", "stablecoin"],
         "recommended_payment_rail": "pay_sh",
         "risk_level": "medium",
         "execution_mode": "external_trusted_paysh_x402_runtime",
@@ -140,15 +140,14 @@ def normalize_cost_breakdown(cost_breakdown: list[dict[str, Any]] | None, amount
 
 def choose_payment_options(tool: dict[str, Any], amount_minor: int, currency: str) -> tuple[list[dict[str, Any]], str, bool]:
     currency = currency.upper()
-    stripe_min = STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(currency, 50)
-    stripe_minimum_applies = amount_minor < stripe_min
+    stripe_minimum_applies = False
     trusted = tool["provider_type"] in {"trusted_paysh", "trusted_x402"}
-    recommended = "pay_sh" if trusted and amount_minor < stripe_min else ("task_budget" if amount_minor < stripe_min else "stripe")
+    recommended = "pay_sh" if trusted else (tool.get("recommended_payment_rail") or "decal")
     options: list[dict[str, Any]] = []
     for rail in tool["supported_payment_rails"]:
         option = {"rail": rail, "status": "available", "recommended": rail == recommended}
-        if rail == "stripe" and stripe_minimum_applies:
-            option.update({"status": "unavailable", "reason": "minimum_applies", "fallback_requires_bundle": True, "minimum_amount_minor": stripe_min})
+        if rail == "decal":
+            option.update({"checkout_provider": "decal", "minimum_amount_minor": None})
         if rail == "stablecoin":
             option.update({"status": "beta_scaffold", "live_settlement": False, "note": "External/runtime rail metadata only; no live settlement claim."})
         if rail in {"pay_sh", "x402"}:

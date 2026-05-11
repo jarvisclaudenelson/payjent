@@ -62,18 +62,18 @@ def test_toolbox_public_metadata_has_no_executable_urls(client):
     assert not any(field in serialized for field in forbidden_fields)
 
 
-def test_sub_50_managed_quote_recommends_task_budget_not_stripe(client, bot_headers):
+def test_sub_50_managed_quote_has_no_stripe_minimum_or_topup(client, bot_headers):
     response = client.post("/api/v1/toolbox/exa.deep_search/quote", json={**_quote_payload({"query": "small search"}), "amount_minor": 10}, headers=bot_headers)
     assert response.status_code == 200
     quote = response.json()
     assert quote["amount_minor"] < 50
     assert quote["provider_type"] == "managed_api"
     assert quote["recommended_payment_rail"] == "task_budget"
-    assert quote["stripe_minimum_applies"] is True
-    stripe = next(option for option in quote["payment_options"] if option["rail"] == "stripe")
-    assert stripe["status"] == "unavailable"
-    assert stripe["recommended"] is False
-    assert stripe["reason"] == "minimum_applies"
+    assert quote["stripe_minimum_applies"] is False
+    assert "stripe" not in {option["rail"] for option in quote["payment_options"]}
+    decal = next(option for option in quote["payment_options"] if option["rail"] == "decal")
+    assert decal["status"] == "available"
+    assert decal["minimum_amount_minor"] is None
 
 
 def test_trusted_paysh_sub_50_quote_recommends_pay_sh_or_x402(client, bot_headers):
@@ -87,19 +87,19 @@ def test_trusted_paysh_sub_50_quote_recommends_pay_sh_or_x402(client, bot_header
     assert "does not execute arbitrary URLs" in quote["execution_caveat"]
 
 
-def test_fal_managed_quote_includes_stripe_when_amount_meets_stripe_minimum(client, bot_headers):
+def test_fal_managed_quote_uses_decal_without_stripe_minimum(client, bot_headers):
     response = client.post("/api/v1/toolbox/fal.image.generate/quote", json={**_quote_payload({"prompt": "a robot", "quantity": 1}), "amount_minor": 80}, headers=bot_headers)
     assert response.status_code == 200
     quote = response.json()
     assert quote["amount_minor"] == 80
-    stripe = next(option for option in quote["payment_options"] if option["rail"] == "stripe")
-    assert stripe["status"] == "available"
-    assert quote["recommended_payment_rail"] == "stripe"
-    assert stripe["recommended"] is True
+    decal = next(option for option in quote["payment_options"] if option["rail"] == "decal")
+    assert decal["status"] == "available"
+    assert quote["recommended_payment_rail"] == "decal"
+    assert decal["recommended"] is True
     assert quote["stripe_minimum_applies"] is False
 
 
-def test_fal_runtime_amount_can_be_sub_stripe_minimum_and_uses_task_budget():
+def test_fal_runtime_amount_can_be_sub_50_and_uses_decal_without_minimum():
     tool = get_tool("fal.image.generate")
     assert tool is not None
     assert "min_amount_minor" not in tool
@@ -108,12 +108,11 @@ def test_fal_runtime_amount_can_be_sub_stripe_minimum_and_uses_task_budget():
     quote = build_tool_quote(tool, bot_id="bot-1", external_user_id="user-1", arguments={"prompt": "a robot", "quantity": 1}, amount_minor=10)
 
     assert quote["amount_minor"] == 10
-    assert quote["recommended_payment_rail"] == "task_budget"
-    assert quote["stripe_minimum_applies"] is True
-    stripe = next(option for option in quote["payment_options"] if option["rail"] == "stripe")
-    assert stripe["status"] == "unavailable"
-    assert stripe["reason"] == "minimum_applies"
-    assert stripe["minimum_amount_minor"] == 50
+    assert quote["recommended_payment_rail"] == "decal"
+    assert quote["stripe_minimum_applies"] is False
+    assert "stripe" not in {option["rail"] for option in quote["payment_options"]}
+    decal = next(option for option in quote["payment_options"] if option["rail"] == "decal")
+    assert decal["minimum_amount_minor"] is None
 
 
 def test_stablecoin_option_is_scaffold_not_live_settlement(client, bot_headers):

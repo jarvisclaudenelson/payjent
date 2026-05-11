@@ -197,11 +197,11 @@ def docs_index():
 
 _EXACT_PRICING_POLICY = {
     "rule": "exact_provider_quote_required",
-    "description": "Before creating a Payjent paid action, obtain the exact provider/merchant quoted price and provide a matching cost_breakdown. Do not use placeholder, default, demo, or test amounts such as $1.00 or 100 minor units. If the exact price is unknown, do not create the paid action; tell the user Payjent is awaiting an exact provider quote.",
+    "description": "Before creating a Payjent paid action, obtain the exact provider/merchant quoted price and provide a matching cost_breakdown. Do not use placeholder, default, demo, test, minimum, or top-up amounts. If the exact price is unknown, do not create the paid action; tell the user Payjent is awaiting an exact provider quote.",
     "amount_minor": "Must equal the exact provider/merchant quoted total in minor units.",
     "cost_breakdown": "Required and must sum to amount_minor using the same exact provider/merchant quote.",
     "unknown_price_behavior": "fail_closed_await_exact_provider_quote",
-    "forbidden_placeholders": ["$1.00", "100 minor units", "default amount", "test amount"],
+    "forbidden_placeholders": ["$1.00", "100 minor units", "default amount", "test amount", "minimum", "top-up", "stripe minimum"],
 }
 
 
@@ -214,10 +214,10 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
         {"name": "payjent.list_premium_action_presets", "endpoint": "/api/v1/premium-action-presets", "method": "GET", "description": "List modular premium provider presets for Exa, Firecrawl, and ElevenLabs, including required inputs, quote basis, secret policy, and execution boundary.", "preset_ids": ["exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech"]},
         {"name": "payjent.create_premium_action_from_preset", "endpoint": "/api/v1/premium-action-presets/{preset_id}/actions", "method": "POST", "description": "Create a payment-gated provider action from a preset. Payjent stores a safe execution envelope only; provider API keys remain agent-side.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_payjent_authorization"},
         {"name": "payjent.fail_action_request_refund", "endpoint": "/api/v1/agent-actions/{action_id}/fail", "method": "POST", "description": "Mark provider execution failed and optionally request a refund for a paid, bot-scoped, unfulfilled action. Idempotent enough to avoid duplicate refunds."},
-        {"name": "payjent.create_x402_paid_action", "endpoint": "/api/v1/premium-actions/x402", "method": "POST", "description": "Generic primitive for any x402/pay.sh-compatible paid URL. Requires an exact provider quote up front; creates a request-bound Payjent payment/grant and x402 execution envelope. Flow: create action, user pays Stripe/Payjent, agent polls/status, agent consumes payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then agent executes the downstream x402 call with a funded external runtime. Payjent never POSTs the target URL or stores Authorization/Cookie/API-key headers. For PaySponge gateways, use SpongeWallet.paidFetch/x402Fetch or spongewallet CLI with agent-side SPONGE_API_KEY; Payjent's Stripe checkpoint does not itself satisfy the downstream HTTP 402 challenge.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_spend_authorization"},
+        {"name": "payjent.create_x402_paid_action", "endpoint": "/api/v1/premium-actions/x402", "method": "POST", "description": "Generic primitive for any x402/pay.sh-compatible paid URL. Requires an exact provider quote up front; creates a request-bound Payjent payment/grant and x402 execution envelope. Flow: create action, user pays through the active Payjent checkout rail, agent polls/status, agent consumes payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then agent executes the downstream x402 call with a funded external runtime. Payjent never POSTs the target URL or stores Authorization/Cookie/API-key headers. For PaySponge gateways, use SpongeWallet.paidFetch/x402Fetch or spongewallet CLI with agent-side SPONGE_API_KEY; Payjent's checkout checkpoint does not itself satisfy the downstream HTTP 402 challenge.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_spend_authorization"},
         {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Backward-compatible legacy alias for payjent.create_x402_paid_action. Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Payjent does not POST service_url or execute the downstream task; payjent_fulfillment_callback/payjent_managed_execution are legacy flags and are forced false. Agents must use a funded pay.sh/x402 runtime, and PaySponge endpoints require SpongeWallet/spongewallet rather than plain paycurl.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
-        {"name": "payjent.create_bigquery_paid_query", "endpoint": "/api/v1/premium-actions/pay-sh/bigquery-query", "method": "POST", "description": "Preset for the real pay.sh public catalog BigQuery gateway service solana-foundation/google/bigquery resource jobs. Creates a pay.sh/x402 action for POST https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries with body {query,useLegacySql}. User pays Stripe/Payjent first; agent consumes grant, calls payjent.authorize_x402_spend with capture=true, then agent executes externally using a funded pay.sh/x402 runtime. Payjent does not execute BigQuery.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "preset": {"provider": "pay_sh", "service_fqn": "solana-foundation/google/bigquery", "resource": "jobs", "gateway": "https://bigquery.google.gateway-402.com/bigquery/v2", "method": "POST", "path_template": "/projects/{project_id}/queries", "execution_boundary": "agent_executes_after_spend_authorization"}},
-        {"name": "payjent.create_purchase_fulfillment", "endpoint": "/api/v1/purchase-actions", "method": "POST", "description": "Create an Amazon-style merchant purchase/procurement handoff only after obtaining an exact merchant quote. The human pays Stripe/Payjent; Payjent verifies payment and sends a signed, verified POST fulfillment callback to an allowlisted procurement executor. The executor buys from Amazon or the merchant using its configured procurement/payment method. Payjent does not send funds to the agent and does not directly pay Amazon unless the downstream executor/provider rail does that.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "requires_fulfillment_callback": True},
+        {"name": "payjent.create_bigquery_paid_query", "endpoint": "/api/v1/premium-actions/pay-sh/bigquery-query", "method": "POST", "description": "Preset for the real pay.sh public catalog BigQuery gateway service solana-foundation/google/bigquery resource jobs. Creates a pay.sh/x402 action for POST https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries with body {query,useLegacySql}. User pays through Payjent first; agent consumes grant, calls payjent.authorize_x402_spend with capture=true, then agent executes externally using a funded pay.sh/x402 runtime. Payjent does not execute BigQuery.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "preset": {"provider": "pay_sh", "service_fqn": "solana-foundation/google/bigquery", "resource": "jobs", "gateway": "https://bigquery.google.gateway-402.com/bigquery/v2", "method": "POST", "path_template": "/projects/{project_id}/queries", "execution_boundary": "agent_executes_after_spend_authorization"}},
+        {"name": "payjent.create_purchase_fulfillment", "endpoint": "/api/v1/purchase-actions", "method": "POST", "description": "Create an Amazon-style merchant purchase/procurement handoff only after obtaining an exact merchant quote. The human pays through Payjent; Payjent verifies payment and sends a signed, verified POST fulfillment callback to an allowlisted procurement executor. The executor buys from Amazon or the merchant using its configured procurement/payment method. Payjent does not send funds to the agent and does not directly pay Amazon unless the downstream executor/provider rail does that.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "requires_fulfillment_callback": True},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
@@ -663,10 +663,6 @@ def toolbox_checkout(tool_id: str, payload: ToolboxCheckoutRequest, idempotency_
     _enforce_bot_scope(credential, payload.bot_id)
     tool, toolbox_quote = _toolbox_quote_or_404(tool_id, payload)
     _enforce_managed_provider_ready(tool_id, settings, mode=readiness_mode)
-    if toolbox_quote["amount_minor"] < STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(toolbox_quote["currency"].upper(), 50):
-        if toolbox_quote["provider_type"] == "trusted_paysh" and toolbox_quote["recommended_payment_rail"] in {"pay_sh", "x402"}:
-            return JSONResponse(status_code=402, content={"status": "micro_rail_required", "quote": None, "payment_session": None, "payment_url": None, "toolbox_quote": toolbox_quote, "guidance": {"reason": "sub-card-minimum trusted pay.sh/x402 action", "required_rail": toolbox_quote["recommended_payment_rail"], "pay_sh": {"arbitrary_url_execution": False, "instructions": "Use an agent-side funded pay.sh/x402 runtime after Payjent approval; Payjent does not create Stripe checkout for this microcharge by default."}}})
-        return JSONResponse(status_code=402, content={"status": "task_budget_required", "quote": None, "payment_session": None, "payment_url": None, "toolbox_quote": toolbox_quote, "guidance": {"reason": "amount is below Stripe card checkout minimum", "task_budget_required": True, "minimum_amount_minor": STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(toolbox_quote["currency"].upper(), 50)}})
     if idempotency_key:
         for existing in session.exec(select(PaymentSession).where(PaymentSession.idempotency_key == idempotency_key)).all():
             existing_quote = session.get(Quote, existing.quote_id)
@@ -781,8 +777,9 @@ def _payment_readiness(settings: Settings) -> dict:
     production_persistent_database_configured = settings.production_persistent_database_configured if settings.is_production else database_configured
     managed_providers = _managed_provider_readiness(settings)
     decal_api_key_configured = bool(settings.decal_api_key)
+    decal_payment_destination_configured = bool(settings.decal_payment_destination)
     active_payment_ready = (
-        provider == "decal" and decal_api_key_configured and public_base_url_configured and production_persistent_database_configured
+        provider == "decal" and decal_api_key_configured and decal_payment_destination_configured and public_base_url_configured and production_persistent_database_configured
     ) or (
         provider == "stripe" and stripe_secret_configured and stripe_webhook_configured and public_base_url_configured and production_persistent_database_configured
     )
@@ -790,6 +787,7 @@ def _payment_readiness(settings: Settings) -> dict:
         "active_payment_ready": active_payment_ready,
         "checkout_provider": provider,
         "decal_api_key_configured": decal_api_key_configured,
+        "decal_payment_destination_configured": decal_payment_destination_configured,
         "decal_public_base_url_configured": public_base_url_configured,
         "decal_database_configured": production_persistent_database_configured,
         "stripe_secret_configured": stripe_secret_configured,
@@ -1736,7 +1734,7 @@ def agent_capabilities(request: Request, session: Session = Depends(get_session)
         "active_payment": {
             "provider": _checkout_provider(settings),
             "ready": _payment_readiness(settings)["active_payment_ready"],
-            "instructions": "Send the returned payment_prompt/payment_url to the user. When configured for production, Stripe Checkout is the active payment rail; wait for paid status before resuming.",
+            "instructions": "Send the returned payment_prompt/payment_url to the user. When configured for production, Decal is the active checkout rail; wait for paid status before resuming.",
         },
         "limits": {
             "default_currency": agent.default_currency,
@@ -1833,6 +1831,21 @@ def _enforce_stripe_checkout_guardrails(settings: Settings) -> None:
         )
 
 
+def _reject_legacy_minimum_or_topup_pricing(cost_breakdown: list[Any]) -> None:
+    for item in cost_breakdown:
+        label = ""
+        if isinstance(item, dict):
+            label = str(item.get("label", ""))
+        else:
+            label = str(getattr(item, "label", ""))
+        normalized = label.lower()
+        if any(term in normalized for term in ("stripe minimum", "minimum/top-up", "minimum top-up", "top-up", "top up")):
+            raise HTTPException(
+                status_code=422,
+                detail="cost_breakdown must use the exact provider quote; minimum/top-up pricing is not allowed",
+            )
+
+
 @app.post("/api/v1/quotes", response_model=QuoteRead)
 def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_settings), credential: BotCredential = Depends(require_bot_credential)):
     _enforce_bot_scope(credential, payload.bot_id)
@@ -1840,6 +1853,7 @@ def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), 
         validate_breakdown(payload.amount_minor, payload.cost_breakdown)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _reject_legacy_minimum_or_topup_pricing(payload.cost_breakdown)
     request_hash = payload.request_hash or quote_hash({
         "bot_id": payload.bot_id,
         "external_user_id": payload.external_user_id,
@@ -2028,11 +2042,6 @@ def _create_x402_action_from_payload(
     readiness = dict(payload.provider_metadata or {})
     readiness.update(payload.execution_readiness or {})
     requested_provider = (provider or settings.checkout_provider or "mock").lower()
-    minimum = STRIPE_MINIMUM_CHARGE_MINOR_BY_CURRENCY.get(payload.currency.upper())
-    if not payload.task_budget_id and payload.currency.upper() == "USD" and payload.amount_minor < 50:
-        raise HTTPException(status_code=402, detail="Sub-50 USD minor-unit premium actions require an active funded task_budget_id; create and fund /api/v1/task-budgets first.")
-    if not payload.task_budget_id and requested_provider == "stripe" and minimum is not None and payload.amount_minor < minimum:
-        raise HTTPException(status_code=422, detail=f"Stripe checkout minimum for {payload.currency.upper()} is {minimum} minor units; obtain an exact provider quote at or above the card checkout minimum, or batch/top up the paid action before creating checkout")
     enforce_readiness(session, bot_id=payload.bot_id, provider="pay_sh", readiness_mode=payload.readiness_mode, metadata=readiness)
     action_payload = AgentActionCreate(
         bot_id=payload.bot_id,
@@ -2159,8 +2168,6 @@ def release_unused_task_budget(budget_id: str, session: Session = Depends(get_se
 
 def _reserve_task_budget_for_action(payload: PremiumActionCreate, q: Quote, session: Session) -> TaskBudget | None:
     if not payload.task_budget_id:
-        if payload.currency.upper() == "USD" and payload.amount_minor < 50:
-            raise HTTPException(status_code=402, detail="Sub-50 USD minor-unit premium actions require an active funded task_budget_id; create and fund /api/v1/task-budgets first.")
         return None
     b = session.get(TaskBudget, payload.task_budget_id)
     if not b or b.status != "active" or b.available_minor < payload.amount_minor:
@@ -2413,7 +2420,7 @@ def create_purchase_fulfillment_action(
         "currency": payload.currency.upper(),
         "cost_breakdown": [item.model_dump() for item in payload.cost_breakdown],
         "payjent_fulfillment_callback": True,
-        "money_flow": "User pays Stripe/Payjent; Payjent verifies payment and sends a verified callback to an allowlisted procurement executor. The executor buys from the merchant using its configured procurement/payment method; Payjent does not send funds to the agent or directly pay Amazon.",
+        "money_flow": "User pays through Payjent; Payjent verifies payment and sends a verified callback to an allowlisted procurement executor. The executor buys from the merchant using its configured procurement/payment method; Payjent does not send funds to the agent or directly pay Amazon.",
     }
     _validate_purchase_executor_allowlisted(envelope, settings)
     action_payload = AgentActionCreate(

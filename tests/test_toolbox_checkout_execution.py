@@ -43,19 +43,20 @@ def test_toolbox_checkout_fal_creates_quote_and_payment_session(client, bot_head
         assert len(session.exec(select(PaymentSession)).all()) == 1
 
 
-def test_toolbox_checkout_sub_50_managed_requires_task_budget_without_payment_session(client, bot_headers, engine):
+def test_toolbox_checkout_sub_50_managed_creates_exact_decal_checkout(client, bot_headers, engine):
     response = client.post(
         "/api/v1/toolbox/exa.deep_search/checkout",
         json=_payload({"query": "micropayments"}, amount_minor=10),
         headers=bot_headers,
     )
-    assert response.status_code == 402
+    assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "task_budget_required"
-    assert body["guidance"]["task_budget_required"] is True
-    assert body["toolbox_quote"]["amount_minor"] < 50
+    assert body["status"] == "checkout_created"
+    assert body["toolbox_quote"]["amount_minor"] == 10
+    assert body["toolbox_quote"]["stripe_minimum_applies"] is False
+    assert "stripe" not in {option["rail"] for option in body["toolbox_quote"]["payment_options"]}
     with Session(engine) as session:
-        assert session.exec(select(PaymentSession)).all() == []
+        assert len(session.exec(select(PaymentSession)).all()) == 1
 
 
 def test_toolbox_checkout_enforced_readiness_blocks_missing_managed_provider(client, bot_headers, engine):
@@ -98,19 +99,19 @@ def test_payment_readiness_reports_managed_provider_config_without_secret_values
     assert "test-fal-key" not in json.dumps(body)
 
 
-def test_toolbox_checkout_sub_50_paysh_requires_micro_rail_without_payment_session(client, bot_headers, engine):
+def test_toolbox_checkout_sub_50_paysh_creates_checkout_without_card_minimum(client, bot_headers, engine):
     response = client.post(
         "/api/v1/toolbox/paysh.search/checkout",
         json=_payload({"instructions": "search latest docs"}, amount_minor=10),
         headers=bot_headers,
     )
-    assert response.status_code == 402
+    assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "micro_rail_required"
-    assert body["guidance"]["required_rail"] in {"pay_sh", "x402"}
-    assert body["guidance"]["pay_sh"]["arbitrary_url_execution"] is False
+    assert body["status"] == "checkout_created"
+    assert body["toolbox_quote"]["recommended_payment_rail"] in {"pay_sh", "x402"}
+    assert body["payment_session"]["status"] == "checkout_created"
     with Session(engine) as session:
-        assert session.exec(select(PaymentSession)).all() == []
+        assert len(session.exec(select(PaymentSession)).all()) == 1
 
 
 def test_toolbox_checkout_rejects_request_hash_tampering(client, bot_headers):
@@ -213,12 +214,11 @@ def test_toolbox_firecrawl_url_is_summarized_not_persisted(client, bot_headers, 
         json=_payload({"url": raw_url}, amount_minor=20),
         headers=bot_headers,
     )
-    assert response.status_code == 402
+    assert response.status_code == 200
     response_text = json.dumps(response.json()).lower()
     assert "canonical_url" not in response_text
     assert raw_url.lower() not in response_text
     assert "private/path" not in response_text
-    assert response.json()["guidance"]["task_budget_required"] is True
     _assert_no_secret_value(response.json())
 
     checkout = client.post(

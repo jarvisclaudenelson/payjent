@@ -494,6 +494,7 @@ def test_payment_readiness_reports_booleans_without_secret_values(client):
         "active_payment_ready": True,
         "checkout_provider": "stripe",
         "decal_api_key_configured": False,
+        "decal_payment_destination_configured": False,
         "decal_public_base_url_configured": True,
         "decal_database_configured": True,
         "stripe_secret_configured": True,
@@ -601,6 +602,7 @@ def test_stripe_webhook_rejects_unconfigured_secret_without_marking_paid(client,
 
 
 def test_crypto_mark_paid_requires_operator_and_uses_shared_issuance(client, quote_payload, bot_headers, operator_headers):
+    app.dependency_overrides[get_settings] = lambda: Settings(dev_mode=True)
     _, ps = _checkout(client, quote_payload, bot_headers)
 
     denied = client.post(f"/api/v1/payment-sessions/{ps['id']}/crypto/mark-paid", headers=bot_headers)
@@ -616,6 +618,19 @@ def test_crypto_mark_paid_requires_operator_and_uses_shared_issuance(client, quo
 
     duplicate = client.post(f"/api/v1/payment-sessions/{ps['id']}/crypto/mark-paid", headers=operator_headers)
     assert duplicate.status_code == 409
+
+
+def test_quote_rejects_legacy_minimum_topup_breakdown(client, quote_payload, bot_headers):
+    payload = {
+        **quote_payload,
+        "amount_minor": 50,
+        "cost_breakdown": [{"label": "Stripe minimum/top-up", "amount_minor": 50}],
+    }
+
+    response = client.post("/api/v1/quotes", json=payload, headers=bot_headers)
+
+    assert response.status_code == 422
+    assert "minimum/top-up pricing is not allowed" in response.json()["detail"]
 
 
 def test_production_agent_action_mock_provider_fails_even_with_default_dev_mode(client, engine, quote_payload):
@@ -744,8 +759,26 @@ def test_decal_adapter_builds_checkout_payload_and_urls():
     assert calls["payload"]["paymentDestination"] == "wallet_123"
 
 
+def test_production_decal_checkout_requires_payment_destination():
+    quote = Quote(id="quote_decal_no_destination", bot_id="bot-1", external_user_id="user-1", request_summary="decal work", request_hash="hash", amount_minor=1, currency="USD", cost_breakdown=[{"label":"work","amount_minor":1}], quote_hash="qh")
+    payment_session = PaymentSession(id="ps_decal_no_destination", quote_id=quote.id, provider="decal")
+
+    try:
+        create_decal_checkout_session(
+            quote,
+            payment_session,
+            Settings(env="production", decal_api_key="decal_test", public_base_url="https://payjent.example"),
+            client=None,
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "PAYJENT_DECAL_PAYMENT_DESTINATION" in exc.detail
+    else:
+        raise AssertionError("expected Decal destination guardrail")
+
+
 def test_decal_checkout_webhook_refund_and_readiness(client, quote_payload, bot_headers, operator_headers, monkeypatch):
-    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", public_base_url="https://payjent.example")
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", decal_payment_destination="wallet_123", public_base_url="https://payjent.example")
     monkeypatch.setattr(main_module, "create_decal_checkout_session", lambda *_: ("dcs_paid", "https://checkout.usedecal.test/session"))
     q, ps = _checkout(client, quote_payload, bot_headers)
     assert ps["provider"] == "decal"
@@ -774,7 +807,7 @@ def test_decal_checkout_webhook_refund_and_readiness(client, quote_payload, bot_
 
 
 def test_decal_webhook_rejects_unpaid_or_mismatch(client, quote_payload, bot_headers, monkeypatch):
-    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", public_base_url="https://payjent.example")
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", decal_payment_destination="wallet_123", public_base_url="https://payjent.example")
     monkeypatch.setattr(main_module, "create_decal_checkout_session", lambda *_: ("dcs_unpaid", "https://checkout.usedecal.test/session"))
     _, ps = _checkout(client, quote_payload, bot_headers)
     monkeypatch.setattr(main_module, "retrieve_decal_checkout_session", lambda *_: {"id": "dcs_unpaid", "order": {"currency": "USD", "paymentStatus": "pending", "amounts": {"paid": 0}}})
