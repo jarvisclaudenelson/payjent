@@ -820,6 +820,10 @@ def test_decal_success_status_redirect_verifies_and_issues_grant(client, quote_p
     assert calls == ["dcs_success"]
     assert "Payment complete" in response.text
     assert "Access granted" in response.text
+    assert "Tell your agent to resume" in response.text
+    assert "Copy prompt" in response.text
+    assert f"Payment is complete in Payjent for session {ps['id']}" in response.text
+    assert "Review approval" not in response.text
     assert "grant_" not in response.text
     stored = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
     assert stored["status"] == "paid"
