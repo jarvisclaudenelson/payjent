@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 
 from payjent.auth import create_bot_credential
 from payjent.config import Settings, get_settings
-from payjent.models import FulfillmentEvent, PaymentSession, Quote
+from payjent.models import FulfillmentEvent, Grant, PaymentSession, Quote
 from payjent.providers.stripe import create_stripe_checkout_session, create_stripe_refund
 from payjent.providers.decal import create_decal_checkout_session
 import payjent.main as main_module
@@ -804,6 +804,46 @@ def test_decal_checkout_webhook_refund_and_readiness(client, quote_payload, bot_
     refund = client.post(f"/api/v1/payment-sessions/{ps['id']}/refund", headers=operator_headers, json={"reason": "downstream failed", "force": True})
     assert refund.status_code == 501
     assert "Decal automatic refunds are not implemented" in refund.json()["detail"]
+
+
+def test_decal_success_status_redirect_verifies_and_issues_grant(client, quote_payload, bot_headers, engine, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", decal_payment_destination="wallet_123", public_base_url="https://payjent.example")
+    monkeypatch.setattr(main_module, "create_decal_checkout_session", lambda *_: ("dcs_success", "https://checkout.usedecal.test/session"))
+    _, ps = _checkout(client, quote_payload, bot_headers)
+    verified = {"id": "dcs_success", "order": {"currency": "USD", "paymentStatus": "paid", "amounts": {"total": 250, "paid": 250}}}
+    calls = []
+    monkeypatch.setattr(main_module, "retrieve_decal_checkout_session", lambda session_id, settings: calls.append(session_id) or verified)
+
+    response = client.get(f"/status/{ps['id']}?checkout=success")
+
+    assert response.status_code == 200, response.text
+    assert calls == ["dcs_success"]
+    assert "Payment complete" in response.text
+    assert "Access granted" in response.text
+    assert "grant_" not in response.text
+    stored = client.get(f"/api/v1/payment-sessions/{ps['id']}").json()
+    assert stored["status"] == "paid"
+    with Session(engine) as session:
+        grants = session.exec(select(Grant).where(Grant.payment_session_id == ps["id"])).all()
+    assert len(grants) == 1
+
+
+def test_decal_success_status_redirect_still_renders_when_unpaid(client, quote_payload, bot_headers, engine, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", decal_payment_destination="wallet_123", public_base_url="https://payjent.example")
+    monkeypatch.setattr(main_module, "create_decal_checkout_session", lambda *_: ("dcs_unpaid_status", "https://checkout.usedecal.test/session"))
+    _, ps = _checkout(client, quote_payload, bot_headers)
+    monkeypatch.setattr(main_module, "retrieve_decal_checkout_session", lambda *_: {"id": "dcs_unpaid_status", "order": {"currency": "USD", "paymentStatus": "pending", "amounts": {"paid": 0}}})
+
+    response = client.get(f"/status/{ps['id']}?checkout=success")
+
+    assert response.status_code == 200, response.text
+    assert "Awaiting payment" in response.text
+    assert "checkout_created" in response.text
+    assert "Access has not been issued yet" in response.text
+    assert client.get(f"/api/v1/payment-sessions/{ps['id']}").json()["status"] == "checkout_created"
+    with Session(engine) as session:
+        grants = session.exec(select(Grant).where(Grant.payment_session_id == ps["id"])).all()
+    assert grants == []
 
 
 def test_decal_webhook_rejects_unpaid_or_mismatch(client, quote_payload, bot_headers, monkeypatch):

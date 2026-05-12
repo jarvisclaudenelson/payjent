@@ -936,8 +936,17 @@ def healthz(session: Session = Depends(get_session)):
 
 
 @app.get("/status/{payment_session_id}", response_class=HTMLResponse)
-def status_page(payment_session_id: str, session: Session = Depends(get_session)):
+def status_page(payment_session_id: str, checkout: str | None = None, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
     ps, q, grant, fulfillment = _find_session_bundle(session, payment_session_id)
+    if checkout == "success" and ps.provider == "decal" and ps.status != "paid" and ps.provider_session_id:
+        try:
+            verified = retrieve_decal_checkout_session(ps.provider_session_id, settings)
+            _validate_decal_paid_session(session, ps, verified)
+            _issue_paid_session(session, ps, settings, provider="decal")
+            ps, q, grant, fulfillment = _find_session_bundle(session, payment_session_id)
+        except Exception:
+            session.rollback()
+            ps, q, grant, fulfillment = _find_session_bundle(session, payment_session_id)
     fulfillment_items = "".join(f"<li><span class='check'>•</span><span>{_html_escape(ev.status)} <code>{_html_escape(ev.id)}</code></span></li>" for ev in fulfillment) or "<li><span class='check'>•</span><span>No fulfillment has been recorded yet.</span></li>"
     grant_state = "Access has not been issued yet. Your agent is still waiting for payment confirmation."
     if grant:
