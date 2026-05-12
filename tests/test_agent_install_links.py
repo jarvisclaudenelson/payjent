@@ -222,6 +222,31 @@ def test_dashboard_delete_agent_deactivates_revokes_links_and_hides_from_active_
     assert client.post("/api/v1/quotes", json=_quote_payload("agent-install-bot", "hash-after-delete"), headers={"X-Payjent-Bot-Key": api_key}).status_code == 401
 
 
+def test_dashboard_can_re_register_same_owner_deleted_bot_id(client, engine):
+    agent_id = _register_owner_and_agent(client)
+    deleted = client.post(f"/dashboard/agents/{agent_id}/delete")
+    assert deleted.status_code == 200
+
+    response = client.post(
+        "/dashboard/agents/register",
+        data={"name": "Watson Again", "platform": "discord", "bot_id": "agent-install-bot", "default_currency": "USD"},
+    )
+
+    assert response.status_code == 200
+    assert "Agent registered" in response.text
+    assert "Copy one-time install link" in response.text
+    assert "bot_id is unavailable" not in response.text
+    with Session(engine) as session:
+        agents = session.exec(select(AgentProfile).where(AgentProfile.bot_id == "agent-install-bot")).all()
+        assert len(agents) == 1
+        assert agents[0].id == agent_id
+        assert agents[0].status == "active"
+        assert agents[0].name == "Watson Again"
+        assert session.exec(select(BotCredential).where(BotCredential.bot_id == "agent-install-bot")).all() == []
+        links = session.exec(select(AgentInstallLink).where(AgentInstallLink.agent_id == agent_id, AgentInstallLink.consumed_at.is_(None))).all()
+        assert len(links) == 1
+
+
 def test_redeeming_install_link_after_agent_deletion_fails_without_credential(client, engine):
     agent_id = _register_owner_and_agent(client)
     install_url = client.post("/dashboard/agents/install-links", json={"agent_id": agent_id}).json()["install_url"]

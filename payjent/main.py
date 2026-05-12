@@ -1368,21 +1368,32 @@ def _create_agent_profile_from_form(form: dict[str, str], account: Account, sess
         raise HTTPException(status_code=422, detail="agent name, platform, and bot_id are required")
     existing = session.exec(select(AgentProfile).where(AgentProfile.bot_id == bot_id)).first()
     if existing:
-        if existing.owner_id == account.id and existing.status == "active":
+        if existing.owner_id != account.id:
+            raise HTTPException(status_code=409, detail="bot_id is unavailable")
+        if existing.status == "active":
             return existing, None, False
-        raise HTTPException(status_code=409, detail="bot_id is unavailable")
-    agent = AgentProfile(
-        id=f"agent_{uuid4().hex}",
-        owner_id=account.id,
-        bot_id=bot_id,
-        name=name,
-        platform=platform,
-        callback_url=callback_url,
-        default_currency=default_currency,
-    )
-    session.add(agent)
-    session.commit()
-    session.refresh(agent)
+        existing.name = name
+        existing.platform = platform
+        existing.callback_url = callback_url
+        existing.default_currency = default_currency
+        existing.status = "active"
+        session.add(existing)
+        session.commit()
+        session.refresh(existing)
+        agent = existing
+    else:
+        agent = AgentProfile(
+            id=f"agent_{uuid4().hex}",
+            owner_id=account.id,
+            bot_id=bot_id,
+            name=name,
+            platform=platform,
+            callback_url=callback_url,
+            default_currency=default_currency,
+        )
+        session.add(agent)
+        session.commit()
+        session.refresh(agent)
     generated_key = None
     if issue_credential and not session.exec(select(BotCredential).where(BotCredential.bot_id == agent.bot_id, BotCredential.role == "bot")).first():
         generated_key = generate_api_key()
