@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -71,9 +72,44 @@ def _safe_https_url(url: Any) -> str | None:
     if not isinstance(url, str):
         return None
     parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.query:
+    if parsed.scheme != "https" or not parsed.netloc:
         return None
     return parsed.geturl()[:1000]
+
+
+def _is_safe_image_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return False
+    host = parsed.hostname.rstrip(".").lower()
+    if host in {"localhost", "0", "0.0.0.0"} or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+
+
+def _fetch_image_bytes(url: str) -> tuple[bytes, str]:
+    if not _is_safe_image_url(url):
+        raise FalProviderError("provider_execution_failed")
+    response = httpx.get(url, timeout=30, follow_redirects=False)
+    response.raise_for_status()
+    content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if not content_type.startswith("image/"):
+        raise FalProviderError("provider_execution_failed")
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_IMAGE_SIZE_BYTES:
+                raise FalProviderError("provider_execution_failed")
+        except ValueError:
+            raise FalProviderError("provider_execution_failed")
+    raw = response.content
+    if not raw or len(raw) > MAX_IMAGE_SIZE_BYTES:
+        raise FalProviderError("provider_execution_failed")
+    return raw, content_type
 
 
 def sanitize_fal_response(data: dict[str, Any], *, count: int) -> dict[str, Any]:
@@ -91,7 +127,11 @@ def sanitize_fal_response(data: dict[str, Any], *, count: int) -> dict[str, Any]
                 raw = None
             if raw is not None and len(raw) > MAX_IMAGE_SIZE_BYTES:
                 raise FalProviderError("provider_execution_failed")
-        safe = {"mime_type": str(item.get("content_type") or item.get("mime_type") or "image/png")[:100], "url": _safe_https_url(item.get("url"))}
+        url = _safe_https_url(item.get("url"))
+        safe = {"mime_type": str(item.get("content_type") or item.get("mime_type") or "image/png")[:100], "url": url}
+        if raw is None and url:
+            raw, fetched_mime_type = _fetch_image_bytes(url)
+            safe["mime_type"] = fetched_mime_type[:100]
         if raw:
             safe["content_bytes"] = raw
             safe["size_bytes"] = len(raw)

@@ -7,7 +7,7 @@ from payjent.artifacts import MAX_ARTIFACT_BYTES, create_artifact
 from payjent.config import Settings, get_settings
 from payjent.main import app
 from payjent.models import PaymentSession, Quote, ResumeEvent, ToolExecution
-from payjent.providers.fal import validate_image_arguments
+from payjent.providers.fal import run_image_generate, validate_image_arguments
 from payjent.signing import verify_webhook_signature
 
 
@@ -78,6 +78,36 @@ def test_managed_fal_rejects_secret_like_argument_keys():
             raise AssertionError(f"expected {key} to be rejected")
 
 
+def test_fal_url_only_response_fetches_image_bytes(monkeypatch):
+    png = base64.b64decode("iVBORw0KGgo=")
+    source_url = "https://8.8.8.8/fal-image.png?X-Amz-Signature=secret-token"
+
+    class FakeImageResponse:
+        headers = {"content-type": "image/png", "content-length": str(len(png))}
+        content = png
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, *, timeout, follow_redirects):
+        assert url == source_url
+        assert timeout == 30
+        assert follow_redirects is False
+        return FakeImageResponse()
+
+    monkeypatch.setattr("payjent.providers.fal.httpx.get", fake_get)
+    result = run_image_generate(
+        {"prompt": "A safe test image", "count": 1},
+        api_key="test-fal-secret",
+        transport=lambda payload, api_key: {"images": [{"url": source_url}]},
+    )
+
+    image = result["images"][0]
+    assert image["content_bytes"] == png
+    assert image["size_bytes"] == len(png)
+    assert image["mime_type"] == "image/png"
+
+
 def test_managed_fal_missing_provider_config_fails_closed(client, bot_headers, engine):
     app.dependency_overrides[get_settings] = lambda: Settings(fal_api_key=None)
     execution_id = _ready_execution(engine)
@@ -87,6 +117,60 @@ def test_managed_fal_missing_provider_config_fails_closed(client, bot_headers, e
         execution = session.get(ToolExecution, execution_id)
         assert execution.status == "failed"
         assert execution.error_metadata_json["code"] == "provider_not_configured"
+
+
+def test_managed_fal_url_only_result_creates_image_artifact_without_leaking_url(client, bot_headers, engine, monkeypatch):
+    app.dependency_overrides[get_settings] = lambda: Settings(fal_api_key="test-fal-secret")
+    png = base64.b64decode("iVBORw0KGgo=")
+    source_url = "https://8.8.8.8/fal-image.png?X-Amz-Signature=secret-token"
+
+    class FakeFalResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"images": [{"url": source_url}]}
+
+    class FakeImageResponse:
+        headers = {"content-type": "image/png", "content-length": str(len(png))}
+        content = png
+
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, *, headers, json, timeout):
+        assert headers["Authorization"] == "Key test-fal-secret"
+        assert json["prompt"] == "A safe test image"
+        return FakeFalResponse()
+
+    def fake_get(url, *, timeout, follow_redirects):
+        assert url == source_url
+        assert timeout == 30
+        assert follow_redirects is False
+        return FakeImageResponse()
+
+    monkeypatch.setattr("payjent.providers.fal.httpx.post", fake_post)
+    monkeypatch.setattr("payjent.providers.fal.httpx.get", fake_get)
+    execution_id = _ready_execution(engine)
+    response = client.post(f"/api/v1/toolbox/executions/{execution_id}/run", headers=bot_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "succeeded"
+    assert body["result_metadata_json"]["artifacts"][0]["kind"] == "image"
+    assert body["result_metadata_json"]["images"][0]["mime_type"] == "image/png"
+    serialized = json.dumps(body)
+    assert source_url not in serialized
+    assert "X-Amz-Signature" not in serialized
+    assert "metadata_only" not in serialized
+
+    artifacts = client.get(f"/api/v1/toolbox/executions/{execution_id}/artifacts", headers=bot_headers).json()["artifacts"]
+    assert artifacts[0]["kind"] == "image"
+    artifact = client.get(f"/api/v1/toolbox/executions/{execution_id}/artifacts/{artifacts[0]['artifact_id']}", headers=bot_headers).json()
+    assert artifact["kind"] == "image"
+    assert artifact["content_base64"] == base64.b64encode(png).decode("ascii")
+    assert artifact["payload_json"] is None
+    assert source_url not in json.dumps(artifact)
 
 
 def test_managed_fal_success_creates_artifact_and_prevents_duplicate(client, bot_headers, engine, monkeypatch):
