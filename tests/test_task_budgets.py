@@ -30,13 +30,14 @@ def _fund_budget(client, bot_headers, operator_headers, max_amount=100):
     return funded.json()
 
 
-def test_sub_50_premium_action_without_budget_rejected(client, bot_headers):
+def test_sub_50_premium_action_without_budget_can_use_normal_checkout(client, bot_headers):
     response = client.post("/api/v1/premium-actions", json=_premium_payload(), headers=bot_headers)
-    assert response.status_code == 402
-    assert "task_budget_id" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "paid"
+    assert response.json()["payment_url"] is None
 
 
-def test_sub_50_x402_action_without_budget_rejected(client, bot_headers):
+def test_sub_50_x402_action_without_budget_can_use_normal_checkout(client, bot_headers):
     payload = {
         "bot_id": "bot-1",
         "external_user_id": "user-1",
@@ -49,8 +50,9 @@ def test_sub_50_x402_action_without_budget_rejected(client, bot_headers):
         "execution_readiness": {"can_execute_without_device_auth": True},
     }
     response = client.post("/api/v1/premium-actions/x402", json=payload, headers=bot_headers)
-    assert response.status_code == 402
-    assert "task_budget_id" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "paid"
+    assert response.json()["payment_url"] is None
 
 
 def test_active_budget_reserves_micro_x402_action(client, bot_headers, operator_headers):

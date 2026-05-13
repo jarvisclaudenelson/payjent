@@ -1,3 +1,33 @@
+import os
+
+# Force a safe local test configuration before importing settings/app modules.
+# This prevents pytest from inheriting hostile/prod shell environment values.
+os.environ.update(
+    {
+        "PAYJENT_ENV": "local",
+        "PAYJENT_DATABASE_URL": "sqlite://",
+        "PAYJENT_DEV_MODE": "true",
+        "PAYJENT_MOCK_PROVIDER_ENABLED": "true",
+        "PAYJENT_CHECKOUT_PROVIDER": "mock",
+        "PAYJENT_PUBLIC_BASE_URL": "http://testserver",
+    }
+)
+for _name in (
+    "PAYJENT_STRIPE_SECRET_KEY",
+    "PAYJENT_STRIPE_WEBHOOK_SECRET",
+    "PAYJENT_STRIPE_SUCCESS_URL_TEMPLATE",
+    "PAYJENT_STRIPE_CANCEL_URL_TEMPLATE",
+    "PAYJENT_DECAL_API_KEY",
+    "PAYJENT_BOOTSTRAP_TOKEN",
+    "PAYJENT_WORKOS_API_KEY",
+    "PAYJENT_WORKOS_CLIENT_ID",
+    "PAYJENT_WORKOS_REDIRECT_URI",
+    "WORKOS_API_KEY",
+    "WORKOS_CLIENT_ID",
+    "PAYJENT_SIGNING_SECRET",
+):
+    os.environ.pop(_name, None)
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine
@@ -6,6 +36,8 @@ from payjent.auth import create_bot_credential
 from payjent.config import get_settings
 from payjent.db import get_session
 from payjent.main import app
+
+get_settings.cache_clear()
 
 
 @pytest.fixture

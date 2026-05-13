@@ -81,7 +81,7 @@ def test_generic_x402_rejects_secret_headers(client, bot_headers):
     assert "secret-like outbound header" in response.text
 
 
-def test_stripe_checkout_rejects_usd_amount_below_card_minimum_before_stripe_call(client, bot_headers, monkeypatch):
+def test_stripe_checkout_no_longer_rejects_usd_amount_below_card_minimum_before_stripe_call(client, bot_headers, monkeypatch):
     app.dependency_overrides[get_settings] = lambda: Settings(
         checkout_provider="stripe",
         stripe_secret_key="sk_test_fake",
@@ -96,8 +96,10 @@ def test_stripe_checkout_rejects_usd_amount_below_card_minimum_before_stripe_cal
         json=_payload(amount_minor=1, cost_breakdown=[{"label": "exact provider quote", "amount_minor": 1}]),
     )
 
-    assert response.status_code == 402
-    assert "task_budget_id" in response.text
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["status"] == "paid"
+    assert data["payment_url"] is None
 
 
 def test_generic_x402_full_create_pay_consume_spend_complete_flow(client, bot_headers, operator_headers):

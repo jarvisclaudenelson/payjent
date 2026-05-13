@@ -29,7 +29,7 @@ def test_premium_preset_catalog_lists_provider_boundaries(client, bot_headers):
     assert r.status_code == 200
     presets = r.json()["presets"]
     ids = {p["id"] for p in presets}
-    assert {"exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech"} <= ids
+    assert {"exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech", "perplexity.sonar_search", "replicate.prediction", "browserbase.screenshot"} <= ids
     for preset in presets:
         assert preset["execution_boundary"] == "agent_executes_after_payjent_authorization"
         assert preset["secret_policy"]["payjent_stores_provider_secrets"] is False
@@ -42,6 +42,9 @@ def test_each_preset_creates_safe_payment_gated_envelope(client, bot_headers, op
         ("exa.deep_search", _preset_payload(request_hash="exa-hash", input={"query": "payjent", "num_results": 3}), "https://api.exa.ai/search"),
         ("firecrawl.scrape", _preset_payload(request_hash="fire-hash", input={"url": "https://example.com", "formats": ["markdown"], "only_main_content": True}), "https://api.firecrawl.dev/v2/scrape"),
         ("elevenlabs.text_to_speech", _preset_payload(request_hash="tts-hash", input={"text": "hello", "voice_id": "voice_123", "model_id": "eleven_turbo_v2"}), "https://api.elevenlabs.io/v1/text-to-speech/voice_123"),
+        ("perplexity.sonar_search", _preset_payload(request_hash="sonar-hash", input={"query": "agent payments", "model": "sonar", "return_citations": True}), "https://api.perplexity.ai/chat/completions"),
+        ("replicate.prediction", _preset_payload(request_hash="replicate-hash", input={"model": "owner/model", "input": {"prompt": "safe"}, "version": "abc123"}), "https://api.replicate.com/v1/predictions"),
+        ("browserbase.screenshot", _preset_payload(request_hash="browserbase-hash", input={"url": "https://example.com/page", "viewport": {"width": 1280, "height": 720}, "wait_ms": 1000}), "https://api.browserbase.com/v1/sessions"),
     ]
     for preset_id, payload, endpoint in cases:
         created = client.post(f"/api/v1/premium-action-presets/{preset_id}/actions", json=payload, headers=bot_headers)
@@ -88,6 +91,32 @@ def test_elevenlabs_voice_id_rejects_path_or_query_injection(client, bot_headers
         r = client.post("/api/v1/premium-action-presets/elevenlabs.text_to_speech/actions", json=payload, headers=bot_headers)
         assert r.status_code == 422
         assert "voice_id" in r.text
+
+
+def test_replicate_rejects_webhooks_callbacks_and_recursive_secret_keys(client, bot_headers):
+    bad_inputs = [
+        {"model": "owner/model", "input": {"prompt": "safe"}, "webhook": "https://example.com/hook"},
+        {"model": "owner/model", "input": {"nested": {"api_key": "bad"}}},
+        {"model": "owner/model", "input": [{"authorization": "bad"}]},
+    ]
+    for idx, provider_input in enumerate(bad_inputs):
+        payload = _preset_payload(request_hash=f"bad-replicate-{idx}", input=provider_input)
+        r = client.post("/api/v1/premium-action-presets/replicate.prediction/actions", json=payload, headers=bot_headers)
+        assert r.status_code == 422
+
+
+def test_browserbase_rejects_unsafe_urls_and_secret_query_keys(client, bot_headers):
+    for url in [
+        "http://example.com",
+        "https://user:pass@example.com",
+        "https://127.0.0.1/private",
+        "https://169.254.169.254/latest/meta-data",
+        "https://localhost/private",
+        "https://example.com/?api_key=bad",
+    ]:
+        payload = _preset_payload(request_hash=f"bad-browserbase-{url}", input={"url": url})
+        r = client.post("/api/v1/premium-action-presets/browserbase.screenshot/actions", json=payload, headers=bot_headers)
+        assert r.status_code == 422
 
 
 def test_fail_endpoint_records_failed_event_and_mock_refund_idempotent(client, engine, bot_headers, operator_headers):

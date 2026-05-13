@@ -211,7 +211,7 @@ def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
         {"name": "payjent.create_premium_action", "endpoint": "/api/v1/premium-actions", "method": "POST", "description": "Provider-neutral premium action primitive for any external provider-backed paid action. Requires exact provider quote up front; creates a request-bound Payjent payment/grant and neutral execution envelope. Payjent authorizes payment/spend only; the agent executes externally after Payjent authorization. Safe HTTPS target_url/service_url is optional when provider/body/provider_metadata fully describe a provider-backed action. Do not include Authorization, Cookie, or API-key headers.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_payjent_authorization"},
-        {"name": "payjent.list_premium_action_presets", "endpoint": "/api/v1/premium-action-presets", "method": "GET", "description": "List modular premium provider presets for Exa, Firecrawl, and ElevenLabs, including required inputs, quote basis, secret policy, and execution boundary.", "preset_ids": ["exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech"]},
+        {"name": "payjent.list_premium_action_presets", "endpoint": "/api/v1/premium-action-presets", "method": "GET", "description": "List catalog-only premium provider presets, including required inputs, quote basis, secret policy, and execution boundary. Payjent stores safe payment-gated envelopes only; provider credentials stay agent-side and execution happens after Payjent authorization.", "preset_ids": [p["id"] for p in list_presets()]},
         {"name": "payjent.create_premium_action_from_preset", "endpoint": "/api/v1/premium-action-presets/{preset_id}/actions", "method": "POST", "description": "Create a payment-gated provider action from a preset. Payjent stores a safe execution envelope only; provider API keys remain agent-side.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_payjent_authorization"},
         {"name": "payjent.fail_action_request_refund", "endpoint": "/api/v1/agent-actions/{action_id}/fail", "method": "POST", "description": "Mark provider execution failed and optionally request a refund for a paid, bot-scoped, unfulfilled action. Idempotent enough to avoid duplicate refunds."},
         {"name": "payjent.create_x402_paid_action", "endpoint": "/api/v1/premium-actions/x402", "method": "POST", "description": "Generic primitive for any x402/pay.sh-compatible paid URL. Requires an exact provider quote up front; creates a request-bound Payjent payment/grant and x402 execution envelope. Flow: create action, user pays through the active Payjent checkout rail, agent polls/status, agent consumes payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then agent executes the downstream x402 call with a funded external runtime. Payjent never POSTs the target URL or stores Authorization/Cookie/API-key headers. For PaySponge gateways, use SpongeWallet.paidFetch/x402Fetch or spongewallet CLI with agent-side SPONGE_API_KEY; Payjent's checkout checkpoint does not itself satisfy the downstream HTTP 402 challenge.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_spend_authorization"},
@@ -780,6 +780,28 @@ def _managed_provider_readiness(settings: Settings) -> dict[str, bool]:
     }
 
 
+def _database_mode(database_url: str | None) -> str:
+    normalized = (database_url or "").strip().lower()
+    if normalized.startswith("sqlite:"):
+        return "sqlite"
+    if normalized.startswith(("postgresql:", "postgres:")):
+        return "postgres"
+    return "unknown"
+
+
+def _production_guardrails_summary(settings: Settings) -> dict[str, Any]:
+    checks = [
+        "non_default_signing_material_in_production",
+        "https_public_base_url_in_production",
+        "configured_checkout_credentials_when_required",
+    ]
+    try:
+        settings.validate_runtime_guardrails()
+    except RuntimeError:
+        return {"safe": False, "checks": checks}
+    return {"safe": True, "checks": checks}
+
+
 def _enforce_managed_provider_ready(tool_id: str, settings: Settings, *, mode: str = "advisory") -> None:
     if mode.strip().lower() not in {"enforced", "strict"}:
         return
@@ -823,6 +845,35 @@ def _payment_readiness(settings: Settings) -> dict:
 @app.get("/api/v1/payment-readiness")
 def payment_readiness(settings: Settings = Depends(get_settings)):
     return _payment_readiness(settings)
+
+
+@app.get("/api/v1/status")
+def public_operational_status(settings: Settings = Depends(get_settings)):
+    managed = _managed_provider_readiness(settings)
+    provider = _checkout_provider(settings)
+    return {
+        "product": "Payjent",
+        "public_base_url": CANONICAL_PUBLIC_BASE_URL,
+        "checkout": {
+            "provider_safe_mode": provider == "mock",
+            "provider": "mock" if provider == "mock" else "configured_external",
+        },
+        "toolbox_count": len(list_toolbox_tools()),
+        "premium_preset_count": len(list_presets()),
+        "managed_provider_configured": {
+            "fal": managed["fal.image.generate"],
+            "exa": managed["exa.deep_search"],
+            "firecrawl": managed["firecrawl.scrape"],
+            "elevenlabs": managed["elevenlabs.text_to_speech"],
+        },
+        "database_mode": _database_mode(settings.database_url),
+        "exact_quote_policy": {
+            "rule": _EXACT_PRICING_POLICY["rule"],
+            "unknown_price_behavior": _EXACT_PRICING_POLICY["unknown_price_behavior"],
+            "summary": "exact provider/merchant quoted price and matching cost_breakdown required; unknown prices fail closed",
+        },
+        "production_guardrails": _production_guardrails_summary(settings),
+    }
 
 
 def _primary_cta(settings: Settings) -> str:
