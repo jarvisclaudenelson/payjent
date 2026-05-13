@@ -1,3 +1,5 @@
+import json
+
 from sqlmodel import Session, select
 
 from payjent.auth import create_bot_credential
@@ -28,11 +30,21 @@ def test_premium_preset_catalog_lists_provider_boundaries(client, bot_headers):
     r = client.get("/api/v1/premium-action-presets", headers=bot_headers)
     assert r.status_code == 200
     presets = r.json()["presets"]
+    discovery = r.json()["premium_tool_discovery"]
+    assert discovery["creation_template"]["endpoint"].endswith("/api/v1/premium-action-presets/{preset_id}/actions")
+    assert "agent executes provider" in discovery["premium_tool_quickstart"][0]
+    assert "agent-side private credential only" in discovery["provider_api_credential_policy"]
     ids = {p["id"] for p in presets}
     assert {"exa.deep_search", "firecrawl.scrape", "elevenlabs.text_to_speech", "perplexity.sonar_search", "replicate.prediction", "browserbase.screenshot"} <= ids
+    response_text = json.dumps(r.json())
+    assert "header_template" not in response_text
+    for forbidden in ("EXA_API_KEY", "FIRECRAWL_API_KEY", "ELEVENLABS_API_KEY", "PERPLEXITY_API_KEY", "REPLICATE_API_TOKEN", "BROWSERBASE_API_KEY"):
+        assert forbidden not in response_text
     for preset in presets:
         assert preset["execution_boundary"] == "agent_executes_after_payjent_authorization"
         assert preset["secret_policy"]["payjent_stores_provider_secrets"] is False
+        assert preset["auth_instructions"]["credential_policy"] == "agent-side private credential only"
+        assert "header_template" not in preset["auth_instructions"]
         assert preset["endpoint"].startswith("https://")
         assert preset["method"] == "POST"
 

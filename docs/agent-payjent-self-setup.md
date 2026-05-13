@@ -34,6 +34,27 @@ Before creating paid actions, discover what this Payjent instance supports:
 
 Never ask a user to paste `X-Payjent-Bot-Key`, grants, payment tokens, deployment secrets, or install-link redemption output in chat.
 
+### Premium tool discovery quickstart
+
+Use this decision recipe when the user asks for premium provider work:
+
+```text
+GET /.well-known/payjent-tools.json
+if installed: GET /api/v1/agent-capabilities with your private Payjent credential
+GET /api/v1/premium-action-presets
+choose a preset id from premium_tool_discovery.recommended_premium_paths
+obtain the exact provider quote in your own runtime
+POST /api/v1/premium-action-presets/{preset_id}/actions with exact amount_minor, matching cost_breakdown, request_hash, bot_id, external_user_id, and input
+send only the returned payment/status link to the user
+poll/resume after payment with the original request binding
+execute the provider call in your own agent runtime using agent-side private provider credentials
+complete the Payjent action, or fail it and request/refuse refund based on the provider outcome
+```
+
+The manifest and authenticated capabilities both expose `premium_tool_discovery`, including `premium_action_presets_url`, `premium_action_preset_count`, `agent_next_steps`, `creation_template`, and recommended premium paths grouped by provider/use case. Use actual preset ids from that block, such as `exa.deep_search`, `firecrawl.scrape`, `elevenlabs.text_to_speech`, `perplexity.sonar_search`, `replicate.prediction`, or `browserbase.screenshot`.
+
+Payjent stores safe payment-gated envelopes only. Payjent does not execute provider API calls, does not need provider secrets, and must not receive provider authorization headers, cookies, API keys, private keys, or tokens. Provider credentials stay in the agent-side private runtime. Always obtain an exact provider quote first; if the exact price is unknown, do not create the Payjent action yet.
+
 ### FAL image generation default
 
 For normal FAL image requests, prefer toolbox tool `fal.image.generate`. It is the canonical Payjent-managed FAL path and should be treated as the default/recommended route in discovery metadata.

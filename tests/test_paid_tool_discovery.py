@@ -17,6 +17,16 @@ def test_public_manifest_returns_safe_tool_discovery(client):
     assert data["docs_url"].endswith("/docs/agent-payjent-self-setup.md")
     assert data["authenticated_capabilities_url"].endswith("/api/v1/agent-capabilities")
     assert data["auth"]["header"] == "X-Payjent-Bot-Key"
+    assert data["premium_action_presets_url"].endswith("/api/v1/premium-action-presets")
+    assert data["premium_action_preset_count"] >= 6
+    premium = data["premium_tool_discovery"]
+    assert premium["premium_action_preset_count"] == data["premium_action_preset_count"]
+    assert "manifest -> authenticated capabilities -> presets -> exact provider quote" in premium["premium_tool_quickstart"][0]
+    assert "does not execute provider API calls" in premium["execution_boundary"]
+    assert "agent-side private credential only" in premium["provider_api_credential_policy"]
+    assert "exa.deep_search" in json.dumps(premium["recommended_premium_paths"])
+    assert premium["creation_template"]["endpoint"].endswith("/api/v1/premium-action-presets/{preset_id}/actions")
+    assert "input" in premium["creation_template"]["required_fields"]
     names = {tool["name"] for tool in data["tools"]}
     assert "payjent.create_paid_action" in names
     assert "payjent.create_pay_sh_premium_action" in names
@@ -71,6 +81,13 @@ def test_agent_capabilities_returns_current_agent_without_secrets(client, operat
     assert tools["payjent.authorize_x402_spend"]["available"] is False
     assert data["docs_url"].endswith("/docs/agent-payjent-self-setup.md")
     assert data["dashboard_url"].endswith(f"/dashboard/agents/{agent['id']}")
+    premium = data["premium_tool_discovery"]
+    assert premium["premium_action_presets_url"].startswith("http://testserver/api/v1/premium-action-presets")
+    assert premium["installed_agent_readiness"]["payjent_credential_present"] is True
+    assert premium["installed_agent_readiness"]["premium_presets_available"] is True
+    assert premium["installed_agent_readiness"]["x402_spend_authorization_available"] is False
+    assert "Payjent stores safe payment-gated envelopes" in premium["execution_boundary"]
+    assert "firecrawl.scrape" in premium["creation_template"]["input_fields_by_preset"]
     capabilities_text = json.dumps(data).lower()
     assert "exact provider/merchant quoted price" in capabilities_text
     assert "do not use placeholder" in capabilities_text

@@ -49,7 +49,12 @@ class PremiumActionPreset:
             "failure_instructions": self.failure_instructions,
             "refund_instructions": self.refund_instructions,
             "secret_policy": SECRET_POLICY,
-            "auth_instructions": self.auth_instructions,
+            "auth_instructions": {
+                "secret_location": self.auth_instructions.get("secret_location", "agent_runtime_only"),
+                "credential_policy": "agent-side private credential only",
+                "payjent_receives_provider_secret": False,
+                "provider_auth_material_private_to_runtime": True,
+            },
             "execution_boundary": EXECUTION_BOUNDARY,
         }
 

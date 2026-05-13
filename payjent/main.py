@@ -263,7 +263,77 @@ def _safe_rail_config_summary(rail: RailConnection) -> dict:
     return redacted
 
 
+def _premium_tool_discovery(base_url: str, *, x402_available: bool | None = None) -> dict:
+    presets = list_presets()
+    create_endpoint_template = f"{base_url}/api/v1/premium-action-presets/{{preset_id}}/actions"
+    common_required_action_fields = [
+        "bot_id",
+        "external_user_id",
+        "request_hash",
+        "amount_minor",
+        "currency",
+        "cost_breakdown",
+        "input",
+    ]
+    recommended_paths: dict[str, list[dict[str, Any]]] = {}
+    for preset in presets:
+        recommended_paths.setdefault(preset["provider"], []).append(
+            {
+                "preset_id": preset["id"],
+                "use_case": preset["task_type"],
+                "provider": preset["provider"],
+                "preset_catalog_url": f"{base_url}/api/v1/premium-action-presets",
+                "create_endpoint_template": create_endpoint_template,
+                "method": "POST",
+                "required_action_fields": common_required_action_fields,
+                "required_input_fields": preset["required_input_fields"],
+                "optional_input_fields": preset["optional_input_fields"],
+                "quote_basis": preset["quote_basis"],
+                "execution_boundary": preset["execution_boundary"],
+                "provider_api_credential_policy": "agent-side private credential only; do not send provider secrets to Payjent or users",
+            }
+        )
+    discovery = {
+        "premium_action_presets_url": f"{base_url}/api/v1/premium-action-presets",
+        "premium_action_preset_count": len(presets),
+        "execution_boundary": "Payjent stores safe payment-gated envelopes and does not execute provider API calls; the installed agent executes the provider call in its own runtime after Payjent authorization.",
+        "provider_api_credential_policy": "agent-side private credential only; never put provider credentials, auth headers, cookies, tokens, or private keys in Payjent envelopes or chat.",
+        "pricing_policy": _EXACT_PRICING_POLICY,
+        "agent_next_steps": [
+            "Fetch GET /.well-known/payjent-tools.json.",
+            "If Payjent is installed for this agent, call authenticated GET /api/v1/agent-capabilities using the agent's private Payjent credential.",
+            "List premium presets with GET /api/v1/premium-action-presets.",
+            "Obtain the exact provider quote for the requested provider action before creating any Payjent action.",
+            "POST /api/v1/premium-action-presets/{preset_id}/actions with exact amount_minor, matching cost_breakdown, request binding, and required input fields.",
+            "Send the returned payment/status link to the user; do not expose grants or payment tokens.",
+            "Poll/resume the action after payment using authenticated status/consume endpoints and the original request binding.",
+            "Execute the provider call in the agent runtime using agent-side private provider credentials.",
+            "Complete the Payjent action with safe receipt metadata, or fail it and request/refuse refund according to provider outcome.",
+        ],
+        "premium_tool_quickstart": [
+            "manifest -> authenticated capabilities -> presets -> exact provider quote -> create preset action -> user payment/status link -> poll/resume -> agent executes provider -> complete/fail/refund"
+        ],
+        "recommended_premium_paths": recommended_paths,
+        "creation_template": {
+            "endpoint": create_endpoint_template,
+            "method": "POST",
+            "path_params": {"preset_id": "one of the ids in recommended_premium_paths"},
+            "required_fields": common_required_action_fields,
+            "input_fields_by_preset": {preset["id"]: preset["required_input_fields"] for preset in presets},
+            "secret_fields": "none; provider credentials remain agent-side only",
+        },
+    }
+    if x402_available is not None:
+        discovery["installed_agent_readiness"] = {
+            "payjent_credential_present": True,
+            "premium_presets_available": bool(presets),
+            "x402_spend_authorization_available": x402_available,
+        }
+    return discovery
+
+
 def _discovery_manifest(base_url: str) -> dict:
+    premium_discovery = _premium_tool_discovery(base_url)
     return {
         "name": "Payjent",
         "version": "v0",
@@ -273,6 +343,9 @@ def _discovery_manifest(base_url: str) -> dict:
         "authenticated_capabilities_url": f"{base_url}/api/v1/agent-capabilities",
         "toolbox_url": f"{CANONICAL_PUBLIC_BASE_URL}/api/v1/toolbox",
         "toolbox_tool_count": len(list_toolbox_tools()),
+        "premium_action_presets_url": premium_discovery["premium_action_presets_url"],
+        "premium_action_preset_count": premium_discovery["premium_action_preset_count"],
+        "premium_tool_discovery": premium_discovery,
         "auth": {
             "header": "X-Payjent-Bot-Key",
             "credential_install": "Credentials are installed via one-time Agent Install Link and must not be pasted in chat.",
@@ -1995,6 +2068,9 @@ def agent_capabilities(request: Request, session: Session = Depends(get_session)
         "settlement_rails": [manifest for manifest in list_settlement_rail_manifests()],
         "settlement_rails_url": f"{base_url}/api/v1/agents/{agent.bot_id}/settlement-rails",
         "tools": _tool_descriptors(x402_available=x402_available),
+        "premium_action_presets_url": f"{base_url}/api/v1/premium-action-presets",
+        "premium_action_preset_count": len(list_presets()),
+        "premium_tool_discovery": _premium_tool_discovery(base_url, x402_available=x402_available),
         "active_payment": {
             "provider": _checkout_provider(settings),
             "ready": _payment_readiness(settings)["active_payment_ready"],
@@ -2631,8 +2707,18 @@ def create_premium_action(
 
 
 @app.get("/api/v1/premium-action-presets")
-def premium_action_presets(_credential: BotCredential = Depends(require_bot_credential)):
-    return {"presets": list_presets()}
+def premium_action_presets(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    _credential: BotCredential = Depends(require_bot_credential),
+):
+    base_url = _public_base_url(request, settings)
+    premium_discovery = _premium_tool_discovery(base_url)
+    return {
+        "presets": list_presets(),
+        "premium_tool_discovery": premium_discovery,
+        "creation_template": premium_discovery["creation_template"],
+    }
 
 
 @app.post("/api/v1/premium-action-presets/{preset_id}/actions", response_model=PremiumActionCreateResponse)
