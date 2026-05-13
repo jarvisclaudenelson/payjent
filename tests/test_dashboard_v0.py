@@ -110,6 +110,93 @@ def test_dashboard_and_agent_detail_render_key_copy(client, operator_headers):
         assert copy in detail.text
 
 
+def test_dashboard_launch_checklist_and_action_status_are_safe(client, engine):
+    assert client.post("/auth/register", data={"email": "launch@example.com", "password": "correc...aple"}, follow_redirects=False).status_code == 303
+    created = client.post(
+        "/dashboard/agents/register",
+        data={"name": "Launch Agent", "platform": "discord", "bot_id": "launch-bot", "default_currency": "USD"},
+    )
+    assert created.status_code == 200
+    forbidden_secret = "payjent_FORBIDDEN_SECRET_TOKEN"
+    with Session(engine) as session:
+        stage_rows = [
+            ("quote_stage_quoted", "quoted", None),
+            ("quote_stage_checkout", "quoted", "checkout_created"),
+            ("quote_stage_paid", "paid", "paid"),
+            ("quote_stage_executing", "executing", "paid"),
+            ("quote_stage_succeeded", "fulfilled", "paid"),
+            ("quote_stage_failed", "failed", "paid"),
+        ]
+        for quote_id, status, payment_status in stage_rows:
+            session.add(Quote(id=quote_id, bot_id="launch-bot", external_user_id="user", request_summary=f"{status} action", request_hash=f"hash-{quote_id}", amount_minor=100, currency="USD", cost_breakdown=[{"label": "work", "amount_minor": 100}], quote_hash=f"qh-{quote_id}", status=status))
+            if payment_status:
+                session.add(PaymentSession(id=f"ps_{quote_id}", quote_id=quote_id, provider="mock", status=payment_status, checkout_url=forbidden_secret, provider_session_id=forbidden_secret, idempotency_key=forbidden_secret))
+        session.commit()
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    for label in [
+        "Launch checklist",
+        "Agent registered",
+        "Install link / credential path",
+        "Active checkout readiness",
+        "Discovery manifest / status endpoint",
+        "Paid action lifecycle evidence",
+        "Failure / refund path",
+        "Action status overview",
+        "quoted → checkout → paid → executing → succeeded/failed",
+        "Quoted without checkout",
+        "Checkout created but payment not marked paid",
+        "Paid but no execution/fulfillment evidence yet",
+        "Payment cleared and work has started",
+        "Fulfillment evidence recorded",
+        "Failed or refund path active",
+    ]:
+        assert label in dashboard.text
+    for stage in [">quoted<", ">checkout<", ">paid<", ">executing<", ">succeeded<", ">failed<"]:
+        assert stage in dashboard.text
+    assert forbidden_secret not in dashboard.text
+    assert "provider_session_id" not in dashboard.text
+    assert "idempotency_key" not in dashboard.text
+
+    agent_id = dashboard.text.split("data-agent-id='", 1)[1].split("'", 1)[0]
+    detail = client.get(f"/dashboard/agents/{agent_id}")
+    assert detail.status_code == 200
+    assert "Agent action status" in detail.text
+    for stage in [">quoted<", ">checkout<", ">paid<", ">executing<", ">succeeded<", ">failed<"]:
+        assert stage in detail.text
+    assert forbidden_secret not in detail.text
+
+
+def test_dashboard_scopes_action_status_to_signed_in_account_agents(client, engine):
+    assert client.post("/auth/register", data={"email": "owner-a@example.com", "password": "correct horse battery staple"}, follow_redirects=False).status_code == 303
+    client.post(
+        "/dashboard/agents/register",
+        data={"name": "Owner A Agent", "platform": "discord", "bot_id": "owner-a-bot", "default_currency": "USD"},
+    )
+    with Session(engine) as session:
+        session.add(Quote(id="quote_owner_a", bot_id="owner-a-bot", external_user_id="user-a", request_summary="owner a private task", request_hash="hash-owner-a", amount_minor=100, currency="USD", cost_breakdown=[{"label": "work", "amount_minor": 100}], quote_hash="qh-owner-a", status="paid"))
+        session.commit()
+    owner_a_dashboard = client.get("/dashboard")
+    assert "owner a private task" in owner_a_dashboard.text
+
+    client.post("/auth/logout", follow_redirects=False)
+    assert client.post("/auth/register", data={"email": "owner-b@example.com", "password": "correct horse battery staple"}, follow_redirects=False).status_code == 303
+    client.post(
+        "/dashboard/agents/register",
+        data={"name": "Owner B Agent", "platform": "discord", "bot_id": "owner-b-bot", "default_currency": "USD"},
+    )
+    with Session(engine) as session:
+        session.add(Quote(id="quote_owner_b", bot_id="owner-b-bot", external_user_id="user-b", request_summary="owner b visible task", request_hash="hash-owner-b", amount_minor=200, currency="USD", cost_breakdown=[{"label": "work", "amount_minor": 200}], quote_hash="qh-owner-b", status="paid"))
+        session.commit()
+
+    owner_b_dashboard = client.get("/dashboard")
+    assert owner_b_dashboard.status_code == 200
+    assert "owner b visible task" in owner_b_dashboard.text
+    assert "owner a private task" not in owner_b_dashboard.text
+    assert "quote_owner_a" not in owner_b_dashboard.text
+
+
 def test_root_landing_is_public_and_dashboard_shows_how_paid_currency_safe(client, engine):
     landing = client.get("/")
     assert landing.status_code == 200
@@ -118,6 +205,8 @@ def test_root_landing_is_public_and_dashboard_shows_how_paid_currency_safe(clien
 
     assert client.post("/auth/register", data={"email": "dev@example.com", "password": "correct horse battery staple"}, follow_redirects=False).status_code == 303
     with Session(engine) as session:
+        account = session.exec(select(Account).where(Account.email == "dev@example.com")).one()
+        session.add(AgentProfile(id="agent_dashboard_safe", owner_id=account.id, bot_id="bot-1", name="Dashboard Agent", platform="discord"))
         q_usd = Quote(id="quote_usd", bot_id="bot-1", external_user_id="user-1", request_summary="USD paid action", request_hash="hash-usd", amount_minor=150, currency="USD", cost_breakdown=[{"label": "work", "amount_minor": 150}], quote_hash="qh-usd", status="paid")
         q_eur = Quote(id="quote_eur", bot_id="bot-1", external_user_id="user-2", request_summary="EUR paid action", request_hash="hash-eur", amount_minor=250, currency="EUR", cost_breakdown=[{"label": "work", "amount_minor": 250}], quote_hash="qh-eur", status="fulfilled")
         session.add(q_usd)
