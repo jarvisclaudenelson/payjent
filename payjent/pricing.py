@@ -58,6 +58,20 @@ def _matches(label: str, markers: tuple[str, ...]) -> bool:
     return any(marker in normalized for marker in markers)
 
 
+_COST_CATEGORIES = (
+    ("operator_fee", "operator_fee_subtotal_minor", OPERATOR_FEE_LABEL_MARKERS),
+    ("payjent_platform_fee", "payjent_platform_fee_subtotal_minor", PAYJENT_FEE_LABEL_MARKERS),
+    ("provider_merchant", "provider_merchant_subtotal_minor", PROVIDER_LABEL_MARKERS),
+)
+
+
+def _classify_label(label: str) -> tuple[str, str]:
+    for category, subtotal_key, markers in _COST_CATEGORIES:
+        if _matches(label, markers):
+            return category, subtotal_key
+    return "other", "other_subtotal_minor"
+
+
 def classify_cost_breakdown(cost_breakdown: list[Any]) -> dict[str, Any]:
     """Classify transparent cost_breakdown lines into non-secret allocation metadata."""
     allocation = {
@@ -78,18 +92,8 @@ def classify_cost_breakdown(cost_breakdown: list[Any]) -> dict[str, Any]:
     for item in cost_breakdown:
         label = _item_label(item)
         amount = _item_amount(item)
-        if _matches(label, OPERATOR_FEE_LABEL_MARKERS):
-            category = "operator_fee"
-            allocation["operator_fee_subtotal_minor"] += amount
-        elif _matches(label, PAYJENT_FEE_LABEL_MARKERS):
-            category = "payjent_platform_fee"
-            allocation["payjent_platform_fee_subtotal_minor"] += amount
-        elif _matches(label, PROVIDER_LABEL_MARKERS):
-            category = "provider_merchant"
-            allocation["provider_merchant_subtotal_minor"] += amount
-        else:
-            category = "other"
-            allocation["other_subtotal_minor"] += amount
+        category, subtotal_key = _classify_label(label)
+        allocation[subtotal_key] += amount
         allocation["total_minor"] += amount
         allocation["line_items"].append({"label": label, "amount_minor": amount, "category": category})
     return allocation

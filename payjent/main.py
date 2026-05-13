@@ -169,20 +169,21 @@ app = FastAPI(title="Payjent", lifespan=lifespan, docs_url="/api-docs", redoc_ur
 DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
 
 
-@app.get("/docs/agent-payjent-self-setup.md", response_class=FileResponse)
-def agent_payjent_self_setup_doc():
-    path = DOCS_DIR / "agent-payjent-self-setup.md"
+def _docs_file_response(filename: str) -> FileResponse:
+    path = DOCS_DIR / filename
     if not path.exists():
         raise HTTPException(404, "document not found")
-    return FileResponse(path, media_type="text/markdown; charset=utf-8", filename="agent-payjent-self-setup.md")
+    return FileResponse(path, media_type="text/markdown; charset=utf-8", filename=filename)
+
+
+@app.get("/docs/agent-payjent-self-setup.md", response_class=FileResponse)
+def agent_payjent_self_setup_doc():
+    return _docs_file_response("agent-payjent-self-setup.md")
 
 
 @app.get("/docs/decal-checkout.md", response_class=FileResponse)
 def decal_checkout_doc():
-    path = DOCS_DIR / "decal-checkout.md"
-    if not path.exists():
-        raise HTTPException(404, "document not found")
-    return FileResponse(path, media_type="text/markdown; charset=utf-8", filename="decal-checkout.md")
+    return _docs_file_response("decal-checkout.md")
 
 
 @app.get("/docs/c3po-payjent-self-setup.md", response_class=FileResponse)
@@ -207,20 +208,36 @@ _EXACT_PRICING_POLICY = {
     "operator_fee_policy": FEE_POLICY,
 }
 
+_CREATE_AMOUNT_REQUIREMENTS = {
+    "amount_minor": "exact provider/merchant quoted total plus explicit operator fee line items only",
+    "cost_breakdown": "required; must match amount_minor; operator fees must be separately labeled",
+    "fail_closed_if_unknown": True,
+    "no_hidden_or_default_fees": True,
+}
+
+_PREMIUM_REQUIRED_ACTION_FIELDS = [
+    "bot_id",
+    "external_user_id",
+    "request_hash",
+    "amount_minor",
+    "currency",
+    "cost_breakdown",
+    "input",
+]
+
 
 def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
-    create_amount_requirements = {"amount_minor": "exact provider/merchant quoted total plus explicit operator fee line items only", "cost_breakdown": "required; must match amount_minor; operator fees must be separately labeled", "fail_closed_if_unknown": True, "no_hidden_or_default_fees": True}
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
-        {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
-        {"name": "payjent.create_premium_action", "endpoint": "/api/v1/premium-actions", "method": "POST", "description": "Provider-neutral premium action primitive for any external provider-backed paid action. Requires exact provider quote up front; creates a request-bound Payjent payment/grant and neutral execution envelope. Payjent authorizes payment/spend only; the agent executes externally after Payjent authorization. Safe HTTPS target_url/service_url is optional when provider/body/provider_metadata fully describe a provider-backed action. Do not include Authorization, Cookie, or API-key headers.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_payjent_authorization"},
+        {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": _CREATE_AMOUNT_REQUIREMENTS},
+        {"name": "payjent.create_premium_action", "endpoint": "/api/v1/premium-actions", "method": "POST", "description": "Provider-neutral premium action primitive for any external provider-backed paid action. Requires exact provider quote up front; creates a request-bound Payjent payment/grant and neutral execution envelope. Payjent authorizes payment/spend only; the agent executes externally after Payjent authorization. Safe HTTPS target_url/service_url is optional when provider/body/provider_metadata fully describe a provider-backed action. Do not include Authorization, Cookie, or API-key headers.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": _CREATE_AMOUNT_REQUIREMENTS, "execution_boundary": "agent_executes_after_payjent_authorization"},
         {"name": "payjent.list_premium_action_presets", "endpoint": "/api/v1/premium-action-presets", "method": "GET", "description": "List catalog-only premium provider presets, including required inputs, quote basis, secret policy, and execution boundary. Payjent stores safe payment-gated envelopes only; provider credentials stay agent-side and execution happens after Payjent authorization.", "preset_ids": [p["id"] for p in list_presets()]},
-        {"name": "payjent.create_premium_action_from_preset", "endpoint": "/api/v1/premium-action-presets/{preset_id}/actions", "method": "POST", "description": "Create a payment-gated provider action from a preset. Payjent stores a safe execution envelope only; provider API keys remain agent-side.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_payjent_authorization"},
+        {"name": "payjent.create_premium_action_from_preset", "endpoint": "/api/v1/premium-action-presets/{preset_id}/actions", "method": "POST", "description": "Create a payment-gated provider action from a preset. Payjent stores a safe execution envelope only; provider API keys remain agent-side.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": _CREATE_AMOUNT_REQUIREMENTS, "execution_boundary": "agent_executes_after_payjent_authorization"},
         {"name": "payjent.fail_action_request_refund", "endpoint": "/api/v1/agent-actions/{action_id}/fail", "method": "POST", "description": "Mark provider execution failed and optionally request a refund for a paid, bot-scoped, unfulfilled action. Idempotent enough to avoid duplicate refunds."},
-        {"name": "payjent.create_x402_paid_action", "endpoint": "/api/v1/premium-actions/x402", "method": "POST", "description": "Generic primitive for any x402/pay.sh-compatible paid URL. Requires an exact provider quote up front; creates a request-bound Payjent payment/grant and x402 execution envelope. Flow: create action, user pays through the active Payjent checkout rail, agent polls/status, agent consumes payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then agent executes the downstream x402 call with a funded external runtime. Payjent never POSTs the target URL or stores Authorization/Cookie/API-key headers. For PaySponge gateways, use SpongeWallet.paidFetch/x402Fetch or spongewallet CLI with agent-side SPONGE_API_KEY; Payjent's checkout checkpoint does not itself satisfy the downstream HTTP 402 challenge.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "execution_boundary": "agent_executes_after_spend_authorization"},
-        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Backward-compatible legacy alias for payjent.create_x402_paid_action. Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Payjent does not POST service_url or execute the downstream task; payjent_fulfillment_callback/payjent_managed_execution are legacy flags and are forced false. Agents must use a funded pay.sh/x402 runtime, and PaySponge endpoints require SpongeWallet/spongewallet rather than plain paycurl.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
-        {"name": "payjent.create_bigquery_paid_query", "endpoint": "/api/v1/premium-actions/pay-sh/bigquery-query", "method": "POST", "description": "Preset for the real pay.sh public catalog BigQuery gateway service solana-foundation/google/bigquery resource jobs. Creates a pay.sh/x402 action for POST https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries with body {query,useLegacySql}. User pays through Payjent first; agent consumes grant, calls payjent.authorize_x402_spend with capture=true, then agent executes externally using a funded pay.sh/x402 runtime. Payjent does not execute BigQuery.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "preset": {"provider": "pay_sh", "service_fqn": "solana-foundation/google/bigquery", "resource": "jobs", "gateway": "https://bigquery.google.gateway-402.com/bigquery/v2", "method": "POST", "path_template": "/projects/{project_id}/queries", "execution_boundary": "agent_executes_after_spend_authorization"}},
-        {"name": "payjent.create_purchase_fulfillment", "endpoint": "/api/v1/purchase-actions", "method": "POST", "description": "Create an Amazon-style merchant purchase/procurement handoff only after obtaining an exact merchant quote. The human pays through Payjent; Payjent verifies payment and sends a signed, verified POST fulfillment callback to an allowlisted procurement executor. The executor buys from Amazon or the merchant using its configured procurement/payment method. Payjent does not send funds to the agent and does not directly pay Amazon unless the downstream executor/provider rail does that.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements, "requires_fulfillment_callback": True},
+        {"name": "payjent.create_x402_paid_action", "endpoint": "/api/v1/premium-actions/x402", "method": "POST", "description": "Generic primitive for any x402/pay.sh-compatible paid URL. Requires an exact provider quote up front; creates a request-bound Payjent payment/grant and x402 execution envelope. Flow: create action, user pays through the active Payjent checkout rail, agent polls/status, agent consumes payment token/grant, agent calls payjent.authorize_x402_spend for the exact action budget, then agent executes the downstream x402 call with a funded external runtime. Payjent never POSTs the target URL or stores Authorization/Cookie/API-key headers. For PaySponge gateways, use SpongeWallet.paidFetch/x402Fetch or spongewallet CLI with agent-side SPONGE_API_KEY; Payjent's checkout checkpoint does not itself satisfy the downstream HTTP 402 challenge.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": _CREATE_AMOUNT_REQUIREMENTS, "execution_boundary": "agent_executes_after_spend_authorization"},
+        {"name": "payjent.create_pay_sh_premium_action", "endpoint": "/api/v1/premium-actions/pay-sh", "method": "POST", "description": "Backward-compatible legacy alias for payjent.create_x402_paid_action. Create a premium pay.sh/x402 action envelope gated by Payjent only after obtaining an exact provider/merchant quote. Payjent does not POST service_url or execute the downstream task; payjent_fulfillment_callback/payjent_managed_execution are legacy flags and are forced false. Agents must use a funded pay.sh/x402 runtime, and PaySponge endpoints require SpongeWallet/spongewallet rather than plain paycurl.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": _CREATE_AMOUNT_REQUIREMENTS},
+        {"name": "payjent.create_bigquery_paid_query", "endpoint": "/api/v1/premium-actions/pay-sh/bigquery-query", "method": "POST", "description": "Preset for the real pay.sh public catalog BigQuery gateway service solana-foundation/google/bigquery resource jobs. Creates a pay.sh/x402 action for POST https://bigquery.google.gateway-402.com/bigquery/v2/projects/{project_id}/queries with body {query,useLegacySql}. User pays through Payjent first; agent consumes grant, calls payjent.authorize_x402_spend with capture=true, then agent executes externally using a funded pay.sh/x402 runtime. Payjent does not execute BigQuery.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": _CREATE_AMOUNT_REQUIREMENTS, "preset": {"provider": "pay_sh", "service_fqn": "solana-foundation/google/bigquery", "resource": "jobs", "gateway": "https://bigquery.google.gateway-402.com/bigquery/v2", "method": "POST", "path_template": "/projects/{project_id}/queries", "execution_boundary": "agent_executes_after_spend_authorization"}},
+        {"name": "payjent.create_purchase_fulfillment", "endpoint": "/api/v1/purchase-actions", "method": "POST", "description": "Create an Amazon-style merchant purchase/procurement handoff only after obtaining an exact merchant quote. The human pays through Payjent; Payjent verifies payment and sends a signed, verified POST fulfillment callback to an allowlisted procurement executor. The executor buys from Amazon or the merchant using its configured procurement/payment method. Payjent does not send funds to the agent and does not directly pay Amazon unless the downstream executor/provider rail does that.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": _CREATE_AMOUNT_REQUIREMENTS, "requires_fulfillment_callback": True},
         {"name": "payjent.check_payment", "endpoint": "/api/v1/agent-actions/{action_id}/status", "method": "GET", "description": "Check whether a paid action is awaiting payment, ready, or consumed."},
         {"name": "payjent.resume_paid_action", "endpoint": "/api/v1/agent-actions/{action_id}/start", "method": "POST", "description": "Consume the exact paid grant and resume the request-bound action."},
         {"name": "payjent.complete_action", "endpoint": "/api/v1/agent-actions/{action_id}/complete", "method": "POST", "description": "Report completion/fulfillment for a paid action."},
@@ -268,15 +285,6 @@ def _safe_rail_config_summary(rail: RailConnection) -> dict:
 def _premium_tool_discovery(base_url: str, *, x402_available: bool | None = None) -> dict:
     presets = list_presets()
     create_endpoint_template = f"{base_url}/api/v1/premium-action-presets/{{preset_id}}/actions"
-    common_required_action_fields = [
-        "bot_id",
-        "external_user_id",
-        "request_hash",
-        "amount_minor",
-        "currency",
-        "cost_breakdown",
-        "input",
-    ]
     recommended_paths: dict[str, list[dict[str, Any]]] = {}
     for preset in presets:
         recommended_paths.setdefault(preset["provider"], []).append(
@@ -287,7 +295,7 @@ def _premium_tool_discovery(base_url: str, *, x402_available: bool | None = None
                 "preset_catalog_url": f"{base_url}/api/v1/premium-action-presets",
                 "create_endpoint_template": create_endpoint_template,
                 "method": "POST",
-                "required_action_fields": common_required_action_fields,
+                "required_action_fields": _PREMIUM_REQUIRED_ACTION_FIELDS,
                 "required_input_fields": preset["required_input_fields"],
                 "optional_input_fields": preset["optional_input_fields"],
                 "quote_basis": preset["quote_basis"],
@@ -321,7 +329,7 @@ def _premium_tool_discovery(base_url: str, *, x402_available: bool | None = None
             "endpoint": create_endpoint_template,
             "method": "POST",
             "path_params": {"preset_id": "one of the ids in recommended_premium_paths"},
-            "required_fields": common_required_action_fields,
+            "required_fields": _PREMIUM_REQUIRED_ACTION_FIELDS,
             "input_fields_by_preset": {preset["id"]: preset["required_input_fields"] for preset in presets},
             "secret_fields": "none; provider credentials remain agent-side only",
         },
