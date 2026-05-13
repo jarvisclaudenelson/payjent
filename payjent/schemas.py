@@ -492,6 +492,7 @@ class AgentActionCreateResponse(BaseModel):
     request_hash: str
     payment_prompt: PaymentPrompt
     message: str
+    pricing_allocation: dict[str, Any] | None = None
 
 
 class AgentActionStatusResponse(BaseModel):

@@ -123,15 +123,23 @@ If the task is free, do not create a Payjent action.
 
 ### Step 2: Create a Payjent paid action
 
-Before creating any Payjent paid action, first obtain the exact provider/merchant quoted price for the requested work. The `amount_minor` and `cost_breakdown` you send to Payjent must match that exact quote. Do **not** use placeholder, default, demo, or test amounts such as `$1.00` or `100` minor units. If the exact price is unknown, fail closed: do not create the paid action yet, and tell the user, "Payjent is awaiting an exact provider quote before I can create the paid action."
+Before creating any Payjent paid action, first obtain the exact provider/merchant quoted price for the requested work. The `amount_minor` and `cost_breakdown` you send to Payjent must match that exact quote plus any optional transparent operator fee line items. Do **not** use placeholder, default, demo, test, minimum/top-up, hidden, or silently injected amounts such as `$1.00` or `100` minor units. If the exact price is unknown, fail closed: do not create the paid action yet, and tell the user, "Payjent is awaiting an exact provider quote before I can create the paid action."
+
+Operator fee policy for this slice:
+
+- Operator fees are optional; Payjent adds no default or hidden fees for existing agents.
+- Any operator fee must be an explicit `cost_breakdown` line item, labeled separately from provider/merchant prices (for example, `agent operator fee`, `operator fee`, `service fee`, or `agent fee`).
+- `amount_minor` must equal the provider/merchant exact quote plus those explicit operator fee line items. Payjent fails closed when the total and breakdown mismatch.
+- Operator fees are not provider prices; do not bury them in the provider quote label.
+- This only records transparent allocation metadata today. Future settlement/payout is ledgered separately and is not automated by this setup step.
 
 Create a paid action with:
 
 - your agent id
 - the user's id
 - a concise request summary
-- exact quoted amount and currency
-- matching `cost_breakdown` that sums to the exact quoted amount
+- exact quoted amount and currency, including any explicit operator fee line items
+- matching `cost_breakdown` that sums to `amount_minor`
 - downstream provider metadata, such as `provider=pay_sh`
 - the target service or resource
 - method/body if applicable

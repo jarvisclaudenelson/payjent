@@ -34,8 +34,8 @@ def test_public_manifest_returns_safe_tool_discovery(client):
     assert "payjent.resume_paid_action" in names
     assert "payjent.complete_action" in names
     assert "payjent.list_capabilities" in names
-    assert "paid-before-execute" in data["security_invariants"]
-    assert "exact provider/merchant quoted price required; no placeholder/default/test amounts" in data["security_invariants"]
+    assert any("paid-before-execute" == item for item in data["security_invariants"])
+    assert any("no hidden/default fees" in item for item in data["security_invariants"])
     assert data["pricing_policy"]["rule"] == "exact_provider_quote_required"
     assert data["public_base_url"] == "https://payjent.com"
     manifest_text = json.dumps(data).lower()
@@ -46,7 +46,8 @@ def test_public_manifest_returns_safe_tool_discovery(client):
     assert "dashboard/platform connections" in manifest_text
     assert "exact provider/merchant quoted price" in manifest_text
     assert "do not use placeholder" in manifest_text
-    assert "if the exact price is unknown, do not create the paid action" in manifest_text
+    assert "operator fees must be explicit" in manifest_text or "explicit cost_breakdown line items" in manifest_text
+    assert "no default or hidden fees" in manifest_text or "no hidden/default fees" in manifest_text
     create_tool = next(tool for tool in data["tools"] if tool["name"] == "payjent.create_paid_action")
     pay_sh_tool = next(tool for tool in data["tools"] if tool["name"] == "payjent.create_pay_sh_premium_action")
     assert create_tool["pricing_policy"]["rule"] == "exact_provider_quote_required"
@@ -92,7 +93,7 @@ def test_agent_capabilities_returns_current_agent_without_secrets(client, operat
     assert "exact provider/merchant quoted price" in capabilities_text
     assert "do not use placeholder" in capabilities_text
     assert tools["payjent.create_paid_action"]["pricing_policy"]["unknown_price_behavior"] == "fail_closed_await_exact_provider_quote"
-    assert tools["payjent.create_pay_sh_premium_action"]["amount_requirements"]["cost_breakdown"] == "required; must match amount_minor"
+    assert tools["payjent.create_pay_sh_premium_action"]["amount_requirements"]["cost_breakdown"] == "required; must match amount_minor; operator fees must be separately labeled"
     _no_secret_words(data)
 
 

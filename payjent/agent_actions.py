@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .pricing import pricing_allocation_from_envelope
 from .models import FulfillmentEvent, Grant, PaymentSession, Quote
 
 
@@ -36,7 +37,7 @@ def create_paid_action_response(*, quote: Quote, payment_session: PaymentSession
         currency=quote.currency,
         payment_url=payment_session.checkout_url,
     )
-    return {
+    response = {
         "action_id": action_id_for_quote(quote),
         "quote_id": quote.id,
         "payment_session_id": payment_session.id,
@@ -48,6 +49,10 @@ def create_paid_action_response(*, quote: Quote, payment_session: PaymentSession
         "payment_prompt": prompt,
         "message": prompt["message"],
     }
+    allocation = pricing_allocation_from_envelope(quote.execution_envelope)
+    if allocation is not None:
+        response["pricing_allocation"] = allocation
+    return response
 
 
 def execution_envelope_for_action(*, quote: Quote, grant: Grant) -> dict[str, Any]:

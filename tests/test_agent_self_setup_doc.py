@@ -15,7 +15,7 @@ def test_agent_self_setup_markdown_is_agent_readable(client):
     assert "Payjent does not execute pay.sh for you" in text
     assert "exact provider/merchant quoted price" in text
     assert "amount_minor` and `cost_breakdown`" in text
-    assert "Do **not** use placeholder, default, demo, or test amounts" in text
+    assert "Do **not** use placeholder, default, demo, test, minimum/top-up, hidden, or silently injected amounts" in text
     assert "Payjent is awaiting an exact provider quote" in text
     assert "default `$1.00`" not in text
     assert "use `$1.00`" not in text

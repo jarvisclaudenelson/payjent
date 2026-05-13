@@ -59,6 +59,7 @@ from .models import (
     WebhookDeliveryAttempt,
 )
 from .money import quote_hash, validate_breakdown
+from .pricing import FEE_POLICY, attach_pricing_allocation
 from .providers.base import issue_receipt_and_grant
 from .providers.exa import ExaProviderError, ExaProviderNotConfigured, run_deep_search as run_exa_deep_search
 from .providers.elevenlabs import ElevenLabsProviderError, ElevenLabsProviderNotConfigured, run_text_to_speech as run_elevenlabs_text_to_speech
@@ -198,16 +199,17 @@ def docs_index():
 
 _EXACT_PRICING_POLICY = {
     "rule": "exact_provider_quote_required",
-    "description": "Before creating a Payjent paid action, obtain the exact provider/merchant quoted price and provide a matching cost_breakdown. Do not use placeholder, default, demo, test, minimum, or top-up amounts. If the exact price is unknown, do not create the paid action; tell the user Payjent is awaiting an exact provider quote.",
-    "amount_minor": "Must equal the exact provider/merchant quoted total in minor units.",
-    "cost_breakdown": "Required and must sum to amount_minor using the same exact provider/merchant quote.",
+    "description": "Before creating a Payjent paid action, obtain the exact provider/merchant quoted price and provide a matching cost_breakdown. Optional operator fees are allowed only as explicit labeled line items. Do not use placeholder, default, demo, test, minimum, top-up, hidden, or silently injected amounts. If the exact price is unknown, do not create the paid action; tell the user Payjent is awaiting an exact provider quote.",
+    "amount_minor": "Must equal the exact provider/merchant quoted total plus any explicit operator fee line items, in minor units.",
+    "cost_breakdown": "Required and must sum to amount_minor; operator fees must be separate explicit line items and are not provider prices.",
     "unknown_price_behavior": "fail_closed_await_exact_provider_quote",
-    "forbidden_placeholders": ["$1.00", "100 minor units", "default amount", "test amount", "minimum", "top-up", "stripe minimum"],
+    "forbidden_placeholders": ["$1.00", "100 minor units", "default amount", "test amount", "minimum", "top-up", "stripe minimum", "hidden fee"],
+    "operator_fee_policy": FEE_POLICY,
 }
 
 
 def _tool_descriptors(*, x402_available: bool | None = None) -> list[dict]:
-    create_amount_requirements = {"amount_minor": "exact provider/merchant quoted total only", "cost_breakdown": "required; must match amount_minor", "fail_closed_if_unknown": True}
+    create_amount_requirements = {"amount_minor": "exact provider/merchant quoted total plus explicit operator fee line items only", "cost_breakdown": "required; must match amount_minor; operator fees must be separately labeled", "fail_closed_if_unknown": True, "no_hidden_or_default_fees": True}
     tools = [
         {"name": "payjent.list_capabilities", "endpoint": "/api/v1/agent-capabilities", "method": "GET", "description": "List installed agent-specific paid tool capabilities."},
         {"name": "payjent.create_paid_action", "endpoint": "/api/v1/agent-actions", "method": "POST", "description": "Create a payment-gated action only after obtaining an exact provider/merchant quote; discovery is free, execution resumes only after payment.", "pricing_policy": _EXACT_PRICING_POLICY, "amount_requirements": create_amount_requirements},
@@ -304,6 +306,7 @@ def _premium_tool_discovery(base_url: str, *, x402_available: bool | None = None
             "If Payjent is installed for this agent, call authenticated GET /api/v1/agent-capabilities using the agent's private Payjent credential.",
             "List premium presets with GET /api/v1/premium-action-presets.",
             "Obtain the exact provider quote for the requested provider action before creating any Payjent action.",
+            "Optional operator fees must be explicit cost_breakdown line items (for example, 'agent operator fee'); never hide fees in provider prices or add default fees.",
             "POST /api/v1/premium-action-presets/{preset_id}/actions with exact amount_minor, matching cost_breakdown, request binding, and required input fields.",
             "Send the returned payment/status link to the user; do not expose grants or payment tokens.",
             "Poll/resume the action after payment using authenticated status/consume endpoints and the original request binding.",
@@ -373,7 +376,7 @@ def _discovery_manifest(base_url: str) -> dict:
         "security_invariants": [
             "request-bound approvals and grants",
             "paid-before-execute",
-            "exact provider/merchant quoted price required; no placeholder/default/test amounts",
+            "exact provider/merchant quoted price required; optional operator fees only as explicit separate cost_breakdown line items; no hidden/default fees",
             "no raw grants, credentials, or payment tokens in chat",
             "exact request resume",
         ],
@@ -555,7 +558,7 @@ def _create_quote_for_toolbox(payload: ToolboxQuoteCreate, tool: dict[str, Any],
         "amount_minor": toolbox_quote["amount_minor"],
         "currency": toolbox_quote["currency"].upper(),
         "cost_breakdown": cost_breakdown,
-        "execution_envelope": _toolbox_execution_envelope(tool, toolbox_quote, payload.arguments),
+        "execution_envelope": attach_pricing_allocation(_toolbox_execution_envelope(tool, toolbox_quote, payload.arguments), cost_breakdown),
         "callback_url": None,
     }
     q = Quote(id=f"quote_{uuid4().hex}", quote_hash=quote_hash(canonical), **canonical)
@@ -2247,6 +2250,7 @@ def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), 
         "request_summary": payload.request_summary,
         "execution_envelope": payload.execution_envelope,
     })
+    cost_breakdown = [i.model_dump() for i in payload.cost_breakdown]
     canonical = {
         "bot_id": payload.bot_id,
         "external_user_id": payload.external_user_id,
@@ -2254,8 +2258,8 @@ def create_quote(payload: QuoteCreate, session: Session = Depends(get_session), 
         "request_hash": request_hash,
         "amount_minor": payload.amount_minor,
         "currency": payload.currency.upper(),
-        "cost_breakdown": [i.model_dump() for i in payload.cost_breakdown],
-        "execution_envelope": payload.execution_envelope,
+        "cost_breakdown": cost_breakdown,
+        "execution_envelope": attach_pricing_allocation(payload.execution_envelope, cost_breakdown),
         "callback_url": _validate_callback_url(getattr(payload, "callback_url", None), settings),
     }
     q = Quote(id=f"quote_{uuid4().hex}", quote_hash=quote_hash(canonical), **canonical)

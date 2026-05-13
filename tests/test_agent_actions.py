@@ -1,6 +1,6 @@
 from sqlmodel import Session, select
 
-from payjent.models import PaymentSession
+from payjent.models import PaymentSession, Quote
 
 
 def _create_action(client, quote_payload, bot_headers):
@@ -67,6 +67,53 @@ def test_create_agent_action_returns_payment_prompt_and_action_id(client, quote_
     assert data["request_hash"] == quote_payload["request_hash"]
     assert data["payment_prompt"]["action_id"] == data["action_id"]
     assert "Payment required" in data["message"]
+
+
+def test_agent_action_with_explicit_operator_fee_records_allocation(client, quote_payload, bot_headers, engine):
+    payload = dict(quote_payload)
+    payload["amount_minor"] = 1200
+    payload["cost_breakdown"] = [
+        {"label": "provider exact quote", "amount_minor": 1000},
+        {"label": "agent operator fee", "amount_minor": 200},
+    ]
+    r = _create_action(client, payload, bot_headers)
+    assert r.status_code == 200
+    allocation = r.json()["pricing_allocation"]
+    assert allocation["provider_merchant_subtotal_minor"] == 1000
+    assert allocation["operator_fee_subtotal_minor"] == 200
+    assert allocation["total_minor"] == 1200
+    with Session(engine) as session:
+        q = session.get(Quote, r.json()["quote_id"])
+        stored = q.execution_envelope["payjent_pricing"]["pricing_allocation"]
+        assert stored["operator_fee_subtotal_minor"] == 200
+        assert stored["policy"]["no_hidden_or_default_fees"] is True
+
+
+def test_cost_breakdown_mismatch_still_fails_closed(client, quote_payload, bot_headers):
+    payload = dict(quote_payload)
+    payload["amount_minor"] = 1200
+    payload["cost_breakdown"] = [
+        {"label": "provider exact quote", "amount_minor": 1000},
+        {"label": "agent operator fee", "amount_minor": 100},
+    ]
+    r = _create_action(client, payload, bot_headers)
+    assert r.status_code == 422
+    assert "cost_breakdown" in r.text
+
+
+def test_unlabeled_extra_is_not_operator_fee(client, quote_payload, bot_headers):
+    payload = dict(quote_payload)
+    payload["amount_minor"] = 1200
+    payload["cost_breakdown"] = [
+        {"label": "provider exact quote", "amount_minor": 1000},
+        {"label": "expedite", "amount_minor": 200},
+    ]
+    r = _create_action(client, payload, bot_headers)
+    assert r.status_code == 200
+    allocation = r.json()["pricing_allocation"]
+    assert allocation["operator_fee_subtotal_minor"] == 0
+    assert allocation["other_subtotal_minor"] == 200
+    assert allocation["line_items"][1]["category"] == "other"
 
 
 def test_generic_premium_action_endpoint_creates_non_pay_sh_provider_action(client, bot_headers, operator_headers):
@@ -307,7 +354,10 @@ def test_paid_agent_action_consumes_once_and_binds_request_hash(client, quote_pa
     assert ok.status_code == 200
     envelope = ok.json()
     assert envelope["action_id"] == action["action_id"]
-    assert envelope["execution_envelope"] == quote_payload["execution_envelope"]
+    returned_envelope = envelope["execution_envelope"]
+    for key, value in quote_payload["execution_envelope"].items():
+        assert returned_envelope[key] == value
+    assert returned_envelope["payjent_pricing"]["pricing_allocation"]["total_minor"] == quote_payload["amount_minor"]
     assert envelope["request_hash"] == quote_payload["request_hash"]
 
     replay = client.post(
