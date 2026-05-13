@@ -842,7 +842,7 @@ def test_decal_success_status_redirect_still_renders_when_unpaid(client, quote_p
 
     assert response.status_code == 200, response.text
     assert "Awaiting payment" in response.text
-    assert "checkout_created" in response.text
+    assert "checkout_created" not in response.text
     assert "Access has not been issued yet" in response.text
     assert client.get(f"/api/v1/payment-sessions/{ps['id']}").json()["status"] == "checkout_created"
     with Session(engine) as session:

@@ -998,12 +998,31 @@ def status_page(payment_session_id: str, checkout: str | None = None, session: S
         except Exception:
             session.rollback()
             ps, q, grant, fulfillment = _find_session_bundle(session, payment_session_id)
-    fulfillment_items = "".join(f"<li><span class='check'>•</span><span>{_html_escape(ev.status)} <code>{_html_escape(ev.id)}</code></span></li>" for ev in fulfillment) or "<li><span class='check'>•</span><span>No fulfillment has been recorded yet.</span></li>"
-    grant_state = "Access has not been issued yet. Your agent is still waiting for payment confirmation."
+    def _public_status_label(raw: str) -> str:
+        normalized = (raw or "").lower()
+        labels = {
+            "quoted": "Quoted — awaiting checkout",
+            "checkout_created": "Awaiting payment",
+            "pending": "Awaiting payment",
+            "requires_payment": "Awaiting payment",
+            "paid": "Payment complete",
+            "executing": "Action in progress",
+            "resumed": "Agent resumed — action in progress",
+            "fulfilled": "Fulfilled — action succeeded",
+            "succeeded": "Succeeded — action fulfilled",
+            "failed": "Action needs attention",
+            "refund_pending": "Refund requested — pending",
+            "refund_requested": "Refund requested — pending",
+            "refunded": "Refunded",
+        }
+        return labels.get(normalized, normalized.replace("_", " ").title() or "Status unavailable")
+
+    fulfillment_items = "".join(f"<li><span class='check'>•</span><span>{_html_escape(_public_status_label(ev.status))}</span></li>" for ev in fulfillment) or "<li><span class='check'>•</span><span>No fulfillment has been recorded yet.</span></li>"
+    grant_state = "Access has not been issued yet. Your agent is still awaiting payment confirmation."
     if grant:
-        grant_state = "Access granted. Your agent can resume automatically."
+        grant_state = "Access granted. Return to your agent so it can resume the original paid action."
         if grant.consumed_at is not None:
-            grant_state = "Access was used. Your agent has already resumed this action."
+            grant_state = "Access used. Agent resumed the stored action and may still be working."
     link_instructions = ""
     if ps.provider == "link" and ps.status != "paid":
         link_instructions = f"""
@@ -1015,15 +1034,37 @@ def status_page(payment_session_id: str, checkout: str | None = None, session: S
         <p>Payjent will return a Link approval URL and polling hint. Approval does not mark this session paid or issue a grant.</p>
       </section>
         """
-    has_failure = q.status == "failed" or any(ev.status == "failed" for ev in fulfillment)
-    has_refund = ps.status == "refunded" or q.status == "refunded" or any(ev.status == "refunded" for ev in fulfillment)
-    checkout_label = "Refund requested" if has_refund else ("Action needs attention" if has_failure else ("Payment complete" if ps.status == "paid" else "Awaiting payment"))
+    fulfillment_statuses = {(ev.status or "").lower() for ev in fulfillment}
+    has_failure = q.status == "failed" or "failed" in fulfillment_statuses
+    has_refund = (
+        ps.status in {"refund_pending", "refund_requested", "refunded"}
+        or q.status in {"refund_pending", "refund_requested", "refunded"}
+        or bool(fulfillment_statuses & {"refund_pending", "refund_requested", "refunded"})
+    )
+    has_success = q.status in {"fulfilled", "succeeded"} or bool(fulfillment_statuses & {"fulfilled", "succeeded"})
+    action_in_progress = bool(grant and grant.consumed_at is not None and not has_success and not has_failure and not has_refund)
     if has_refund:
-        hero_copy = "The downstream action reported a failure, and a refund has been requested through Payjent."
+        checkout_label = "Refund requested — pending" if ps.status != "refunded" and q.status != "refunded" and "refunded" not in fulfillment_statuses else "Refunded"
+    elif has_failure:
+        checkout_label = "Action needs attention"
+    elif has_success:
+        checkout_label = "Fulfilled — action succeeded"
+    elif action_in_progress:
+        checkout_label = "Agent resumed — action in progress"
+    else:
+        checkout_label = "Payment complete" if ps.status == "paid" else "Awaiting payment"
+    if has_refund:
+        hero_copy = "The downstream action reported a failure or refund state, and a refund has been requested through Payjent."
     elif has_failure:
         hero_copy = "The payment checkpoint succeeded, but the downstream action reported a failure. Payjent will request a refund by default for paid failed actions."
+    elif has_success:
+        hero_copy = "The agent reported the paid action as fulfilled. Payjent records this status for the receipt."
+    elif action_in_progress:
+        hero_copy = "Your agent has used the paid access and resumed the stored action. Return to the agent for progress and results."
+    elif ps.status == "paid":
+        hero_copy = "Payment is complete. Return to your agent so it can resume the exact paid request."
     else:
-        hero_copy = "Payjent has recorded the payment checkpoint. Your agent can resume the exact request once the grant is available."
+        hero_copy = "Checkout is pending. Complete payment before returning to your agent to resume this paid action."
     access_copy = _html_escape(grant_state)
     resume_prompt = f"Payment is complete in Payjent for session {ps.id}. Please resume the paid action now using the original request."
     if grant and grant.consumed_at is not None:
@@ -1044,7 +1085,16 @@ def status_page(payment_session_id: str, checkout: str | None = None, session: S
     primary_action = ""
     if ps.status != "paid":
         primary_action = f"<a class='btn' href='/pay/{_html_escape(ps.id)}'>Review approval</a>"
-    return f"""<!doctype html><html><head><title>Payjent status · {_html_escape(ps.status)}</title>{_STATUS_PAGE_CSS}</head><body><main><div class='brand'><div class='logo'><span class='mark'>P</span><span>Payjent</span></div><span class='domain'>payjent.com</span></div><div class='shell'><section class='hero'><div class='eyebrow'>Paid agent action</div><h1>{_html_escape(checkout_label)}</h1><p class='muted'>{_html_escape(hero_copy)}</p>{resume_section}<div class='actions'>{primary_action}<a class='btn secondary' href='https://payjent.com'>Payjent.com</a></div></section><section class='grid'><div class='card'><h2>Payment</h2><span class='status-pill'><span class='dot'></span>{_html_escape(ps.status)}</span><div class='kv'><div class='row'><div class='label'>Session</div><div class='value'><code>{_html_escape(ps.id)}</code></div></div><div class='row'><div class='label'>Quote</div><div class='value'><code>{_html_escape(q.id)}</code> <span class='fine'>({_html_escape(q.status)})</span></div></div><div class='row'><div class='label'>Amount</div><div class='value'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div></div></div></div><div class='card'><h2>Access</h2><p>{access_copy}</p><ul class='timeline'><li><span class='check'>✓</span><span>Grant details stay hidden on this public page.</span></li><li><span class='check'>✓</span><span>The agent resumes only the stored request hash.</span></li></ul></div></section>{link_instructions}<section class='card'><h2>Fulfillment</h2><ul class='timeline'>{fulfillment_items}</ul><p class='fine'>If the downstream action fails after payment, Payjent requests a refund by default unless the agent explicitly opts out.</p></section></div></main></body></html>"""
+    payment_label = _public_status_label(ps.status)
+    payment_state_copy = payment_label
+    quote_label = _public_status_label(q.status)
+    lifecycle_items = f"""
+      <li><span class='check'>✓</span><span>Quoted — this action has a priced approval record.</span></li>
+      <li><span class='check'>•</span><span>{_html_escape('Payment complete' if ps.status == 'paid' else 'Awaiting payment')}</span></li>
+      <li><span class='check'>•</span><span>{_html_escape('Agent resumed — action in progress' if grant and grant.consumed_at is not None else ('Access granted — return to your agent' if grant else 'Access pending until payment completes'))}</span></li>
+      <li><span class='check'>•</span><span>{_html_escape(checkout_label)}</span></li>
+    """
+    return f"""<!doctype html><html><head><title>Payjent status · {_html_escape(payment_label)}</title>{_STATUS_PAGE_CSS}</head><body><main><div class='brand'><div class='logo'><span class='mark'>P</span><span>Payjent</span></div><span class='domain'>payjent.com</span></div><div class='shell'><section class='hero'><div class='eyebrow'>Paid agent action</div><h1>{_html_escape(checkout_label)}</h1><p class='muted'>{_html_escape(hero_copy)}</p>{resume_section}<div class='actions'>{primary_action}<a class='btn secondary' href='https://payjent.com'>Payjent.com</a></div></section><section class='grid'><div class='card'><h2>Payment</h2><span class='status-pill'><span class='dot'></span>{_html_escape(payment_state_copy)}</span><div class='kv'><div class='row'><div class='label'>Session</div><div class='value'><code>{_html_escape(ps.id)}</code></div></div><div class='row'><div class='label'>Quote</div><div class='value'><code>{_html_escape(q.id)}</code> <span class='fine'>({_html_escape(quote_label)})</span></div></div><div class='row'><div class='label'>Amount</div><div class='value'>{_html_escape(_format_money(q.amount_minor, q.currency))}</div></div></div></div><div class='card'><h2>Access</h2><p>{access_copy}</p><ul class='timeline'><li><span class='check'>✓</span><span>Grant details stay hidden on this public page.</span></li><li><span class='check'>✓</span><span>Return to your agent; Payjent records checkpoints and does not run arbitrary provider actions from this page.</span></li></ul></div></section>{link_instructions}<section class='card'><h2>Lifecycle</h2><ul class='timeline'>{lifecycle_items}</ul></section><section class='card'><h2>Fulfillment</h2><ul class='timeline'>{fulfillment_items}</ul><p class='fine'>If the downstream action fails after payment, Payjent requests a refund by default unless the agent explicitly opts out.</p></section></div></main></body></html>"""
 
 
 def _rail_to_read(r: RailConnection) -> RailConnectionRead:

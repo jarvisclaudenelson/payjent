@@ -1,8 +1,10 @@
 import re
 
 import httpx
+from sqlmodel import Session
 
 from examples import discord_bot_flow
+from payjent.models import PaymentSession, Quote
 from payjent.config import get_settings
 from payjent.sdk import PayjentClient
 
@@ -166,7 +168,78 @@ def test_status_pages_show_payment_access_and_fulfillment_without_grant_id(clien
     assert "paid" in status.text
     assert "Access" in status.text
     assert paid["grant"]["id"] not in status.text
-    assert "fulfilled" in status.text
+    assert "Fulfilled" in status.text
+    assert "Agent resumed" in status.text
+
+
+def _assert_public_status_page_safe(html, paid=None):
+    forbidden = [
+        "payment_token",
+        "provider_session_id",
+        "callback payload",
+        "request_hash",
+        "idempotency",
+        "api_key",
+        "DATABASE_URL",
+        "Traceback",
+        "true",
+        "false",
+    ]
+    for token in forbidden:
+        assert token not in html
+    assert not re.search(r"grant_[A-Za-z0-9_-]+", html)
+    assert not re.search(r"eyJ[A-Za-z0-9_-]+", html)
+    if paid is not None:
+        assert paid["grant"]["id"] not in html
+
+
+def test_status_page_lifecycle_labels_failure_refund_and_public_safety(client, quote_payload, bot_headers, operator_headers, engine):
+    quote, payment_session = _create_checkout(client, quote_payload, bot_headers)
+
+    awaiting = client.get(f"/status/{payment_session['id']}")
+    assert awaiting.status_code == 200
+    assert "Awaiting payment" in awaiting.text
+    assert "Quoted" in awaiting.text
+    _assert_public_status_page_safe(awaiting.text)
+
+    paid = client.post(f"/api/v1/payment-sessions/{payment_session['id']}/mock-pay", headers=operator_headers).json()
+    complete = client.get(f"/status/{payment_session['id']}")
+    assert "Payment complete" in complete.text
+    assert "Copy prompt" in complete.text
+    assert f"session {payment_session['id']}" in complete.text
+    assert "Return to your agent" in complete.text or "Tell your agent to resume" in complete.text
+    _assert_public_status_page_safe(complete.text, paid)
+
+    client.post(f"/api/v1/grants/{paid['grant']['id']}/consume", headers=bot_headers, json={"bot_id": quote_payload["bot_id"]})
+    in_progress = client.get(f"/status/{payment_session['id']}")
+    assert "Agent resumed" in in_progress.text
+    assert "action in progress" in in_progress.text
+    _assert_public_status_page_safe(in_progress.text, paid)
+
+    client.post(f"/api/v1/quotes/{quote['id']}/fulfillment", headers=bot_headers, json={"status": "fulfilled", "metadata": {"message_id": "m2"}})
+    succeeded = client.get(f"/status/{payment_session['id']}")
+    assert "Fulfilled" in succeeded.text or "Succeeded" in succeeded.text
+    assert "action succeeded" in succeeded.text or "action fulfilled" in succeeded.text
+    _assert_public_status_page_safe(succeeded.text, paid)
+
+    client.post(f"/api/v1/quotes/{quote['id']}/fulfillment", headers=bot_headers, json={"status": "failed", "metadata": {"reason": "expected-test-failure"}})
+    failed = client.get(f"/status/{payment_session['id']}")
+    assert "Action needs attention" in failed.text
+    _assert_public_status_page_safe(failed.text, paid)
+
+    with Session(engine) as session:
+        ps = session.get(PaymentSession, payment_session["id"])
+        q = session.get(Quote, quote["id"])
+        ps.status = "refund_pending"
+        q.status = "refund_requested"
+        session.add(ps)
+        session.add(q)
+        session.commit()
+
+    refund = client.get(f"/status/{payment_session['id']}")
+    assert "Refund requested" in refund.text
+    assert "pending" in refund.text.lower()
+    _assert_public_status_page_safe(refund.text, paid)
 
 
 def test_public_pay_and_status_hide_paid_payment_token_but_bot_polling_returns_it(client, quote_payload, bot_headers, operator_headers):
