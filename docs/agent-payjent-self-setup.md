@@ -124,11 +124,13 @@ For pay.sh-style actions, the action should produce an execution envelope with:
 
 ### Step 3: Send the payment prompt to the user
 
-Send only the returned Payjent `payment_prompt`/`payment_url` and a short explanation. If Payjent is configured with Stripe Checkout, the URL may be a Stripe-hosted checkout link or a Payjent page with a “Continue to secure payment” button; send it as returned and do not modify it.
+Send only the returned Payjent `payment_prompt`/`payment_url`, the public status link `/status/{payment_session_id}`, and a short explanation. If Payjent is configured with Stripe Checkout, the URL may be a Stripe-hosted checkout link or a Payjent page with a “Continue to secure payment” button; send it as returned and do not modify it.
 
 Good user message:
 
-> Payment is required for this premium action. Pay here: `<Payjent payment link>`. After payment, I will resume with the verified fulfillment handoff for the requested premium action.
+> Payment is required for this premium action. Pay here: `<Payjent payment link>`. You can track public status here: `<Payjent public status link>`. After payment, return to this chat and paste: `I paid for Payjent session <payment_session_id>; please check status and resume the exact approved action.`
+
+After the user returns, poll/check Payjent with your private credential, verify the paid status and request binding, then execute the downstream provider action externally in your own runtime unless the action explicitly uses Payjent's verified fulfillment callback.
 
 Do not send grant ids. Do not ask the user to paste a payment token.
 

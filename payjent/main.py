@@ -4,6 +4,7 @@ import hmac
 import ipaddress
 from secrets import token_urlsafe
 import socket
+import time
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlparse
 from uuid import uuid4
@@ -780,6 +781,34 @@ def _managed_provider_readiness(settings: Settings) -> dict[str, bool]:
     }
 
 
+def _premium_preset_readiness(settings: Settings) -> list[dict[str, Any]]:
+    managed = _managed_provider_readiness(settings)
+    provider_ready = {
+        "exa": managed.get("exa.deep_search", False),
+        "firecrawl": managed.get("firecrawl.scrape", False),
+        "elevenlabs": managed.get("elevenlabs.text_to_speech", False),
+        "fal": managed.get("fal.image.generate", False),
+        # Agent-side execution presets do not require Payjent to store provider secrets.
+        "replicate": True,
+        "browserbase": True,
+        "perplexity": True,
+    }
+    rows = []
+    for preset in list_presets():
+        provider = str(preset.get("provider") or "unknown")
+        ready = bool(provider_ready.get(provider, True))
+        rows.append({
+            "id": preset.get("id"),
+            "name": preset.get("name"),
+            "provider": provider,
+            "ready": ready,
+            "hint": "Ready for Payjent-managed execution." if ready and provider in {"exa", "firecrawl", "elevenlabs", "fal"} else (
+                "Agent must connect provider credentials in its private runtime/settings before executing after payment."
+            ),
+        })
+    return rows
+
+
 def _database_mode(database_url: str | None) -> str:
     normalized = (database_url or "").strip().lower()
     if normalized.startswith("sqlite:"):
@@ -976,9 +1005,19 @@ def status_index():
 def healthz(session: Session = Depends(get_session)):
     bind = session.get_bind()
     backend = bind.dialect.name
-    try:
-        session.exec(text("select 1")).one()
-    except Exception:
+    ok = False
+    for attempt in range(3):
+        try:
+            session.exec(text("select 1")).one()
+            ok = True
+            break
+        except Exception:
+            rollback = getattr(session, "rollback", None)
+            if callable(rollback):
+                rollback()
+            if attempt < 2:
+                time.sleep(0.05 * (attempt + 1))
+    if not ok:
         return JSONResponse(
             status_code=503,
             content={"status": "unhealthy", "database": {"ok": False, "backend": backend}},
@@ -1668,7 +1707,7 @@ def _quote_lifecycle_stage(session: Session, q: Quote) -> tuple[str, str, Paymen
     ps_status = (ps.status if ps else "").lower()
     fulfillment_status = (fulfillment.status if fulfillment else "").lower()
     execution_status = (execution.status if execution else "").lower()
-    if q_status in {"failed", "failure", "refunded", "canceled", "cancelled"} or fulfillment_status in {"failed", "failure"} or execution_status in {"failed", "failure", "error"}:
+    if q_status in {"failed", "failure", "refunded", "refund_requested", "refund_pending", "canceled", "cancelled"} or ps_status in {"refund_pending", "refund_requested", "refunded"} or fulfillment_status in {"failed", "failure", "refund_requested", "refunded"} or execution_status in {"failed", "failure", "error"}:
         return "failed", "Failed or refund path active; review fulfillment/error events before retrying.", ps, grant
     if q_status in {"fulfilled", "succeeded", "success"} or fulfillment_status in {"fulfilled", "succeeded", "success"} or execution_status in {"succeeded", "success"}:
         return "succeeded", "Fulfillment evidence recorded.", ps, grant
@@ -1687,8 +1726,17 @@ def _lifecycle_counts_and_rows(session: Session, quotes: list[Quote]) -> tuple[d
     for q in quotes:
         stage, hint, ps, grant = _quote_lifecycle_stage(session, q)
         counts[stage] += 1
-        rows.append(f"<tr><td><code>{_html_escape(q.id)}</code><br><span class='muted'>{_html_escape(q.request_summary)}</span></td><td><span class='pill'>{_html_escape(stage)}</span></td><td>{_html_escape(_format_money(q.amount_minor, q.currency))}</td><td>{_html_escape(ps.provider if ps else 'none')}<br><span class='muted'>{_html_escape(ps.status if ps else 'no checkout')}</span></td><td>{_html_escape(_grant_state(grant))}</td><td><span class='muted'>{_html_escape(hint)}</span></td></tr>")
-    return counts, "".join(rows) or "<tr><td colspan='6'>No paid actions yet.</td></tr>"
+        status_link = f"<a href='/status/{_html_escape(ps.id)}'>Public status</a>" if ps else ""
+        refund_form = ""
+        if stage == "failed" and ps:
+            if (ps.status or "").lower() in {"refund_pending", "refund_requested", "refunded"} or (q.status or "").lower() in {"refund_pending", "refund_requested", "refunded"}:
+                refund_form = "<span class='pill warn'>Refund requested</span>"
+            else:
+                refund_form = f"<form method='post' action='/dashboard/payment-sessions/{_html_escape(ps.id)}/refund'><button type='submit'>Request refund</button></form>"
+        support = "<span class='pill warn'>Needs support</span>" if stage == "failed" else ""
+        actions = "<br>".join(part for part in [support, refund_form, status_link] if part) or "<span class='muted'>—</span>"
+        rows.append(f"<tr><td><code>{_html_escape(q.id)}</code><br><span class='muted'>{_html_escape(q.request_summary)}</span></td><td><span class='pill'>{_html_escape(stage)}</span></td><td>{_html_escape(_format_money(q.amount_minor, q.currency))}</td><td>{_html_escape(ps.provider if ps else 'none')}<br><span class='muted'>{_html_escape(ps.status if ps else 'no checkout')}</span></td><td>{_html_escape(_grant_state(grant))}</td><td><span class='muted'>{_html_escape(hint)}</span></td><td>{actions}</td></tr>")
+    return counts, "".join(rows) or "<tr><td colspan='7'>No paid actions yet.</td></tr>"
 
 
 def _lifecycle_rows(session: Session, quotes: list[Quote]) -> str:
@@ -1698,7 +1746,15 @@ def _lifecycle_rows(session: Session, quotes: list[Quote]) -> str:
 def _lifecycle_summary_html(session: Session, quotes: list[Quote], title: str = "Action status") -> str:
     counts, rows = _lifecycle_counts_and_rows(session, quotes)
     count_html = "".join(f"<div class='kpi'><div class='lbl'>{_html_escape(stage)}</div><div class='stat'>{counts[stage]}</div></div>" for stage in ["quoted", "checkout", "paid", "executing", "succeeded", "failed"])
-    return f"<div class='card'><h3>{_html_escape(title)}</h3><p class='muted'>User-friendly paid action stages: quoted → checkout → paid → executing → succeeded/failed. Hints identify likely stuck states without exposing payment tokens, grant IDs, or secrets.</p><div class='kpi-row'>{count_html}</div><table><thead><tr><th>Action</th><th>Stage</th><th>Amount</th><th>Checkout</th><th>Grant</th><th>Status hint</th></tr></thead><tbody>{rows}</tbody></table></div>"
+    return f"<div class='card'><h3>{_html_escape(title)}</h3><p class='muted'>User-friendly paid action stages: quoted → checkout → paid → executing → succeeded/failed. Hints identify likely stuck states without exposing payment tokens, grant IDs, or secrets.</p><div class='kpi-row'>{count_html}</div><table><thead><tr><th>Action</th><th>Stage</th><th>Amount</th><th>Checkout</th><th>Grant</th><th>Status hint</th><th>Support</th></tr></thead><tbody>{rows}</tbody></table></div>"
+
+
+def _premium_preset_readiness_html(settings: Settings) -> str:
+    cards = "".join(
+        f"<div class='event' data-preset-id='{_html_escape(row['id'])}'><b>{_html_escape(row['name'])}</b> · {_html_escape(row['provider'])} <span class='pill {'ok' if row['ready'] else 'warn'}'>{'ready' if row['ready'] else 'needs config'}</span><br><span class='muted'>{_html_escape(row['hint'])}</span></div>"
+        for row in _premium_preset_readiness(settings)
+    )
+    return f"<section class='card'><div class='eyebrow'>Execution readiness</div><h2>Premium preset readiness</h2><p class='muted'>Safe readiness hints for FAL, Replicate, Browserbase, ElevenLabs, Exa, and other premium presets. No secret names, values, payment tokens, or provider session IDs are shown.</p>{cards}</section>"
 
 
 def _launch_checklist_html(agent_count: int, active_payment_ready: bool) -> str:
@@ -1831,8 +1887,9 @@ def dashboard(request: Request, session: Session = Depends(get_session), setting
     spend_events = "".join(f"<div class='event' data-spend-id='{_html_escape(s.id)}'><b>{_html_escape(s.tool)} → {_html_escape(s.vendor)}</b> · {_html_escape(_format_money(s.amount_minor, s.currency))}<br><span class='muted'>{_html_escape(s.reason or 'No reason supplied by agent.')}</span></div>" for s in spends[:6]) or "<div class='event'><b>No downstream spend yet</b><br><span class='muted'>Reason-backed spend ledger entries appear only after an agent consumes a grant and requests spend authorization.</span></div>"
     register_form = """<form method='post' action='/dashboard/agents/register'><label>Agent name</label><input name='name' placeholder='Research assistant' required><label>Platform</label><input name='platform' placeholder='discord, web, slack, cli' required><label>Bot ID</label><input name='bot_id' placeholder='stable-agent-id' required><label>Default currency</label><input name='default_currency' value='USD' maxlength='3' required><label>Callback URL (optional)</label><input name='callback_url' type='url' placeholder='https://agent.example/callback'><button type='submit'>Register agent and create install link</button></form>"""
     launch_checklist = _launch_checklist_html(len(agents), bool(_payment_readiness(settings).get("active_payment_ready")))
+    preset_readiness = _premium_preset_readiness_html(settings)
     lifecycle_overview = _lifecycle_summary_html(session, quotes[:10], "Action status overview")
-    return f"""<!doctype html><html><head><title>Payjent dashboard</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a class='brand' href='/'><span class='brand-mark'>P</span><span>payjent</span></a><span class='muted'>Signed in as <b>{_html_escape(account.email)}</b></span><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><div class='eyebrow'>Payment operations</div><h1>Agent <em>command</em> center</h1><p class='muted'>Register agents, generate one-time Agent Install Links, watch paid action requests, and keep reasoning-backed spend records without exposing raw bot keys or payment tokens.</p><div class='cta-banner'><div><span class='eyebrow'>Primary action</span><h2>Register an <em>agent.</em></h2><p>Create a short-lived Agent Install Link for one agent identity. The raw credential is returned only to the agent during one successful redemption.</p><p><a class='btn accent' href='#register-agent'>Register your agent →</a><a class='btn dark' href='/docs/agent-payjent-self-setup.md'>Read setup guide</a></p></div><div class='runbook mono'><div><b>1</b> Sign in to dashboard</div><div><b>2</b> Register stable bot_id and generate install link</div><div><b>3</b> Agent redeems link once</div><div><b>4</b> Send setup guide to agent</div><div><b>5</b> Configure Stripe Connect, x402, and integration snippets on agent detail</div><div><b>6</b> Confirm approval gate resumes exact action</div></div></div></section><div class='kpi-row'><div class='kpi'><div class='lbl'>Agents</div><div class='stat'>{len(agents)}</div><p class='fine'>Registered identities</p></div><div class='kpi'><div class='lbl'>Paid action volume</div><div class='stat small'>{_format_money_totals(paid_totals)}</div><p class='fine'>Grouped by currency from recent paid / fulfilled quotes.</p></div><div class='kpi'><div class='lbl'>Downstream spend</div><div class='stat small'>{_format_money_totals(spend_totals)}</div><p class='fine'>Authorized or captured ledger</p></div><div class='kpi'><div class='lbl'>Recent requests</div><div class='stat'>{len(quotes)}</div><p class='fine'>Latest action quotes</p></div></div>{launch_checklist}{lifecycle_overview}<div class='dash-layout'><section class='panel'><div class='ph'><h3>Agent-owner quickstart</h3><span class='sub'>latest quotes</span></div><div class='pb flat'>{interactions}</div></section><aside class='panel' id='register-agent'><div class='ph'><h3>Register agent</h3><span class='sub'>install link generated</span></div><div class='pb'><p class='muted'>Use this authenticated form. Payjent will generate a short-lived, single-use Agent Install Link. The raw credential is returned only when the agent redeems that link once.</p>{register_form}<p class='fine'>Do not paste raw credentials in chat; share only the install link with the target agent.</p></div></aside><section class='panel'><div class='ph'><h3>Registered agents</h3><span class='sub'>{len(agents)} total</span></div><div class='pb grid compact'>{cards}</div>{deleted_section}</section><aside class='panel'><div class='ph'><h3>Policy defaults</h3><span class='sub'>workspace</span></div><div class='pb'>{_policy_defaults_html()}</div></aside><section class='panel'><div class='ph'><h3>Spend reasoning trail</h3><span class='sub'>reason → vendor → amount</span></div><div class='pb flat'>{spend_events}</div></section><section class='panel wide'><div class='ph'><h3>Paid-action lifecycle ledger</h3><span class='sub'>quote → payment → grant → fulfillment</span></div><div class='pb'><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{_lifecycle_rows(session, quotes)}</tbody></table></div></section></div></main></body></html>"""
+    return f"""<!doctype html><html><head><title>Payjent dashboard</title>{_DASHBOARD_CSS}</head><body><main><div class='topbar'><a class='brand' href='/'><span class='brand-mark'>P</span><span>payjent</span></a><span class='muted'>Signed in as <b>{_html_escape(account.email)}</b></span><form method='post' action='/auth/logout'><button class='logout' type='submit'>Log out</button></form></div><section class='hero'><div class='eyebrow'>Payment operations</div><h1>Agent <em>command</em> center</h1><p class='muted'>Register agents, generate one-time Agent Install Links, watch paid action requests, and keep reasoning-backed spend records without exposing raw bot keys or payment tokens.</p><div class='cta-banner'><div><span class='eyebrow'>Primary action</span><h2>Register an <em>agent.</em></h2><p>Create a short-lived Agent Install Link for one agent identity. The raw credential is returned only to the agent during one successful redemption.</p><p><a class='btn accent' href='#register-agent'>Register your agent →</a><a class='btn dark' href='/docs/agent-payjent-self-setup.md'>Read setup guide</a></p></div><div class='runbook mono'><div><b>1</b> Sign in to dashboard</div><div><b>2</b> Register stable bot_id and generate install link</div><div><b>3</b> Agent redeems link once</div><div><b>4</b> Send setup guide to agent</div><div><b>5</b> Configure Stripe Connect, x402, and integration snippets on agent detail</div><div><b>6</b> Confirm approval gate resumes exact action</div></div></div></section><div class='kpi-row'><div class='kpi'><div class='lbl'>Agents</div><div class='stat'>{len(agents)}</div><p class='fine'>Registered identities</p></div><div class='kpi'><div class='lbl'>Paid action volume</div><div class='stat small'>{_format_money_totals(paid_totals)}</div><p class='fine'>Grouped by currency from recent paid / fulfilled quotes.</p></div><div class='kpi'><div class='lbl'>Downstream spend</div><div class='stat small'>{_format_money_totals(spend_totals)}</div><p class='fine'>Authorized or captured ledger</p></div><div class='kpi'><div class='lbl'>Recent requests</div><div class='stat'>{len(quotes)}</div><p class='fine'>Latest action quotes</p></div></div>{launch_checklist}{preset_readiness}{lifecycle_overview}<div class='dash-layout'><section class='panel'><div class='ph'><h3>Agent-owner quickstart</h3><span class='sub'>latest quotes</span></div><div class='pb flat'>{interactions}</div></section><aside class='panel' id='register-agent'><div class='ph'><h3>Register agent</h3><span class='sub'>install link generated</span></div><div class='pb'><p class='muted'>Use this authenticated form. Payjent will generate a short-lived, single-use Agent Install Link. The raw credential is returned only when the agent redeems that link once.</p>{register_form}<p class='fine'>Do not paste raw credentials in chat; share only the install link with the target agent.</p></div></aside><section class='panel'><div class='ph'><h3>Registered agents</h3><span class='sub'>{len(agents)} total</span></div><div class='pb grid compact'>{cards}</div>{deleted_section}</section><aside class='panel'><div class='ph'><h3>Policy defaults</h3><span class='sub'>workspace</span></div><div class='pb'>{_policy_defaults_html()}</div></aside><section class='panel'><div class='ph'><h3>Spend reasoning trail</h3><span class='sub'>reason → vendor → amount</span></div><div class='pb flat'>{spend_events}</div></section><section class='panel wide'><div class='ph'><h3>Paid-action lifecycle ledger</h3><span class='sub'>quote → payment → grant → fulfillment</span></div><div class='pb'><table><thead><tr><th>Action</th><th>Quote</th><th>Payment</th><th>Grant</th><th>Fulfillment</th><th>Spend</th></tr></thead><tbody>{_lifecycle_rows(session, quotes)}</tbody></table></div></section></div></main></body></html>"""
 
 
 
@@ -2026,6 +2083,53 @@ def dashboard_delete_agent(agent_id: str, request: Request, session: Session = D
     invalidated = _invalidate_agent_install_links(session, agent)
     session.commit()
     return JSONResponse({"agent_id": agent.id, "bot_id": agent.bot_id, "status": agent.status, "credentials_revoked": revoked, "install_links_invalidated": invalidated})
+
+
+def _require_owned_payment_session(payment_session_id: str, account: Account, session: Session) -> tuple[PaymentSession, Quote, AgentProfile]:
+    ps = session.get(PaymentSession, payment_session_id)
+    if not ps:
+        raise HTTPException(404, "payment session not found")
+    q = session.get(Quote, ps.quote_id)
+    if not q:
+        raise HTTPException(404, "quote not found")
+    agent = session.exec(select(AgentProfile).where(AgentProfile.bot_id == q.bot_id)).first()
+    if not agent or agent.owner_id != account.id:
+        raise HTTPException(404, "payment session not found")
+    return ps, q, agent
+
+
+@app.post("/dashboard/payment-sessions/{payment_session_id}/refund")
+async def dashboard_request_refund(payment_session_id: str, request: Request, session: Session = Depends(get_session), settings: Settings = Depends(get_settings)):
+    account = _require_dashboard_account(request, session, settings)
+    if isinstance(account, RedirectResponse):
+        return account
+    ps, q, agent = _require_owned_payment_session(payment_session_id, account, session)
+    existing = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == q.id, FulfillmentEvent.status.in_(["refunded", "refund_requested"]))).first()
+    if ps.status in {"refunded", "refund_pending"} or q.status in {"refunded", "refund_requested"} or existing:
+        return RedirectResponse(f"/dashboard/agents/{agent.id}", status_code=303)
+    ev_status = "refund_requested"
+    metadata = {"provider": ps.provider, "payment_session_id": ps.id, "source": "dashboard", "support_required": True}
+    if ps.provider == "stripe" and ps.status == "paid" and q.status == "failed" and settings.stripe_secret_key:
+        try:
+            refund_id, refund_status = create_stripe_refund(ps, q, settings, reason="dashboard_failed_action")
+            ev_status = "refunded"
+            ps.status = "refunded"
+            q.status = "refunded"
+            metadata = {"provider": "stripe", "refund_status": refund_status, "payment_session_id": ps.id, "source": "dashboard"}
+            if refund_id:
+                metadata["refund_id"] = refund_id
+        except Exception:
+            session.rollback()
+            ps, q, agent = _require_owned_payment_session(payment_session_id, account, session)
+            ps.status = "refund_pending"
+            q.status = "refund_requested"
+    else:
+        ps.status = "refund_pending"
+        q.status = "refund_requested"
+    session.add(ps); session.add(q)
+    session.add(FulfillmentEvent(id=f"ful_{uuid4().hex}", quote_id=q.id, status=ev_status, metadata_json=metadata))
+    session.commit()
+    return RedirectResponse(f"/dashboard/agents/{agent.id}", status_code=303)
 
 
 def _enforce_stripe_checkout_guardrails(settings: Settings) -> None:

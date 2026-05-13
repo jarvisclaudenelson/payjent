@@ -4,7 +4,7 @@ from payjent.auth import hash_api_key
 from payjent.config import Settings, get_settings
 from payjent.db import get_session
 from payjent.main import app
-from payjent.models import Account, AgentProfile, BotCredential, PaymentSession, Quote, RailConnection, SpendLedgerEntry
+from payjent.models import Account, AgentProfile, BotCredential, FulfillmentEvent, PaymentSession, Quote, RailConnection, SpendLedgerEntry
 
 
 def _register(client, operator_headers):
@@ -275,3 +275,55 @@ def test_production_stripe_connect_start_fails_closed(client, operator_headers):
         app.dependency_overrides.pop(get_settings, None)
     assert r.status_code == 503
     assert "refusing to simulate" in r.text
+
+
+def test_dashboard_refund_request_is_tenant_scoped_and_idempotent(client, engine):
+    assert client.post("/auth/register", data={"email": "refund-a@example.com", "password": "correct-horse"}, follow_redirects=False).status_code == 303
+    client.post("/dashboard/agents/register", data={"name": "Refund A", "platform": "discord", "bot_id": "refund-a-bot", "default_currency": "USD"})
+    with Session(engine) as session:
+        session.add(Quote(id="quote_refund_a", bot_id="refund-a-bot", external_user_id="user", request_summary="failed premium work", request_hash="hash-refund-a", amount_minor=500, currency="USD", cost_breakdown=[{"label": "work", "amount_minor": 500}], quote_hash="qh-refund-a", status="failed"))
+        session.add(PaymentSession(id="ps_refund_a", quote_id="quote_refund_a", provider="mock", status="paid", checkout_url="https://pay.example/checkout"))
+        session.commit()
+    dashboard = client.get("/dashboard")
+    assert "Needs support" in dashboard.text
+    assert "Request refund" in dashboard.text
+    assert "/status/ps_refund_a" in dashboard.text
+
+    client.post("/auth/logout", follow_redirects=False)
+    assert client.post("/auth/register", data={"email": "refund-b@example.com", "password": "correct-horse"}, follow_redirects=False).status_code == 303
+    forbidden = client.post("/dashboard/payment-sessions/ps_refund_a/refund", follow_redirects=False)
+    assert forbidden.status_code == 404
+    with Session(engine) as session:
+        assert session.get(PaymentSession, "ps_refund_a").status == "paid"
+        assert session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == "quote_refund_a")).all() == []
+
+    client.post("/auth/logout", follow_redirects=False)
+    assert client.post("/auth/login", data={"email": "refund-a@example.com", "password": "correct-horse"}, follow_redirects=False).status_code == 303
+    first = client.post("/dashboard/payment-sessions/ps_refund_a/refund", follow_redirects=False)
+    second = client.post("/dashboard/payment-sessions/ps_refund_a/refund", follow_redirects=False)
+    assert first.status_code == 303
+    assert second.status_code == 303
+    with Session(engine) as session:
+        ps = session.get(PaymentSession, "ps_refund_a")
+        q = session.get(Quote, "quote_refund_a")
+        events = session.exec(select(FulfillmentEvent).where(FulfillmentEvent.quote_id == "quote_refund_a", FulfillmentEvent.status == "refund_requested")).all()
+        assert ps.status == "refund_pending"
+        assert q.status == "refund_requested"
+        assert len(events) == 1
+    dashboard = client.get("/dashboard")
+    assert "Refund requested" in dashboard.text
+
+
+def test_dashboard_premium_preset_readiness_cards_are_safe(client, monkeypatch):
+    monkeypatch.setenv("PAYJENT_EXA_API_KEY", "exa_SECRET_SHOULD_NOT_LEAK")
+    app.dependency_overrides[get_settings] = lambda: Settings(exa_api_key="exa_SECRET_SHOULD_NOT_LEAK")
+    try:
+        assert client.post("/auth/register", data={"email": "preset@example.com", "password": "correct-horse"}, follow_redirects=False).status_code == 303
+        dashboard = client.get("/dashboard")
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+    assert dashboard.status_code == 200
+    for copy in ["Premium preset readiness", "Exa", "ElevenLabs", "Replicate", "Browserbase", "connect provider credentials in its private runtime/settings"]:
+        assert copy in dashboard.text
+    for forbidden in ["exa_SECRET_SHOULD_NOT_LEAK", "EXA_API_KEY", "ELEVENLABS_API_KEY", "BROWSERBASE_API_KEY", "REPLICATE_API_TOKEN", "provider_session_id"]:
+        assert forbidden not in dashboard.text

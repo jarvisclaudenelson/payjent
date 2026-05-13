@@ -305,3 +305,35 @@ def test_sdk_helper_methods_use_expected_http_calls():
     assert sdk.record_fulfillment("quote_1", "fulfilled")["status"] == "fulfilled"
     assert all(call[2] == "Bearer bot-key" for call in calls if call[1] != "/api/v1/quotes/quote_1")
     assert ("POST", "/api/v1/quotes/quote_1/checkout", "Bearer bot-key", "idem-1") in calls
+
+
+def test_healthz_retries_transient_db_failure():
+    from payjent.main import healthz
+
+    class Bind:
+        class Dialect:
+            name = "postgresql"
+        dialect = Dialect()
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+            self.rollbacks = 0
+        def get_bind(self):
+            return Bind()
+        def exec(self, _stmt):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("cold connection")
+            class Result:
+                def one(self):
+                    return 1
+            return Result()
+        def rollback(self):
+            self.rollbacks += 1
+
+    session = FakeSession()
+    body = healthz(session)
+    assert body == {"status": "ok", "database": {"ok": True, "backend": "postgresql"}}
+    assert session.calls == 2
+    assert session.rollbacks == 1
