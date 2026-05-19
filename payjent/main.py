@@ -3478,7 +3478,10 @@ def _validate_stripe_paid_event(session: Session, ps: PaymentSession, data_objec
 
 
 def _decal_session_object(payload: dict) -> dict:
-    return payload.get("session", payload) if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    session_object = payload.get("checkoutSession") or payload.get("session") or payload
+    return session_object if isinstance(session_object, dict) else {}
 
 
 def _decal_amount_paid_minor(session_object: dict) -> int | None:

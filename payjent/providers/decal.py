@@ -113,8 +113,8 @@ def create_decal_checkout_session(
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=_safe_decal_error(exc, "checkout session creation")) from exc
-    provider_session_id = _response_value(created, "id") or _response_value(created, "session", "id")
-    hosted_url = _response_value(created, "url") or _response_value(created, "session", "url")
+    provider_session_id = _response_value(created, "checkoutSession", "id") or _response_value(created, "id") or _response_value(created, "session", "id")
+    hosted_url = _response_value(created, "checkoutSession", "url") or _response_value(created, "url") or _response_value(created, "session", "url")
     if not provider_session_id or not hosted_url:
         raise HTTPException(status_code=502, detail="Decal checkout session response missing id or url")
     return str(provider_session_id), str(hosted_url)

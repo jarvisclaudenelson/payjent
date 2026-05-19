@@ -759,6 +759,27 @@ def test_decal_adapter_builds_checkout_payload_and_urls():
     assert calls["payload"]["paymentDestination"] == "wallet_123"
 
 
+def test_decal_adapter_reads_checkout_session_response_envelope():
+    quote = Quote(id="quote_decal_envelope", bot_id="bot-1", external_user_id="user-1", request_summary="decal work", request_hash="hash", amount_minor=250, currency="USD", cost_breakdown=[{"label":"work","amount_minor":250}], quote_hash="qh")
+    payment_session = PaymentSession(id="ps_decal_envelope", quote_id=quote.id, provider="decal")
+
+    class FakeDecalClient:
+        def create_checkout_session(self, payload, idempotency_key):
+            return {"checkoutSession": {"id": "dcs_enveloped", "url": "https://checkout.usedecal.test/enveloped"}}
+        def retrieve_checkout_session(self, session_id):
+            raise AssertionError("not used")
+
+    provider_session_id, url = create_decal_checkout_session(
+        quote,
+        payment_session,
+        Settings(decal_api_key="decal_test", public_base_url="https://payjent.example", decal_payment_destination="wallet_123"),
+        client=FakeDecalClient(),
+    )
+
+    assert provider_session_id == "dcs_enveloped"
+    assert url == "https://checkout.usedecal.test/enveloped"
+
+
 def test_production_decal_checkout_requires_payment_destination():
     quote = Quote(id="quote_decal_no_destination", bot_id="bot-1", external_user_id="user-1", request_summary="decal work", request_hash="hash", amount_minor=1, currency="USD", cost_breakdown=[{"label":"work","amount_minor":1}], quote_hash="qh")
     payment_session = PaymentSession(id="ps_decal_no_destination", quote_id=quote.id, provider="decal")
@@ -810,7 +831,7 @@ def test_decal_success_status_redirect_verifies_and_issues_grant(client, quote_p
     app.dependency_overrides[get_settings] = lambda: Settings(checkout_provider="decal", decal_api_key="decal_test", decal_payment_destination="wallet_123", public_base_url="https://payjent.example")
     monkeypatch.setattr(main_module, "create_decal_checkout_session", lambda *_: ("dcs_success", "https://checkout.usedecal.test/session"))
     _, ps = _checkout(client, quote_payload, bot_headers)
-    verified = {"id": "dcs_success", "order": {"currency": "USD", "paymentStatus": "paid", "amounts": {"total": 250, "paid": 250}}}
+    verified = {"checkoutSession": {"id": "dcs_success", "order": {"currency": "USD", "paymentStatus": "paid", "amounts": {"total": 250, "paid": 250}}}}
     calls = []
     monkeypatch.setattr(main_module, "retrieve_decal_checkout_session", lambda session_id, settings: calls.append(session_id) or verified)
 
