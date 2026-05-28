@@ -640,6 +640,59 @@ def run_paid_action_with_client(client: Any, *, bot_id: str, bot_key: str, opera
     return {"action": action, "payment": paid, "started": started, "result_text": result_text, "completed": completed}
 
 
+def run_fal_image_demo_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
+    """Exercise ask -> exact quote -> payment -> Payjent-managed FAL execution -> artifact evidence."""
+    import payjent.main as main_module
+
+    bot_headers = {"X-Payjent-Bot-Key": bot_key}
+    operator_headers = {"X-Payjent-Bot-Key": operator_key}
+    arguments = {"prompt": "a friendly robot paying for an API call", "image_size": "square", "num_images": 1}
+    payload = {
+        "bot_id": bot_id,
+        "external_user_id": DEFAULT_EXTERNAL_USER_ID,
+        "arguments": arguments,
+        "amount_minor": 80,
+        "currency": "USD",
+        "cost_breakdown": [{"label": "FAL runtime quote supplied by agent", "amount_minor": 80}],
+    }
+    original_run = main_module.run_fal_image_generate
+
+    def fake_run_fal_image_generate(received_arguments: dict[str, Any], *, api_key: str | None) -> dict[str, Any]:
+        assert received_arguments == arguments
+        return {
+            "provider": "fal",
+            "tool_id": "fal.image.generate",
+            "image_count": 1,
+            "images": [{"mime_type": "image/png", "content_bytes": b"payjent-demo-image-bytes"}],
+        }
+
+    main_module.run_fal_image_generate = fake_run_fal_image_generate
+    try:
+        quote = _raise_for_demo_response(client.post("/api/v1/toolbox/fal.image.generate/quote", json=payload, headers=bot_headers), "quote FAL image action")
+        checkout = _raise_for_demo_response(
+            client.post(
+                "/api/v1/toolbox/fal.image.generate/checkout",
+                json=payload,
+                headers={**bot_headers, "Idempotency-Key": "payjent-demo-fal-image-1"},
+            ),
+            "create FAL image checkout",
+        )
+        paid = _raise_for_demo_response(client.post(f"/api/v1/payment-sessions/{checkout['payment_session']['id']}/mock-pay", headers=operator_headers), "operator mock pay")
+        execution = _raise_for_demo_response(
+            client.post(
+                "/api/v1/toolbox/fal.image.generate/executions",
+                json={**payload, "quote_id": checkout["quote"]["id"], "payment_session_id": checkout["payment_session"]["id"]},
+                headers=bot_headers,
+            ),
+            "create FAL image execution",
+        )
+        run = _raise_for_demo_response(client.post(f"/api/v1/toolbox/executions/{execution['id']}/run", headers=bot_headers), "run FAL image execution")
+        artifacts = _raise_for_demo_response(client.get(f"/api/v1/toolbox/executions/{execution['id']}/artifacts", headers=bot_headers), "list FAL image artifacts")
+    finally:
+        main_module.run_fal_image_generate = original_run
+    return {"quote": quote, "checkout": checkout, "payment": paid, "execution": execution, "run": run, "artifacts": artifacts}
+
+
 def run_pay_sh_action_with_client(client: Any, *, bot_id: str, bot_key: str, operator_key: str) -> dict[str, Any]:
     """Create a Payjent-gated pay.sh action and return the post-payment envelope."""
     bot_headers = {"X-Payjent-Bot-Key": bot_key}
@@ -935,6 +988,24 @@ def print_paid_action_summary(result: dict[str, Any]) -> None:
     print(f"final_status={result['completed']['status']}")
 
 
+def print_fal_image_demo_summary(result: dict[str, Any]) -> None:
+    checkout = result["checkout"]
+    run = result["run"]
+    artifact_count = len(result["artifacts"]["artifacts"])
+    print("Payjent managed FAL image demo completed.")
+    print("FLOW: agent ask -> exact FAL runtime quote -> Payjent checkout -> mock pay -> managed FAL run -> artifact evidence")
+    print("tool_id=fal.image.generate")
+    print("pricing_source=agent_runtime_exact_quote")
+    print(f"quote_amount_minor={result['quote']['amount_minor']}")
+    print(f"recommended_payment_rail={result['quote']['recommended_payment_rail']}")
+    print(f"payment_session_id={checkout['payment_session']['id']}")
+    print(f"payment_url={checkout['payment_url']}")
+    print(f"execution_id={run['id']}")
+    print(f"execution_status={run['status']}")
+    print(f"artifact_count={artifact_count}")
+    print("dev_note=local demo uses operator mock payment and a deterministic fake FAL adapter; production requires Decal payment plus PAYJENT_FAL_API_KEY.")
+
+
 def print_pay_sh_action_summary(result: dict[str, Any]) -> None:
     envelope = result["started"]["execution_envelope"]
     print("Payjent pay.sh premium action demo completed.")
@@ -1062,6 +1133,11 @@ def build_parser() -> argparse.ArgumentParser:
     paid_action.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
     paid_action.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
     paid_action.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
+
+    fal_image = sub.add_parser("fal-image-demo", help="run the canonical Payjent-managed FAL image quote/payment/execution demo")
+    fal_image.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
+    fal_image.add_argument("--bot-key", default=os.getenv("PAYJENT_BOT_KEY"))
+    fal_image.add_argument("--operator-key", default=os.getenv("PAYJENT_OPERATOR_KEY"))
 
     pay_sh_action = sub.add_parser("pay-sh-action", help="run a local Payjent-gated pay.sh premium action demo without executing paycurl")
     pay_sh_action.add_argument("--bot-id", default=os.getenv("PAYJENT_DEMO_BOT_ID", DEFAULT_BOT_ID))
@@ -1201,6 +1277,25 @@ def main(argv: list[str] | None = None) -> int:
                 operator_key = args.operator_key or credentials.operator_key
                 result = run_paid_action_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
         print_paid_action_summary(result)
+        return 0
+    if args.command == "fal-image-demo":
+        if "PAYJENT_DATABASE_URL" in os.environ:
+            init_db()
+            credentials = seed_credentials(bot_id=args.bot_id) if not args.bot_key or not args.operator_key else None
+            bot_key = args.bot_key or credentials.bot_key
+            operator_key = args.operator_key or credentials.operator_key
+            with TestClient(app) as client:
+                result = run_fal_image_demo_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        else:
+            with _isolated_demo_session() as (client, temp_engine):
+                credentials = None
+                if not args.bot_key or not args.operator_key:
+                    with Session(temp_engine) as session:
+                        credentials = seed_credentials(session=session, bot_id=args.bot_id)
+                bot_key = args.bot_key or credentials.bot_key
+                operator_key = args.operator_key or credentials.operator_key
+                result = run_fal_image_demo_with_client(client, bot_id=args.bot_id, bot_key=bot_key, operator_key=operator_key)
+        print_fal_image_demo_summary(result)
         return 0
     if args.command == "pay-sh-action":
         if "PAYJENT_DATABASE_URL" in os.environ:

@@ -58,6 +58,45 @@ def test_demo_run_flow_with_testclient(engine):
     assert result["fulfillment"]["status"] == "fulfilled"
 
 
+def test_demo_fal_image_flow_uses_exact_quote_and_artifact_evidence(engine, capsys):
+    with Session(engine) as session:
+        credentials = demo.seed_credentials(session=session, bot_id="demo-fal-bot")
+
+    def override_session():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        with TestClient(app) as client:
+            result = demo.run_fal_image_demo_with_client(
+                client,
+                bot_id=credentials.bot_id,
+                bot_key=credentials.bot_key,
+                operator_key=credentials.operator_key,
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert result["quote"]["tool_id"] == "fal.image.generate"
+    assert result["quote"]["amount_minor"] == 80
+    assert result["quote"]["recommended_payment_rail"] == "decal"
+    assert result["checkout"]["status"] == "checkout_created"
+    assert result["execution"]["status"] == "ready_to_execute"
+    assert result["run"]["status"] == "succeeded"
+    assert result["run"]["result_metadata_json"]["image_count"] == 1
+    assert len(result["artifacts"]["artifacts"]) == 1
+
+    demo.print_fal_image_demo_summary(result)
+    output = capsys.readouterr().out
+    assert "Payjent managed FAL image demo completed." in output
+    assert "pricing_source=agent_runtime_exact_quote" in output
+    assert "recommended_payment_rail=decal" in output
+    assert "execution_status=succeeded" in output
+    assert "artifact_count=1" in output
+    assert "PAYJENT_FAL_API_KEY" in output
+
+
 def test_demo_link_purchase_uses_fake_link_and_prints_boundary(engine, capsys):
     with Session(engine) as session:
         credentials = demo.seed_credentials(session=session, bot_id="demo-link-bot")

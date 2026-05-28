@@ -67,9 +67,12 @@ To demo the first-class paid agent action API surface with no env keys, running 
 
 ```bash
 python -m payjent.demo paid-action
+python -m payjent.demo fal-image-demo
 ```
 
-This calls `/api/v1/agent-actions` to create a quote and checkout in one bot-authenticated request, prints `action_id`, `payment_url`, and a user-facing payment prompt, completes local dev mock payment, consumes the returned `payment_token` for that exact action/request hash, resumes the stored execution envelope, and records completion. MVP note: `action_id` is currently an alias for the underlying `quote_id` so the existing quote/grant request-hash binding is preserved without a migration.
+`fal-image-demo` is the canonical local market demo for Payjent-managed execution: an agent supplies an exact FAL runtime quote, Payjent creates the checkout, local mock payment authorizes the request, the managed FAL adapter runs deterministically without network access, and Payjent records artifact evidence. In production the same flow should use Decal checkout plus `PAYJENT_FAL_API_KEY`; do not hard-code FAL prices in tool metadata.
+
+`paid-action` calls `/api/v1/agent-actions` to create a quote and checkout in one bot-authenticated request, prints `action_id`, `payment_url`, and a user-facing payment prompt, completes local dev mock payment, consumes the returned `payment_token` for that exact action/request hash, resumes the stored execution envelope, and records completion. MVP note: `action_id` is currently an alias for the underlying `quote_id` so the existing quote/grant request-hash binding is preserved without a migration.
 
 ## Payjent-managed FAL image generation
 
