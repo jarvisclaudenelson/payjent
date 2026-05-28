@@ -186,6 +186,11 @@ def decal_checkout_doc():
     return _docs_file_response("decal-checkout.md")
 
 
+@app.get("/docs/agent-spend-control-positioning.md", response_class=FileResponse)
+def agent_spend_control_positioning_doc():
+    return _docs_file_response("agent-spend-control-positioning.md")
+
+
 @app.get("/docs/c3po-payjent-self-setup.md", response_class=FileResponse)
 def c3po_payjent_self_setup_doc_redirect():
     return RedirectResponse("/docs/agent-payjent-self-setup.md", status_code=308)
@@ -195,7 +200,7 @@ def c3po_payjent_self_setup_doc_redirect():
 
 @app.get("/docs", response_class=HTMLResponse)
 def docs_index():
-    return HTMLResponse("""<!doctype html><html><head><title>Payjent docs</title><meta name='viewport' content='width=device-width,initial-scale=1'></head><body><main style='font-family:system-ui;max-width:760px;margin:48px auto;padding:0 20px'><h1>Payjent agent setup</h1><p>Agent-readable setup guide for integrating paid action approvals.</p><p><a href='/docs/agent-payjent-self-setup.md'>Open /docs/agent-payjent-self-setup.md</a></p></main></body></html>""")
+    return HTMLResponse("""<!doctype html><html><head><title>Payjent docs</title><meta name='viewport' content='width=device-width,initial-scale=1'></head><body><main style='font-family:system-ui;max-width:760px;margin:48px auto;padding:0 20px'><h1>Payjent agent setup</h1><p>Agent-readable setup guide for integrating paid action approvals.</p><ul><li><a href='/docs/agent-payjent-self-setup.md'>Open /docs/agent-payjent-self-setup.md</a></li><li><a href='/docs/agent-spend-control-positioning.md'>Open /docs/agent-spend-control-positioning.md</a> — spend-control positioning for Zero-like discovery and paid tool activation layers.</li></ul></main></body></html>""")
 
 
 _EXACT_PRICING_POLICY = {
@@ -3478,7 +3483,10 @@ def _validate_stripe_paid_event(session: Session, ps: PaymentSession, data_objec
 
 
 def _decal_session_object(payload: dict) -> dict:
-    return payload.get("session", payload) if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    session_object = payload.get("checkoutSession") or payload.get("session") or payload
+    return session_object if isinstance(session_object, dict) else {}
 
 
 def _decal_amount_paid_minor(session_object: dict) -> int | None:

@@ -1,6 +1,6 @@
 # Payjent
 
-Payjent v0 is a small FastAPI gateway skeleton for paid, bounded bot requests: quote -> checkout -> mock payment -> signed receipt/grant -> consume -> fulfillment.
+Payjent is an agent spend-control and payment authorization service for paid, bounded agent actions: exact quote -> hosted checkout or funded budget -> signed receipt/grant -> request-bound execution -> fulfillment/refund evidence.
 
 Payjent is the paid action control plane for quotes, checkout, grants, runtime-priced toolbox execution records, and spend authorization; it is not the card or payment rail itself. User funding, Decal checkout, x402-style paid calls, Link one-time credentials, legacy Stripe checkout, and card credentials are downstream rails under the same bounded grant and spend ledger model.
 
@@ -9,6 +9,8 @@ Payjent is the paid action control plane for quotes, checkout, grants, runtime-p
 ## Agent owner quickstart (10 minutes)
 
 Pricing safety rule for installed agents: before creating a Payjent paid action, the agent must obtain the exact provider/merchant quoted price and send a matching `cost_breakdown`. It must not use placeholder/default/test amounts such as `$1.00` or `100` minor units. If the exact quote is unknown, the agent should not create the paid action and should tell the user Payjent is awaiting an exact provider quote.
+
+If you are comparing Payjent with Zero-like agent discovery or paid API activation tools, see [`docs/agent-spend-control-positioning.md`](docs/agent-spend-control-positioning.md). Payjent is not a generic tool search engine; it is the spend-control/payment authorization layer for exact quotes, human-funded budgets, request-bound grants, spend ledgers, and fulfillment/refund evidence around external provider execution.
 
 If you own an agent and want to gate a premium action, start here:
 

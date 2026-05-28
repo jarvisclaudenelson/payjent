@@ -1,7 +1,7 @@
 [project]
 name = "payjent"
 version = "0.1.0"
-description = "Mock paid-request gateway skeleton"
+description = "Agent spend-control and payment authorization service"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.110",
